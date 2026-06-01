@@ -1,0 +1,71 @@
+bundle:
+  name: databricks-quest
+
+variables:
+  warehouse_id:
+    description: SQL Warehouse ID for the Quest app (find in SQL Warehouses page)
+  quest_catalog:
+    description: Unity Catalog name for Quest data (must already exist)
+  quest_schema:
+    description: Schema name for Quest scored tables (auto-created by scoring pipeline)
+    default: quest
+
+resources:
+  apps:
+    databricks_quest:
+      name: databricks-quest
+      description: "Databricks Quest - Gamification app for platform adoption"
+      source_code_path: ./app
+      config:
+        command:
+          - uvicorn
+          - main:app
+          - --host
+          - 0.0.0.0
+          - --port
+          - "8000"
+        env:
+          - name: DATABRICKS_WAREHOUSE_ID
+            value: ${var.warehouse_id}
+          - name: QUEST_CATALOG
+            value: ${var.quest_catalog}
+          - name: QUEST_SCHEMA
+            value: ${var.quest_schema}
+      resources:
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+
+  jobs:
+    quest_scoring_pipeline:
+      name: "[Quest] Scoring Pipeline"
+      description: "Reads system tables, computes missions, points, badges, and leaderboards"
+      schedule:
+        quartz_cron_expression: "0 0 */4 * * ?"
+        timezone_id: UTC
+      tasks:
+        - task_key: run_scoring
+          notebook_task:
+            notebook_path: ./notebooks/scoring_pipeline.py
+            base_parameters:
+              quest_catalog: ${var.quest_catalog}
+              quest_schema: ${var.quest_schema}
+            source: WORKSPACE
+          environment_key: default
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://YOUR_WORKSPACE.cloud.databricks.com
+
+  prod:
+    mode: production
+    workspace:
+      host: https://YOUR_WORKSPACE.cloud.databricks.com
