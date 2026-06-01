@@ -14,9 +14,11 @@
 
 dbutils.widgets.text("quest_catalog", "your_catalog", "Quest Catalog Name")
 dbutils.widgets.text("quest_schema", "quest", "Quest Schema Name")
+dbutils.widgets.text("app_name", "databricks-quest", "Databricks App Name (for auto-granting permissions)")
 
 CATALOG = dbutils.widgets.get("quest_catalog")
 SCHEMA = dbutils.widgets.get("quest_schema")
+APP_NAME = dbutils.widgets.get("app_name")
 
 def tbl(name):
     return f"`{CATALOG}`.`{SCHEMA}`.`{name}`"
@@ -27,9 +29,11 @@ print(f"Quest output: {CATALOG}.{SCHEMA}")
 
 # MAGIC %md
 # MAGIC ## Step 1: Create Catalog, Schema, and Tables
+# MAGIC Auto-creates the catalog and schema if they don't exist.
 
 # COMMAND ----------
 
+spark.sql(f"CREATE CATALOG IF NOT EXISTS `{CATALOG}`")
 spark.sql(f"USE CATALOG `{CATALOG}`")
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`")
 
@@ -850,6 +854,34 @@ WHEN MATCHED AND target.badge_count != source.badge_count
 """)
 
 print("Badge counts synced to profiles.")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 10b: Auto-Grant Permissions to App Service Principal
+# MAGIC Looks up the Databricks App's service principal and grants it read access
+# MAGIC to the Quest catalog and schema. This runs every time so new users don't
+# MAGIC need to manually run SQL grants.
+
+# COMMAND ----------
+
+from databricks.sdk import WorkspaceClient
+
+try:
+    w = WorkspaceClient()
+    app_info = w.apps.get(APP_NAME)
+    sp_name = app_info.service_principal_name
+    if sp_name:
+        print(f"App service principal: {sp_name}")
+        spark.sql(f"GRANT USE_CATALOG ON CATALOG `{CATALOG}` TO `{sp_name}`")
+        spark.sql(f"GRANT USE_SCHEMA ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp_name}`")
+        spark.sql(f"GRANT SELECT ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp_name}`")
+        print(f"Permissions granted to {sp_name} on {CATALOG}.{SCHEMA}")
+    else:
+        print(f"Warning: Could not find service principal name for app '{APP_NAME}'")
+except Exception as e:
+    print(f"Warning: Auto-grant failed (non-fatal): {e}")
+    print("You may need to manually grant permissions. See SETUP.md Step 7.")
 
 # COMMAND ----------
 
