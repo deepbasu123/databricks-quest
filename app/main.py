@@ -331,7 +331,7 @@ async def get_leaderboard(period: str = "all"):
                    level, all_time_rank, weekly_rank, monthly_rank
             FROM leaderboard
             ORDER BY {order_col} ASC
-            LIMIT 100
+            LIMIT 10
             """
         )
         return {"leaderboard": rows, "period": period}

@@ -80,6 +80,7 @@ export default function Leaderboard() {
           {[sorted[1], sorted[0], sorted[2]].map((entry, i) => {
             const rank = [2, 1, 3][i]
             const pts = getPoints(entry)
+            const prize = rank === 1 ? 'Hoodie / T-Shirt' : rank === 2 ? 'Cup / Bottle / Notebook' : 'Stickers'
             return (
               <div
                 key={entry.user_id}
@@ -101,6 +102,9 @@ export default function Leaderboard() {
                 <span className={`inline-block mt-2 text-xs px-2 py-0.5 rounded-full border ${LEVEL_BADGE[entry.level] || LEVEL_BADGE.Bronze}`}>
                   {entry.level}
                 </span>
+                <p className={`text-xs mt-2 font-medium ${rank === 1 ? 'text-yellow-400' : rank === 2 ? 'text-slate-400' : 'text-amber-600'}`}>
+                  {prize}
+                </p>
               </div>
             )
           })}
