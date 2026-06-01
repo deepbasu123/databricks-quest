@@ -1,53 +1,37 @@
-# Databricks Quest - Setup Guide
+# Databricks Quest - Deployment Guide
 
-Step-by-step instructions to deploy Databricks Quest on your workspace. No prior Databricks experience needed.
+Deploy Databricks Quest on your workspace in about 10 minutes. This guide walks you through every step. No prior Databricks experience needed.
 
-## What You'll Need
+---
 
-Before starting, make sure you have:
+## Prerequisites
 
-1. **A Databricks workspace** with Unity Catalog enabled
-   - If you don't have one, sign up at [databricks.com](https://www.databricks.com/try-databricks) for a free trial
-   - Unity Catalog is enabled by default on new workspaces
+You need five things before you start. If any of these are missing, get them sorted first.
 
-2. **System tables enabled** on your workspace
-   - System tables are read-only tables that Databricks provides with usage data about your workspace
-   - They live in the `system` catalog (e.g. `system.billing.usage`, `system.lakeflow.jobs`)
-   - If you don't see a `system` catalog in your workspace, ask your workspace admin to enable system tables
-   - Docs: [Databricks system tables](https://docs.databricks.com/en/administration-guide/system-tables/index.html)
+| # | What | How to check / get it |
+|---|------|-----------------------|
+| 1 | **Databricks workspace** with Unity Catalog | Log in at your workspace URL. Unity Catalog is on by default for new workspaces. Don't have one? [Free trial](https://www.databricks.com/try-databricks). |
+| 2 | **System tables enabled** | In your workspace, open the SQL editor and run `SELECT * FROM system.billing.usage LIMIT 1`. If it returns a row, you're good. If not, ask your workspace admin to [enable system tables](https://docs.databricks.com/en/administration-guide/system-tables/index.html). |
+| 3 | **Databricks CLI v0.200+** | Run `databricks --version`. If it's missing or too old: macOS `brew install databricks/tap/databricks`, Linux/Windows `curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh \| sh`. [Docs](https://docs.databricks.com/en/dev-tools/cli/install.html). |
+| 4 | **Node.js 18+** | Run `node --version`. If missing: [nodejs.org](https://nodejs.org/) or `brew install node`. |
+| 5 | **A SQL Warehouse ID** | In your workspace sidebar, click **SQL Warehouses**. Use an existing warehouse or create a new Serverless one. Open its **Connection Details** tab and copy the **Warehouse ID** (a long hex string like `a1b2c3d4e5f67890`). |
 
-3. **Databricks CLI** installed on your computer
-   - macOS: `brew install databricks/tap/databricks`
-   - Linux/Windows: `curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh`
-   - Verify: `databricks --version` (needs v0.200.0+)
-   - Docs: [Install the Databricks CLI](https://docs.databricks.com/en/dev-tools/cli/install.html)
+You do **not** need to create a catalog or schema in advance. The scoring pipeline handles that automatically.
 
-4. **Node.js 18+** for building the frontend
-   - Download from [nodejs.org](https://nodejs.org/) or use `brew install node`
-   - Verify: `node --version`
+---
 
-5. **A SQL Warehouse** running on your workspace
-   - In your Databricks workspace, go to **SQL Warehouses** in the left sidebar
-   - You can use an existing one or create a new Serverless warehouse
-   - Copy the **Warehouse ID** (you'll need it later) - find it in the warehouse's **Connection Details** tab
-   - Docs: [Create a SQL warehouse](https://docs.databricks.com/en/compute/sql-warehouse/create.html)
-
-6. **A catalog name** for Quest data
-   - Pick a name for the catalog that will hold Quest tables (e.g. `quest_data` or use an existing catalog)
-   - The scoring pipeline will **auto-create** the catalog and schema if they don't exist
-   - It will also **auto-grant** the app's service principal the required permissions
-   - You don't need to create anything manually in advance
-
-## Step 1: Clone the Repository
+## Step 1 — Clone the repo
 
 ```bash
 git clone https://github.com/deepbasu123/databricks-quest.git
 cd databricks-quest
 ```
 
-## Step 2: Configure Your Workspace
+---
 
-Open `databricks.yml` in a text editor. You need to update the `targets` section with your workspace URL:
+## Step 2 — Set your workspace URL
+
+Open `databricks.yml` in any text editor. Find the `targets` section near the bottom and replace the placeholder with your workspace URL:
 
 ```yaml
 targets:
@@ -55,32 +39,39 @@ targets:
     mode: development
     default: true
     workspace:
-      host: https://YOUR_WORKSPACE.cloud.databricks.com
+      host: https://YOUR_WORKSPACE.cloud.databricks.com   # <-- change this
 ```
 
-Replace `https://YOUR_WORKSPACE.cloud.databricks.com` with your actual workspace URL. You can find this in your browser's address bar when you're logged into Databricks (e.g. `https://adb-1234567890.12.azuredatabricks.net` for Azure, or `https://my-workspace.cloud.databricks.com` for AWS).
+Your workspace URL is in your browser's address bar when you're logged in. Examples:
+- AWS: `https://my-workspace.cloud.databricks.com`
+- Azure: `https://adb-1234567890.12.azuredatabricks.net`
+- GCP: `https://1234567890.gcp.databricks.com`
 
-The variables (`warehouse_id`, `quest_catalog`, `lakebase_host`, `lakebase_db`) will be provided at deploy time - you don't need to edit them in the file.
+Save the file. That's the only file you need to edit.
 
-## Step 3: Authenticate with Databricks
+---
 
-Run this command and replace the URL with your workspace URL:
+## Step 3 — Authenticate
+
+Run this command (use your workspace URL from Step 2):
 
 ```bash
 databricks auth login --host https://YOUR_WORKSPACE.cloud.databricks.com
 ```
 
-This opens your browser for login. Sign in with your Databricks credentials. Once done, you'll see a success message in your terminal.
+Your browser opens. Sign in with your Databricks credentials. When you see "Successfully logged in", go back to your terminal.
 
-To verify it worked:
+Verify it worked:
 
 ```bash
 databricks current-user me
 ```
 
-This should show your email and user ID.
+You should see your email and user ID.
 
-## Step 4: Build the Frontend
+---
+
+## Step 4 — Build the frontend
 
 ```bash
 cd frontend
@@ -89,11 +80,13 @@ npm run build
 cd ..
 ```
 
-This installs React dependencies and compiles the frontend into `app/static/`. You should see a "built in X seconds" message.
+This compiles the React app into `app/static/`. You should see output ending with "built in X seconds". If `npm install` fails, delete `frontend/node_modules/` and try again.
 
-## Step 5: Deploy to Your Workspace
+---
 
-Deploy the app, notebook, and scheduled job all at once:
+## Step 5 — Deploy
+
+This single command deploys the app, the scoring notebook, and a scheduled job to your workspace:
 
 ```bash
 databricks bundle deploy --target dev \
@@ -103,157 +96,199 @@ databricks bundle deploy --target dev \
   --var lakebase_db=quest_db
 ```
 
-Replace:
-- `YOUR_WAREHOUSE_ID` with your SQL Warehouse ID (from Step 5 of Prerequisites)
-- `YOUR_CATALOG_NAME` with the catalog you want to use (from Step 6 of Prerequisites)
+Replace these two values:
+- **`YOUR_WAREHOUSE_ID`** — the SQL Warehouse ID you copied in Prerequisites (e.g. `a1b2c3d4e5f67890`)
+- **`YOUR_CATALOG_NAME`** — any name you want (e.g. `quest_data`). The pipeline will create it if it doesn't exist.
 
-Set `lakebase_host` to empty string if you're not using Lakebase (the app will use the SQL warehouse instead).
+Leave `lakebase_host` as an empty string for now. You can add Lakebase later for faster performance (see the optional section below).
 
-This command deploys three things:
-- **The Quest app** - a web application hosted on your Databricks workspace
-- **The scoring pipeline notebook** - uploaded to your workspace files
-- **A scheduled job** - runs the scoring pipeline every 4 hours
+When it finishes, you'll see output listing the deployed resources.
 
-## Step 6: Run the Scoring Pipeline
+> **What just got deployed?**
+> - A **Databricks App** (the web UI, accessible at its own URL)
+> - A **notebook** uploaded to your workspace (the scoring pipeline)
+> - A **scheduled job** that runs the scoring pipeline every 4 hours
 
-The scoring pipeline reads your workspace's system tables and computes all the gamification data. Run it once to populate initial data:
+---
+
+## Step 6 — Run the scoring pipeline
+
+The scoring pipeline reads your workspace's system tables, scores missions, and populates all the data the app needs. Run it once now:
 
 ```bash
 databricks bundle run quest_scoring_pipeline --target dev
 ```
 
-This takes 2-5 minutes. It will:
-- Create a `quest` schema in your catalog
-- Create 6 Delta tables (mission_completions, user_profile_snapshot, leaderboard, badges, notifications, user_points_fact)
-- Score all 10 missions by querying system tables
-- Build user profiles, leaderboards, and badges
-- The scheduled job will re-run this automatically every 4 hours
+This takes 2-5 minutes. Watch the terminal for progress. When it finishes, it will print a summary showing how many users were scored and how many mission completions were found.
 
-## Step 7: Permissions (Automatic)
+The pipeline does all of this automatically:
+- Creates the catalog (if it doesn't exist)
+- Creates a `quest` schema inside the catalog
+- Creates 6 Delta tables
+- Scores all 10 missions by reading system tables
+- Builds user profiles, leaderboards, and badges
+- Grants the app's service principal read access to the Quest tables
+- The scheduled job will re-run all of this every 4 hours going forward
 
-The scoring pipeline **automatically grants** the app's service principal read access to the Quest tables every time it runs. You don't need to do anything manually.
+---
 
-If auto-grant fails (e.g. you don't have admin permissions), you'll see a warning in the pipeline output. In that case, ask your workspace admin to run these SQL commands:
+## Step 7 — Open the app
 
-```sql
--- Replace <your_catalog> and <service_principal_name> with your actual values
--- Find the SP name with: databricks apps get databricks-quest
-GRANT USE_CATALOG ON CATALOG <your_catalog> TO `<service_principal_name>`;
-GRANT USE_SCHEMA ON SCHEMA <your_catalog>.quest TO `<service_principal_name>`;
-GRANT SELECT ON SCHEMA <your_catalog>.quest TO `<service_principal_name>`;
-```
-
-## Step 8: Open the App
-
-Find your app URL:
+Get your app URL:
 
 ```bash
 databricks apps get databricks-quest
 ```
 
-Look for the `url` field (format: `https://databricks-quest-WORKSPACE_ID.cloud.databricksapps.com`).
+Look for the `url` field in the output. It looks like:
+```
+https://databricks-quest-1234567890.cloud.databricksapps.com
+```
 
-Open it in your browser. You'll be redirected to log in with your Databricks workspace credentials. After login, you'll see your Quest dashboard with your current points, missions, and position on the leaderboard.
+Open that URL in your browser. You'll be redirected to log in with your Databricks credentials. After login, you'll see your Quest dashboard.
+
+**That's it. You're done.**
+
+---
+
+## Verifying everything works
+
+If you want to double-check that the app is healthy:
+
+```bash
+# Check app health (should return status: ok, db_connected: true)
+curl -s https://YOUR_APP_URL/api/health | python3 -m json.tool
+
+# Check the scoring job status in your workspace
+databricks jobs list --output json | python3 -c "
+import sys, json
+for j in json.load(sys.stdin)['jobs']:
+    if 'Quest' in j.get('settings',{}).get('name',''):
+        print(f\"Job: {j['settings']['name']}\")
+        print(f\"Job ID: {j['job_id']}\")
+"
+```
+
+---
 
 ## Optional: Lakebase Integration
 
-Lakebase is Databricks' managed PostgreSQL service. Using it makes the app load significantly faster (sub-second responses vs. 2-5 second SQL warehouse queries). This is optional but recommended for production use.
+By default, the app queries a SQL Warehouse to load data. This works fine but responses take 2-5 seconds. **Lakebase** (Databricks' managed PostgreSQL) brings that down to sub-second.
 
-### Set Up Lakebase
+This section is optional. Skip it if you just want to get Quest running.
 
-1. **Create a Lakebase project** (requires Databricks CLI v0.285.0+):
-   ```bash
-   databricks postgres create-project databricks-quest \
-     --json '{"spec": {"display_name": "Databricks Quest"}}' \
-     --no-wait
-   ```
+### Requirements
 
-2. **Wait for it to be ready** (1-2 minutes):
-   ```bash
-   databricks postgres list-endpoints projects/databricks-quest/branches/production
-   ```
-   Wait until `current_state` shows `ACTIVE`. Note the `host` value from the output.
+- Databricks CLI **v0.285.0+** (run `databricks --version`, upgrade with `brew upgrade databricks/tap/databricks`)
+- `psql` client installed (`brew install postgresql@16` on macOS)
 
-3. **Create the database**:
-   ```bash
-   # Get connection details
-   HOST=$(databricks postgres list-endpoints projects/databricks-quest/branches/production \
-     -o json | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['status']['hosts']['host'])")
-   TOKEN=$(databricks postgres generate-database-credential \
-     projects/databricks-quest/branches/production/endpoints/primary -o json \
-     | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
-   EMAIL=$(databricks current-user me -o json | python3 -c "import sys,json; print(json.load(sys.stdin)['userName'])")
+### 1. Create a Lakebase project
 
-   # Create database and tables
-   PGPASSWORD=$TOKEN psql "host=$HOST port=5432 dbname=postgres user=$EMAIL sslmode=require" \
-     -c "CREATE DATABASE quest_db;"
+```bash
+databricks postgres create-project databricks-quest \
+  --json '{"spec": {"display_name": "Databricks Quest"}}' \
+  --no-wait
+```
 
-   PGPASSWORD=$TOKEN psql "host=$HOST port=5432 dbname=quest_db user=$EMAIL sslmode=require" -c "
-   CREATE TABLE mission_completions (
-     user_id TEXT, mission_id TEXT, mission_name TEXT, points_awarded INT,
-     completed_at TIMESTAMP, period_start DATE, period_end DATE, scored_at TIMESTAMP
-   );
-   CREATE TABLE user_points_fact (
-     user_id TEXT, event_type TEXT, mission_id TEXT, points INT,
-     reason TEXT, event_timestamp TIMESTAMP, scored_at TIMESTAMP
-   );
-   CREATE TABLE user_profile_snapshot (
-     user_id TEXT, display_name TEXT, total_points INT, level TEXT,
-     current_streak INT, max_streak INT, badge_count INT, missions_completed INT,
-     first_activity_date DATE, last_activity_date DATE, distinct_products_used INT,
-     updated_at TIMESTAMP
-   );
-   CREATE TABLE leaderboard (
-     user_id TEXT, display_name TEXT, total_points INT, weekly_points INT,
-     monthly_points INT, level TEXT, all_time_rank INT, weekly_rank INT,
-     monthly_rank INT, updated_at TIMESTAMP
-   );
-   CREATE TABLE badges (
-     user_id TEXT, badge_id TEXT, badge_name TEXT, badge_icon TEXT, earned_at TIMESTAMP
-   );
-   CREATE TABLE notifications (
-     id SERIAL PRIMARY KEY, user_id TEXT, notification_type TEXT, title TEXT,
-     message TEXT, mission_id TEXT, points INT, created_at TIMESTAMP
-   );
-   CREATE INDEX idx_mc_user ON mission_completions(user_id);
-   CREATE INDEX idx_lb_rank ON leaderboard(all_time_rank);
-   CREATE INDEX idx_ups_user ON user_profile_snapshot(user_id);
-   CREATE INDEX idx_badges_user ON badges(user_id);
-   CREATE INDEX idx_notif_user ON notifications(user_id);
-   "
-   ```
+### 2. Wait for it to be ready (1-2 minutes)
 
-4. **Create a Lakebase role for the app's service principal**:
-   ```bash
-   # Get the app's service principal client ID
-   SP_CLIENT_ID=$(databricks apps get databricks-quest -o json \
-     | python3 -c "import sys,json; print(json.load(sys.stdin)['service_principal_client_id'])")
+```bash
+databricks postgres list-endpoints projects/databricks-quest/branches/production
+```
 
-   # Create an OAuth role so the SP can connect to Lakebase
-   databricks postgres create-role projects/databricks-quest/branches/production \
-     --role-id quest-sp \
-     --json "{\"spec\": {\"identity_type\": \"SERVICE_PRINCIPAL\", \"postgres_role\": \"$SP_CLIENT_ID\", \"auth_method\": \"LAKEBASE_OAUTH_V1\", \"membership_roles\": [\"DATABRICKS_SUPERUSER\"]}}"
+Repeat until `current_state` shows **ACTIVE**. Copy the `host` value from the output.
 
-   # Grant the SP SELECT on all tables
-   PGPASSWORD=$TOKEN psql "host=$HOST port=5432 dbname=quest_db user=$EMAIL sslmode=require" -c "
-   GRANT SELECT ON ALL TABLES IN SCHEMA public TO \"$SP_CLIENT_ID\";
-   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO \"$SP_CLIENT_ID\";
-   "
-   ```
+### 3. Create the database and tables
 
-5. **Redeploy with Lakebase**:
-   ```bash
-   databricks bundle deploy --target dev \
-     --var warehouse_id=YOUR_WAREHOUSE_ID \
-     --var quest_catalog=YOUR_CATALOG_NAME \
-     --var lakebase_host=YOUR_LAKEBASE_HOST \
-     --var lakebase_db=quest_db
-   ```
+```bash
+# Get connection details
+HOST=$(databricks postgres list-endpoints projects/databricks-quest/branches/production \
+  -o json | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['status']['hosts']['host'])")
+TOKEN=$(databricks postgres generate-database-credential \
+  projects/databricks-quest/branches/production/endpoints/primary -o json \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+EMAIL=$(databricks current-user me -o json | python3 -c "import sys,json; print(json.load(sys.stdin)['userName'])")
 
-6. **Run the scoring pipeline again** to sync data to Lakebase:
-   ```bash
-   databricks bundle run quest_scoring_pipeline --target dev
-   ```
+# Create database
+PGPASSWORD=$TOKEN psql "host=$HOST port=5432 dbname=postgres user=$EMAIL sslmode=require" \
+  -c "CREATE DATABASE quest_db;"
+
+# Create tables
+PGPASSWORD=$TOKEN psql "host=$HOST port=5432 dbname=quest_db user=$EMAIL sslmode=require" -c "
+CREATE TABLE mission_completions (
+  user_id TEXT, mission_id TEXT, mission_name TEXT, points_awarded INT,
+  completed_at TIMESTAMP, period_start DATE, period_end DATE, scored_at TIMESTAMP
+);
+CREATE TABLE user_points_fact (
+  user_id TEXT, event_type TEXT, mission_id TEXT, points INT,
+  reason TEXT, event_timestamp TIMESTAMP, scored_at TIMESTAMP
+);
+CREATE TABLE user_profile_snapshot (
+  user_id TEXT, display_name TEXT, total_points INT, level TEXT,
+  current_streak INT, max_streak INT, badge_count INT, missions_completed INT,
+  first_activity_date DATE, last_activity_date DATE, distinct_products_used INT,
+  updated_at TIMESTAMP
+);
+CREATE TABLE leaderboard (
+  user_id TEXT, display_name TEXT, total_points INT, weekly_points INT,
+  monthly_points INT, level TEXT, all_time_rank INT, weekly_rank INT,
+  monthly_rank INT, updated_at TIMESTAMP
+);
+CREATE TABLE badges (
+  user_id TEXT, badge_id TEXT, badge_name TEXT, badge_icon TEXT, earned_at TIMESTAMP
+);
+CREATE TABLE notifications (
+  id SERIAL PRIMARY KEY, user_id TEXT, notification_type TEXT, title TEXT,
+  message TEXT, mission_id TEXT, points INT, created_at TIMESTAMP
+);
+CREATE INDEX idx_mc_user ON mission_completions(user_id);
+CREATE INDEX idx_lb_rank ON leaderboard(all_time_rank);
+CREATE INDEX idx_ups_user ON user_profile_snapshot(user_id);
+CREATE INDEX idx_badges_user ON badges(user_id);
+CREATE INDEX idx_notif_user ON notifications(user_id);
+"
+```
+
+### 4. Grant the app's service principal access to Lakebase
+
+```bash
+# Get the app's service principal client ID
+SP_CLIENT_ID=$(databricks apps get databricks-quest -o json \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['service_principal_client_id'])")
+
+# Create an OAuth role for the SP
+databricks postgres create-role projects/databricks-quest/branches/production \
+  --role-id quest-sp \
+  --json "{\"spec\": {\"identity_type\": \"SERVICE_PRINCIPAL\", \"postgres_role\": \"$SP_CLIENT_ID\", \"auth_method\": \"LAKEBASE_OAUTH_V1\", \"membership_roles\": [\"DATABRICKS_SUPERUSER\"]}}"
+
+# Grant SELECT on all tables
+PGPASSWORD=$TOKEN psql "host=$HOST port=5432 dbname=quest_db user=$EMAIL sslmode=require" -c "
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO \"$SP_CLIENT_ID\";
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO \"$SP_CLIENT_ID\";
+"
+```
+
+### 5. Redeploy with Lakebase enabled
+
+```bash
+databricks bundle deploy --target dev \
+  --var warehouse_id=YOUR_WAREHOUSE_ID \
+  --var quest_catalog=YOUR_CATALOG_NAME \
+  --var lakebase_host=YOUR_LAKEBASE_HOST \
+  --var lakebase_db=quest_db
+```
+
+Replace `YOUR_LAKEBASE_HOST` with the host you got in step 2 (e.g. `ep-abc123.database.us-east-1.cloud.databricks.com`).
+
+### 6. Re-run the scoring pipeline to sync data
+
+```bash
+databricks bundle run quest_scoring_pipeline --target dev
+```
+
+The pipeline will now sync all scored data from Delta tables into Lakebase on every run. Your app should respond in under a second.
+
+---
 
 ## What Gets Deployed
 
@@ -262,11 +297,11 @@ Lakebase is Databricks' managed PostgreSQL service. Using it makes the app load 
 | **Databricks App** | React + FastAPI web app with gamification UI |
 | **Scoring Notebook** | Reads system tables, computes missions/points/badges |
 | **Scheduled Job** | Runs the scoring notebook every 4 hours |
-| **Delta Tables** | `<catalog>.quest.mission_completions`, `user_profile_snapshot`, `leaderboard`, `badges`, `notifications`, `user_points_fact` |
+| **Delta Tables** | `<catalog>.quest.*` — mission_completions, user_profile_snapshot, leaderboard, badges, notifications, user_points_fact |
 
 ## System Tables Used
 
-These are read-only tables that Databricks provides automatically. The scoring pipeline queries them to detect what each user has done.
+The scoring pipeline queries these read-only tables that Databricks maintains automatically:
 
 | Table | What It Tracks | Missions It Powers |
 |-------|---------------|-------------------|
@@ -278,11 +313,33 @@ These are read-only tables that Databricks provides automatically. The scoring p
 | `system.query.history` | SQL query execution | Data Explorer |
 | `system.access.audit` | Workspace actions (create dashboard, etc.) | Genie Creator, Dashboard Designer |
 
-## Required Permissions
+---
 
-### For the scoring job (runs as you)
+## Troubleshooting
 
-You need SELECT access to system tables. Most workspace users have this by default. If not:
+### "Setup Required" message in the app
+
+The scoring pipeline hasn't run yet, or it failed. Run it manually:
+
+```bash
+databricks bundle run quest_scoring_pipeline --target dev
+```
+
+Then check the job run output in your workspace under **Workflows** > **Job Runs**.
+
+### "Table not found" errors
+
+The scoring pipeline creates all tables on its first run. Make sure it completed successfully before opening the app.
+
+### No users on the leaderboard
+
+System tables can take a few hours to populate after workspace creation. The scoring pipeline only finds users who have actual compute usage recorded in `system.billing.usage`. If your workspace is brand new, wait a few hours and run the pipeline again.
+
+### Permission errors on system tables
+
+Ask your workspace admin to:
+1. Enable system tables (Admin Console > System Tables)
+2. Grant you SELECT access to the relevant `system.*` schemas:
 
 ```sql
 GRANT USE_CATALOG ON CATALOG system TO `your_email@company.com`;
@@ -291,67 +348,44 @@ GRANT SELECT ON SCHEMA system.billing TO `your_email@company.com`;
 -- Repeat for: system.lakeflow, system.query, system.access
 ```
 
-### For the app service principal
+### Auto-grant failed for app permissions
 
-The scoring pipeline **auto-grants** the app service principal read access to Quest tables on every run. No manual steps needed unless the auto-grant fails (see Step 7 for fallback).
+If the pipeline prints a warning about auto-grant failing, the app won't be able to read Quest tables. Ask your workspace admin to run:
 
-### For regular app users
-
-Nothing extra needed. Users log in with their workspace credentials and the app shows them their own data.
-
-## Troubleshooting
-
-### "Setup Required" message in the app
-The scoring pipeline hasn't run yet, or it failed. Run it manually:
-```bash
-databricks bundle run quest_scoring_pipeline --target dev
+```sql
+-- Find SP name with: databricks apps get databricks-quest
+GRANT USE_CATALOG ON CATALOG <your_catalog> TO `<service_principal_name>`;
+GRANT USE_SCHEMA ON SCHEMA <your_catalog>.quest TO `<service_principal_name>`;
+GRANT SELECT ON SCHEMA <your_catalog>.quest TO `<service_principal_name>`;
 ```
-Check the job run output in the Databricks workspace under **Workflows** > **Job Runs**.
-
-### "Table not found" errors
-The scoring pipeline creates all tables on its first run. Make sure it completed successfully before opening the app.
-
-### No users on the leaderboard
-System tables can take a few hours to populate after workspace creation. The scoring pipeline only detects users who have actual compute usage recorded in `system.billing.usage`.
-
-### Permission errors on system tables
-Ask your workspace admin to:
-1. Enable system tables (Admin Console > System Tables)
-2. Grant you SELECT access to the relevant `system.*` schemas
 
 ### App returns "degraded" health
+
 Check that:
 - The SQL warehouse is running (if not using Lakebase)
 - The Lakebase endpoint is ACTIVE (if using Lakebase)
-- The app service principal has SELECT access to the Quest tables or Lakebase database
+- The app service principal has SELECT access to the Quest tables
+
+### Frontend build fails
+
+Make sure you have Node.js 18+ (`node --version`). If `npm install` fails, delete `frontend/node_modules/` and try again.
 
 ### CLI says "unknown command postgres"
+
 Your Databricks CLI is older than v0.285.0. Upgrade:
 - macOS: `brew upgrade databricks/tap/databricks`
 - Other: Reinstall from [docs.databricks.com](https://docs.databricks.com/en/dev-tools/cli/install.html)
 
-### Frontend build fails
-Make sure you have Node.js 18+ (`node --version`). If `npm install` fails, delete `frontend/node_modules/` and try again.
+---
 
-## Key Concepts for Databricks Newcomers
+## Glossary
 
-### What is a Databricks App?
-A web application hosted directly on your Databricks workspace. It gets its own URL, runs under a service principal, and users log in with their workspace credentials. No separate hosting needed.
-
-### What is a Databricks Asset Bundle (DAB)?
-A way to define and deploy Databricks resources (apps, jobs, notebooks) as code using a `databricks.yml` config file. Think of it like Terraform but specifically for Databricks. The `databricks bundle deploy` command reads this file and creates everything on your workspace.
-
-### What are system tables?
-Read-only tables that Databricks maintains with metadata about your workspace: who ran what, when, how much compute was used, etc. They live in the `system` catalog and are the source of truth for Quest scoring.
-
-### What is Lakebase?
-Databricks' managed PostgreSQL service. It gives you a regular Postgres database that lives inside your Databricks environment. Quest can optionally use it for faster app reads (sub-second vs. 2-5 seconds with a SQL warehouse).
-
-### What is a service principal?
-A machine identity that Databricks creates for apps and automated processes. When you deploy a Databricks App, it automatically gets its own service principal. You grant this SP permissions just like you would a user.
-
-### What is Unity Catalog?
-Databricks' data governance layer. It organizes data into catalogs > schemas > tables. Quest stores its scored data in a catalog and schema you choose during setup.
-
-### What is a SQL Warehouse?
-A compute resource for running SQL queries. Quest's scoring pipeline uses serverless compute (no warehouse needed), but the app uses a SQL warehouse to query the scored data (unless you set up Lakebase).
+| Term | What it is |
+|------|------------|
+| **Databricks App** | A web application hosted on your workspace. Gets its own URL, runs under a service principal, users log in with workspace credentials. |
+| **Databricks Asset Bundle (DAB)** | Infrastructure-as-code for Databricks. The `databricks.yml` file defines what to deploy. Think Terraform, but for Databricks resources. |
+| **System tables** | Read-only tables Databricks maintains about your workspace: who ran what, when, how much compute was used. They live in the `system` catalog. |
+| **Lakebase** | Databricks' managed PostgreSQL. Gives you a Postgres database inside your Databricks environment. Optional but makes the app much faster. |
+| **Service principal** | A machine identity for apps and automation. When you deploy a Databricks App, it gets its own SP automatically. |
+| **Unity Catalog** | Databricks' data governance layer. Organizes data into catalogs > schemas > tables. |
+| **SQL Warehouse** | Compute for running SQL queries. The app uses one to read scored data (unless you set up Lakebase). |

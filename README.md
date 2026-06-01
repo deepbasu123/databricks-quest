@@ -15,10 +15,10 @@ Users log in with their existing workspace credentials. No separate accounts nee
 
 ## What Users See
 
-- **Dashboard** - Current level, points, streak, badges, and next missions to complete
-- **Missions** - 10 missions across Data Engineering, Analytics, and Engagement categories
-- **Leaderboard** - Top 10 users with weekly swag prizes (1st: hoodie/tshirt, 2nd: coffee cup/water bottle/notebook, 3rd: stickers)
-- **Admin** - Pipeline health, user stats, mission completion charts, level distribution
+- **Dashboard** — Current level, points, streak, badges, and next missions to complete
+- **Missions** — 10 missions across Data Engineering, Analytics, and Engagement categories
+- **Leaderboard** — Top 10 users with weekly swag prizes (1st: hoodie/tshirt, 2nd: coffee cup/water bottle/notebook, 3rd: stickers)
+- **Admin** — Pipeline health, user stats, mission completion charts, level distribution
 
 ## Missions
 
@@ -45,37 +45,57 @@ Users log in with their existing workspace credentials. No separate accounts nee
 | Platinum | 2,000 |
 | Elite | 5,000 |
 
-## Quick Start
+---
 
-See [SETUP.md](SETUP.md) for full deployment instructions with screenshots and explanations for each step.
+## Deployment
 
-**TL;DR for experienced Databricks users:**
+Full step-by-step guide with explanations: **[SETUP.md](SETUP.md)**
+
+### Prerequisites
+
+- A Databricks workspace with Unity Catalog and system tables enabled
+- [Databricks CLI](https://docs.databricks.com/en/dev-tools/cli/install.html) v0.200+
+- [Node.js](https://nodejs.org/) 18+
+- A SQL Warehouse ID from your workspace
+
+### Quick Deploy (6 commands)
 
 ```bash
-# 1. Clone and configure
+# 1. Clone and enter the repo
 git clone https://github.com/deepbasu123/databricks-quest.git
 cd databricks-quest
-# Edit databricks.yml: set your workspace host
 
-# 2. Authenticate
+# 2. Set your workspace URL in databricks.yml (the only file you need to edit)
+#    Change the host under targets > dev > workspace
+
+# 3. Authenticate with your workspace
 databricks auth login --host https://YOUR_WORKSPACE.cloud.databricks.com
 
-# 3. Build frontend
+# 4. Build the frontend
 cd frontend && npm install && npm run build && cd ..
 
-# 4. Deploy (auto-creates catalog, schema, and tables)
+# 5. Deploy everything (app + scoring job + notebook)
 databricks bundle deploy --target dev \
   --var warehouse_id=YOUR_WAREHOUSE_ID \
   --var quest_catalog=YOUR_CATALOG_NAME \
   --var lakebase_host="" \
   --var lakebase_db=quest_db
 
-# 5. Run scoring pipeline (scores missions + auto-grants app permissions)
+# 6. Run the scoring pipeline (creates catalog/schema/tables, scores missions,
+#    grants app permissions — everything is automatic)
 databricks bundle run quest_scoring_pipeline --target dev
-
-# 6. Open the app
-databricks apps get databricks-quest
 ```
+
+Then open the app:
+
+```bash
+databricks apps get databricks-quest
+# Open the URL from the output in your browser
+```
+
+That's it. The catalog, schema, tables, and app permissions are all created automatically by the scoring pipeline. A scheduled job re-runs the pipeline every 4 hours to keep data fresh.
+
+---
 
 ## Architecture
 
@@ -107,13 +127,13 @@ System Tables (read-only)          Quest App (Databricks App)
 - **Data**: Spark SQL, Delta Lake, system tables
 - **Database**: Lakebase (managed PostgreSQL) or SQL Warehouse
 - **Deployment**: Databricks Asset Bundles (DAB), Databricks Apps
-- **Auth**: Workspace OAuth (SSO) - users log in with their Databricks credentials
+- **Auth**: Workspace OAuth (SSO) — users log in with their Databricks credentials
 
 ## Project Structure
 
 ```
 databricks-quest/
-  databricks.yml          # Bundle config - app, job, variables
+  databricks.yml          # Bundle config — app, job, variables
   app/
     main.py               # FastAPI backend (API endpoints)
     app.yaml              # Databricks App config
