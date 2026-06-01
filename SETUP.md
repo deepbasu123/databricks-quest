@@ -136,17 +136,20 @@ the view based on the authenticated user's email.
 | `system.lakeflow.pipelines` | Pipeline Builder and Auto Loader missions |
 | `system.lakeflow.pipeline_update_timeline` | Pipeline Runner mission |
 | `system.query.history` | Data Explorer mission |
+| `system.access.audit` | Genie Creator and Dashboard Designer missions |
 
 ## Missions (v1)
 
 | Mission | Points | Type |
 |---------|--------|------|
-| First Steps - first billable usage | 25 | One-time |
+| First Steps - first compute usage | 25 | One-time |
 | Job Creator - create first job | 100 | One-time |
 | Pipeline Builder - create first pipeline | 150 | One-time |
 | Pipeline Runner - first successful pipeline run | 200 | One-time |
 | Scheduler - create a CRON/scheduled job | 150 | One-time |
 | Auto Loader Pioneer - use Auto Loader in a pipeline | 250 | One-time |
+| Genie Creator - create first AI/BI Genie space | 200 | One-time |
+| Dashboard Designer - create first Databricks Dashboard | 150 | One-time |
 | Consistent Operator - 7 active days in 30 | 300 | Monthly |
 | Data Explorer - 50+ SQL queries in a week | 150 | Weekly |
 

@@ -157,15 +157,32 @@ export default function Leaderboard() {
         )}
       </div>
 
-      {/* Swag banner */}
+      {/* Swag prizes */}
       <div className="card p-5 bg-gradient-to-r from-violet-600/20 to-cyan-600/20 border-violet-500/20">
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 mb-4">
           <Trophy className="w-8 h-8 text-violet-400 shrink-0" />
           <div>
             <h4 className="font-semibold text-white">Weekly Swag Awards</h4>
             <p className="text-sm text-slate-400 mt-0.5">
-              Top performers each week receive exclusive Databricks swag. Keep climbing the leaderboard!
+              Top performers each week win exclusive Databricks swag!
             </p>
+          </div>
+        </div>
+        <div className="grid grid-cols-3 gap-3">
+          <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 text-center">
+            <Crown className="w-6 h-6 text-yellow-400 mx-auto mb-1" />
+            <p className="text-xs font-bold text-yellow-400 uppercase tracking-wide">1st Place</p>
+            <p className="text-sm text-slate-300 mt-1">Hoodie or T-Shirt</p>
+          </div>
+          <div className="bg-slate-500/10 border border-slate-500/30 rounded-lg p-3 text-center">
+            <Medal className="w-6 h-6 text-slate-400 mx-auto mb-1" />
+            <p className="text-xs font-bold text-slate-400 uppercase tracking-wide">2nd Place</p>
+            <p className="text-sm text-slate-300 mt-1">Coffee Cup, Water Bottle, or Notebook & Pen</p>
+          </div>
+          <div className="bg-amber-700/10 border border-amber-700/30 rounded-lg p-3 text-center">
+            <Medal className="w-6 h-6 text-amber-700 mx-auto mb-1" />
+            <p className="text-xs font-bold text-amber-600 uppercase tracking-wide">3rd Place</p>
+            <p className="text-sm text-slate-300 mt-1">Stickers</p>
           </div>
         </div>
       </div>

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   Zap, Target, TrendingUp, Calendar, Search,
-  CheckCircle2, Circle, Repeat,
+  CheckCircle2, Circle, Repeat, Sparkles, LayoutDashboard,
 } from 'lucide-react'
 import type { Mission } from '../types'
 
@@ -14,6 +14,8 @@ const ICON_MAP: Record<string, typeof Zap> = {
   'upload-cloud': TrendingUp,
   'calendar-check': Calendar,
   search: Search,
+  sparkles: Sparkles,
+  'layout-dashboard': LayoutDashboard,
 }
 
 const CATEGORY_COLORS: Record<string, string> = {

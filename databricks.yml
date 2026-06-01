@@ -3,12 +3,17 @@ bundle:
 
 variables:
   warehouse_id:
-    description: SQL Warehouse ID for the Quest app (find in SQL Warehouses page)
+    description: SQL Warehouse ID for the scoring pipeline job (find in SQL Warehouses page)
   quest_catalog:
     description: Unity Catalog name for Quest data (must already exist)
   quest_schema:
     description: Schema name for Quest scored tables (auto-created by scoring pipeline)
     default: quest
+  lakebase_host:
+    description: Lakebase endpoint host (e.g. ep-xxx.database.us-east-1.cloud.databricks.com)
+  lakebase_db:
+    description: Lakebase database name
+    default: quest_db
 
 resources:
   apps:
@@ -25,22 +30,15 @@ resources:
           - --port
           - "8000"
         env:
-          - name: DATABRICKS_WAREHOUSE_ID
-            value: ${var.warehouse_id}
-          - name: QUEST_CATALOG
-            value: ${var.quest_catalog}
-          - name: QUEST_SCHEMA
-            value: ${var.quest_schema}
-      resources:
-        - name: sql-warehouse
-          sql_warehouse:
-            id: ${var.warehouse_id}
-            permission: CAN_USE
+          - name: LAKEBASE_HOST
+            value: ${var.lakebase_host}
+          - name: LAKEBASE_DB
+            value: ${var.lakebase_db}
 
   jobs:
     quest_scoring_pipeline:
       name: "[Quest] Scoring Pipeline"
-      description: "Reads system tables, computes missions, points, badges, and leaderboards"
+      description: "Reads system tables, computes missions, points, badges, and leaderboards. Syncs results to Lakebase."
       schedule:
         quartz_cron_expression: "0 0 */4 * * ?"
         timezone_id: UTC
@@ -51,12 +49,16 @@ resources:
             base_parameters:
               quest_catalog: ${var.quest_catalog}
               quest_schema: ${var.quest_schema}
+              lakebase_host: ${var.lakebase_host}
+              lakebase_db: ${var.lakebase_db}
             source: WORKSPACE
           environment_key: default
       environments:
         - environment_key: default
           spec:
             client: "1"
+            dependencies:
+              - psycopg2-binary
 
 targets:
   dev:

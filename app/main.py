@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Any, Optional
@@ -8,22 +9,22 @@ from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from databricks.sdk import WorkspaceClient
-from databricks import sql as dbsql
+import psycopg2
+import psycopg2.extras
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("databricks-quest")
 
 app = FastAPI(title="Databricks Quest API")
 
-WAREHOUSE_ID = os.getenv("DATABRICKS_WAREHOUSE_ID", "")
-QUEST_CATALOG = os.getenv("QUEST_CATALOG", "deep_test_1_catalog")
-QUEST_SCHEMA = os.getenv("QUEST_SCHEMA", "quest")
+LAKEBASE_HOST = os.getenv("LAKEBASE_HOST", "")
+LAKEBASE_DB = os.getenv("LAKEBASE_DB", "quest_db")
 
 MISSION_DEFINITIONS = [
     {
         "id": "first_steps",
         "name": "First Steps",
-        "description": "Record your first billable Databricks usage",
+        "description": "Record your first Databricks compute usage",
         "points": 25,
         "category": "Getting Started",
         "award_type": "one_time",
@@ -73,6 +74,24 @@ MISSION_DEFINITIONS = [
         "category": "Data Engineering",
         "award_type": "one_time",
         "icon": "upload-cloud",
+    },
+    {
+        "id": "genie_creator",
+        "name": "Genie Creator",
+        "description": "Create your first AI/BI Genie space",
+        "points": 200,
+        "category": "Analytics",
+        "award_type": "one_time",
+        "icon": "sparkles",
+    },
+    {
+        "id": "dashboard_designer",
+        "name": "Dashboard Designer",
+        "description": "Create your first Databricks Dashboard",
+        "points": 150,
+        "category": "Analytics",
+        "award_type": "one_time",
+        "icon": "layout-dashboard",
     },
     {
         "id": "consistent_operator",
@@ -158,41 +177,58 @@ def serialize(obj):
     return obj
 
 
-def row_to_dict(columns, row):
-    return {col: serialize(val) for col, val in zip(columns, row)}
-
-
 def get_workspace_client() -> WorkspaceClient:
     return WorkspaceClient()
 
 
-def get_sql_connection():
+# --- Lakebase connection with token caching ---
+_conn_cache = {"conn": None, "expiry": 0}
+
+
+def get_lakebase_connection():
+    now = time.time()
+    cached = _conn_cache["conn"]
+    if cached and _conn_cache["expiry"] > now:
+        try:
+            with cached.cursor() as c:
+                c.execute("SELECT 1")
+            return cached
+        except Exception:
+            try:
+                cached.close()
+            except Exception:
+                pass
+
     w = get_workspace_client()
-    hostname = w.config.host or ""
-    hostname = hostname.replace("https://", "").replace("http://", "").rstrip("/")
-    return dbsql.connect(
-        server_hostname=hostname,
-        http_path=f"/sql/1.0/warehouses/{WAREHOUSE_ID}",
-        access_token=w.config.token,
+    headers = w.config.authenticate()
+    auth_header = headers.get("Authorization", "")
+    token = auth_header[7:] if auth_header.startswith("Bearer ") else w.config.token
+    user = w.current_user.me().user_name
+
+    conn = psycopg2.connect(
+        host=LAKEBASE_HOST,
+        port=5432,
+        dbname=LAKEBASE_DB,
+        user=user,
+        password=token,
+        sslmode="require",
+        connect_timeout=10,
     )
+    conn.autocommit = True
+    _conn_cache["conn"] = conn
+    _conn_cache["expiry"] = now + 2700  # 45 min
+    logger.info(f"Lakebase connection established as {user}")
+    return conn
 
 
-def execute_query(query: str) -> List[Dict[str, Any]]:
-    conn = get_sql_connection()
-    try:
-        cursor = conn.cursor()
-        cursor.execute(query)
-        if cursor.description:
-            columns = [desc[0] for desc in cursor.description]
-            rows = cursor.fetchall()
-            return [row_to_dict(columns, row) for row in rows]
+def execute_query(query: str, params: tuple = ()) -> List[Dict[str, Any]]:
+    conn = get_lakebase_connection()
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(query, params)
+        if cur.description:
+            rows = cur.fetchall()
+            return [{k: serialize(v) for k, v in dict(row).items()} for row in rows]
         return []
-    finally:
-        conn.close()
-
-
-def tbl(name: str) -> str:
-    return f"`{QUEST_CATALOG}`.`{QUEST_SCHEMA}`.`{name}`"
 
 
 def get_user_email(request: Request) -> str:
@@ -202,10 +238,6 @@ def get_user_email(request: Request) -> str:
     if not email:
         email = os.getenv("QUEST_DEFAULT_USER", "demo@databricks.com")
     return email
-
-
-def safe_sql_string(s: str) -> str:
-    return s.replace("'", "''").replace("\\", "\\\\")
 
 
 # ---------------------------------------------------------------------------
@@ -224,13 +256,17 @@ async def health():
 
 @app.get("/api/profile")
 async def get_profile(request: Request):
-    user = safe_sql_string(get_user_email(request))
+    user = get_user_email(request)
     try:
-        profiles = execute_query(f"SELECT * FROM {tbl('user_profile_snapshot')} WHERE user_id = '{user}'")
+        profiles = execute_query(
+            "SELECT * FROM user_profile_snapshot WHERE user_id = %s", (user,)
+        )
         if profiles:
             profile = profiles[0]
             profile["level_progress"] = get_level_progress(int(profile.get("total_points", 0)))
-            badges = execute_query(f"SELECT * FROM {tbl('badges')} WHERE user_id = '{user}' ORDER BY earned_at DESC")
+            badges = execute_query(
+                "SELECT * FROM badges WHERE user_id = %s ORDER BY earned_at DESC", (user,)
+            )
             profile["badges"] = badges
             return profile
         return _empty_profile(user)
@@ -259,11 +295,12 @@ def _empty_profile(user: str) -> dict:
 
 @app.get("/api/missions")
 async def get_missions(request: Request):
-    user = safe_sql_string(get_user_email(request))
+    user = get_user_email(request)
     missions = [m.copy() for m in MISSION_DEFINITIONS]
     try:
         completions = execute_query(
-            f"SELECT mission_id, completed_at, points_awarded FROM {tbl('mission_completions')} WHERE user_id = '{user}'"
+            "SELECT mission_id, completed_at, points_awarded FROM mission_completions WHERE user_id = %s",
+            (user,),
         )
         completed_map = {c["mission_id"]: c for c in completions}
     except Exception:
@@ -282,21 +319,18 @@ async def get_missions(request: Request):
 async def get_leaderboard(period: str = "all"):
     try:
         if period == "weekly":
-            col = "weekly_points"
-            rank_col = "weekly_rank"
+            order_col = "weekly_rank"
         elif period == "monthly":
-            col = "monthly_points"
-            rank_col = "monthly_rank"
+            order_col = "monthly_rank"
         else:
-            col = "total_points"
-            rank_col = "all_time_rank"
+            order_col = "all_time_rank"
 
         rows = execute_query(
             f"""
             SELECT user_id, display_name, total_points, weekly_points, monthly_points,
                    level, all_time_rank, weekly_rank, monthly_rank
-            FROM {tbl('leaderboard')}
-            ORDER BY {rank_col} ASC
+            FROM leaderboard
+            ORDER BY {order_col} ASC
             LIMIT 100
             """
         )
@@ -308,16 +342,17 @@ async def get_leaderboard(period: str = "all"):
 
 @app.get("/api/notifications")
 async def get_notifications(request: Request):
-    user = safe_sql_string(get_user_email(request))
+    user = get_user_email(request)
     try:
         rows = execute_query(
-            f"""
+            """
             SELECT notification_type, title, message, mission_id, points, created_at
-            FROM {tbl('notifications')}
-            WHERE user_id = '{user}'
+            FROM notifications
+            WHERE user_id = %s
             ORDER BY created_at DESC
             LIMIT 20
-            """
+            """,
+            (user,),
         )
         return {"notifications": rows}
     except Exception:
@@ -327,26 +362,26 @@ async def get_notifications(request: Request):
 @app.get("/api/admin/stats")
 async def get_admin_stats():
     try:
-        user_count = execute_query(f"SELECT COUNT(DISTINCT user_id) AS cnt FROM {tbl('user_profile_snapshot')}")
-        mission_count = execute_query(f"SELECT COUNT(*) AS cnt FROM {tbl('mission_completions')}")
+        user_count = execute_query("SELECT COUNT(DISTINCT user_id) AS cnt FROM user_profile_snapshot")
+        mission_count = execute_query("SELECT COUNT(*) AS cnt FROM mission_completions")
         top_missions = execute_query(
-            f"""
+            """
             SELECT mission_id, mission_name, COUNT(*) AS completions
-            FROM {tbl('mission_completions')}
+            FROM mission_completions
             GROUP BY mission_id, mission_name
             ORDER BY completions DESC
             """
         )
         level_dist = execute_query(
-            f"""
+            """
             SELECT level, COUNT(*) AS cnt
-            FROM {tbl('user_profile_snapshot')}
+            FROM user_profile_snapshot
             GROUP BY level
             ORDER BY cnt DESC
             """
         )
         latest_run = execute_query(
-            f"SELECT MAX(updated_at) AS last_refresh FROM {tbl('user_profile_snapshot')}"
+            "SELECT MAX(updated_at) AS last_refresh FROM user_profile_snapshot"
         )
         return {
             "total_users": user_count[0]["cnt"] if user_count else 0,
@@ -370,9 +405,9 @@ async def get_admin_stats():
 @app.get("/api/admin/pipeline-status")
 async def get_pipeline_status():
     try:
-        latest = execute_query(f"SELECT MAX(updated_at) AS last_run FROM {tbl('user_profile_snapshot')}")
+        latest = execute_query("SELECT MAX(updated_at) AS last_run FROM user_profile_snapshot")
         last_run = latest[0]["last_run"] if latest and latest[0].get("last_run") else None
-        total = execute_query(f"SELECT COUNT(*) AS cnt FROM {tbl('user_points_fact')}")
+        total = execute_query("SELECT COUNT(*) AS cnt FROM user_points_fact")
         return {
             "status": "healthy" if last_run else "not_initialized",
             "last_run": last_run,

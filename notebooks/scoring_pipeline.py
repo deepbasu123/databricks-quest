@@ -431,6 +431,72 @@ print("Mission scored: Data Explorer")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ### Mission: Genie Creator (200 pts)
+# MAGIC Create your first AI/BI Genie space.
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    user_identity.email AS user_id,
+    'genie_creator' AS mission_id,
+    'Genie Creator' AS mission_name,
+    200 AS points_awarded,
+    MIN(event_time) AS completed_at,
+    CAST(MIN(event_time) AS DATE) AS period_start,
+    CAST(MIN(event_time) AS DATE) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.access.audit
+  WHERE action_name = 'genieCreateSpace'
+    AND response.status_code = 200
+    AND user_identity.email IS NOT NULL
+    AND user_identity.email != ''
+  GROUP BY user_identity.email
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: Genie Creator")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: Dashboard Designer (150 pts)
+# MAGIC Create your first Databricks Dashboard (Lakeview).
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    user_identity.email AS user_id,
+    'dashboard_designer' AS mission_id,
+    'Dashboard Designer' AS mission_name,
+    150 AS points_awarded,
+    MIN(event_time) AS completed_at,
+    CAST(MIN(event_time) AS DATE) AS period_start,
+    CAST(MIN(event_time) AS DATE) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.access.audit
+  WHERE action_name = 'createDashboard'
+    AND response.status_code = 200
+    AND user_identity.email IS NOT NULL
+    AND user_identity.email != ''
+  GROUP BY user_identity.email
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: Dashboard Designer")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Step 3: Generate User Points Fact Table
 # MAGIC Consolidate all mission completions into the points fact table.
 
@@ -797,9 +863,140 @@ total_completions = spark.sql(f"SELECT COUNT(*) AS cnt FROM {tbl('mission_comple
 total_badges = spark.sql(f"SELECT COUNT(*) AS cnt FROM {tbl('badges')}").first()["cnt"]
 
 print(f"""
+Delta scoring complete.
+  Users scored: {total_users}
+  Mission completions: {total_completions}
+  Badges awarded: {total_badges}
+  Timestamp: {NOW}
+""")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 11: Sync to Lakebase
+# MAGIC Replicate scored Delta tables to Lakebase (PostgreSQL) for fast app reads.
+
+# COMMAND ----------
+
+dbutils.widgets.text("lakebase_host", "", "Lakebase Endpoint Host")
+dbutils.widgets.text("lakebase_db", "quest_db", "Lakebase Database Name")
+
+LB_HOST = dbutils.widgets.get("lakebase_host")
+LB_DB = dbutils.widgets.get("lakebase_db")
+
+if not LB_HOST:
+    print("Lakebase host not configured — skipping sync.")
+    dbutils.notebook.exit("OK_NO_LAKEBASE")
+
+# COMMAND ----------
+
+# MAGIC %pip install psycopg2-binary
+# MAGIC dbutils.library.restartPython()
+
+# COMMAND ----------
+
+import psycopg2
+import psycopg2.extras
+from databricks.sdk import WorkspaceClient
+
+# Re-read widgets after Python restart
+LB_HOST = dbutils.widgets.get("lakebase_host")
+LB_DB = dbutils.widgets.get("lakebase_db")
+CATALOG = dbutils.widgets.get("quest_catalog")
+SCHEMA = dbutils.widgets.get("quest_schema")
+
+def tbl(name):
+    return f"`{CATALOG}`.`{SCHEMA}`.`{name}`"
+
+w = WorkspaceClient()
+token = w.config.token
+user_email = w.current_user.me().user_name
+
+def get_pg_conn():
+    return psycopg2.connect(
+        host=LB_HOST, port=5432, dbname=LB_DB,
+        user=user_email, password=token, sslmode="require"
+    )
+
+# Verify connectivity
+conn = get_pg_conn()
+conn.close()
+print(f"Connected to Lakebase: {LB_HOST}/{LB_DB}")
+
+# COMMAND ----------
+
+TABLES_TO_SYNC = [
+    ("mission_completions", [
+        "user_id", "mission_id", "mission_name", "points_awarded",
+        "completed_at", "period_start", "period_end", "scored_at"
+    ]),
+    ("user_points_fact", [
+        "user_id", "event_type", "mission_id", "points",
+        "reason", "event_timestamp", "scored_at"
+    ]),
+    ("user_profile_snapshot", [
+        "user_id", "display_name", "total_points", "level",
+        "current_streak", "max_streak", "badge_count", "missions_completed",
+        "first_activity_date", "last_activity_date", "distinct_products_used", "updated_at"
+    ]),
+    ("leaderboard", [
+        "user_id", "display_name", "total_points", "weekly_points",
+        "monthly_points", "level", "all_time_rank", "weekly_rank",
+        "monthly_rank", "updated_at"
+    ]),
+    ("badges", [
+        "user_id", "badge_id", "badge_name", "badge_icon", "earned_at"
+    ]),
+    ("notifications", [
+        "user_id", "notification_type", "title", "message",
+        "mission_id", "points", "created_at"
+    ]),
+]
+
+for table_name, columns in TABLES_TO_SYNC:
+    print(f"Syncing {table_name}...")
+    df = spark.sql(f"SELECT {', '.join(columns)} FROM {tbl(table_name)}")
+    rows = df.collect()
+
+    conn = get_pg_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(f"DELETE FROM {table_name}")
+        if rows:
+            placeholders = ", ".join(["%s"] * len(columns))
+            insert_sql = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"
+            batch = []
+            for row in rows:
+                vals = tuple(row[c] for c in columns)
+                batch.append(vals)
+                if len(batch) >= 500:
+                    psycopg2.extras.execute_batch(cur, insert_sql, batch)
+                    batch = []
+            if batch:
+                psycopg2.extras.execute_batch(cur, insert_sql, batch)
+        conn.commit()
+        print(f"  {table_name}: {len(rows)} rows synced")
+    except Exception as e:
+        conn.rollback()
+        print(f"  {table_name}: FAILED - {e}")
+    finally:
+        cur.close()
+        conn.close()
+
+print("Lakebase sync complete.")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Summary
+
+# COMMAND ----------
+
+print(f"""
 Scoring pipeline complete.
   Users scored: {total_users}
   Mission completions: {total_completions}
   Badges awarded: {total_badges}
+  Lakebase sync: {LB_HOST}/{LB_DB}
   Timestamp: {NOW}
 """)

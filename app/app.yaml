@@ -7,9 +7,7 @@ command:
   - "8000"
 
 env:
-  - name: DATABRICKS_WAREHOUSE_ID
-    valueFrom: DATABRICKS_WAREHOUSE_ID
-  - name: QUEST_CATALOG
-    valueFrom: QUEST_CATALOG
-  - name: QUEST_SCHEMA
-    valueFrom: QUEST_SCHEMA
+  - name: LAKEBASE_HOST
+    valueFrom: LAKEBASE_HOST
+  - name: LAKEBASE_DB
+    valueFrom: LAKEBASE_DB
