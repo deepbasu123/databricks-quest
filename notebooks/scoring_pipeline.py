@@ -996,10 +996,32 @@ def tbl(name):
     return f"`{CATALOG}`.`{SCHEMA}`.`{name}`"
 
 w = WorkspaceClient()
-headers = w.config.authenticate()
-auth_header = headers.get("Authorization", "")
-token = auth_header[7:] if auth_header.startswith("Bearer ") else w.config.token
 user_email = w.current_user.me().user_name
+
+# Get a token for Lakebase authentication.
+# On serverless, w.config.authenticate() may return a non-JWT token.
+# Try the notebook context token first, then fall back to SDK methods.
+def _get_lakebase_token():
+    # Method 1: notebook context token (most reliable in Databricks notebooks)
+    try:
+        token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
+        if token:
+            return token
+    except Exception:
+        pass
+    # Method 2: SDK authenticate() header
+    try:
+        headers = w.config.authenticate()
+        auth_header = headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            return auth_header[7:]
+    except Exception:
+        pass
+    # Method 3: SDK token property
+    return w.config.token or ""
+
+token = _get_lakebase_token()
+print(f"Token obtained (length: {len(token)})")
 
 def get_pg_conn():
     return psycopg2.connect(
