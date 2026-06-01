@@ -1,0 +1,750 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# Databricks Quest — One-Shot Deployment
+#
+# Deploys the full Quest gamification app to your Databricks workspace.
+# Handles everything: auth check, warehouse selection, frontend build,
+# bundle deploy, scoring pipeline, permissions, and app startup.
+#
+# Usage:
+#   ./deploy.sh                          # Interactive (prompts for everything)
+#   ./deploy.sh --warehouse "My WH"      # Skip warehouse prompt
+#   ./deploy.sh --catalog quest_data     # Specify catalog name
+#   ./deploy.sh --profile my-profile     # Use a specific CLI profile
+#   ./deploy.sh --app-name my-quest      # Custom app name
+#
+# Requirements:
+#   - Databricks CLI v0.200+ (brew install databricks/tap/databricks)
+#   - Node.js 18+ (brew install node)
+#   - Authenticated CLI session (script will prompt if needed)
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+# ── Defaults ─────────────────────────────────────────────────────────────────
+APP_NAME="databricks-quest"
+QUEST_CATALOG=""
+QUEST_SCHEMA="quest"
+WAREHOUSE_NAME=""
+WAREHOUSE_ID=""
+PROFILE_FLAG=""
+PROFILE_NAME=""
+LAKEBASE_HOST=""
+LAKEBASE_DB="quest_db"
+TARGET="dev"
+SKIP_BUILD=""
+SKIP_SCORING=""
+
+# ── Colors ───────────────────────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+info()    { echo -e "${BLUE}▸${NC} $*"; }
+success() { echo -e "${GREEN}✓${NC} $*"; }
+warn()    { echo -e "${YELLOW}!${NC} $*"; }
+fail()    { echo -e "${RED}✗${NC} $*"; exit 1; }
+step()    { echo -e "\n${BOLD}${CYAN}── $* ──${NC}\n"; }
+
+# ── Parse Arguments ──────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --app-name)       APP_NAME="$2"; shift 2 ;;
+    --catalog)        QUEST_CATALOG="$2"; shift 2 ;;
+    --schema)         QUEST_SCHEMA="$2"; shift 2 ;;
+    --warehouse)      WAREHOUSE_NAME="$2"; shift 2 ;;
+    --warehouse-id)   WAREHOUSE_ID="$2"; shift 2 ;;
+    --profile)        PROFILE_NAME="$2"; PROFILE_FLAG="--profile $2"; shift 2 ;;
+    --target)         TARGET="$2"; shift 2 ;;
+    --lakebase-host)  LAKEBASE_HOST="$2"; shift 2 ;;
+    --lakebase-db)    LAKEBASE_DB="$2"; shift 2 ;;
+    --skip-build)     SKIP_BUILD=1; shift ;;
+    --skip-scoring)   SKIP_SCORING=1; shift ;;
+    --help|-h)
+      echo "Usage: ./deploy.sh [OPTIONS]"
+      echo ""
+      echo "Options:"
+      echo "  --app-name NAME       App name (default: databricks-quest)"
+      echo "  --catalog NAME        Unity Catalog name for Quest data"
+      echo "  --schema NAME         Schema name (default: quest)"
+      echo "  --warehouse NAME      SQL Warehouse name (interactive if omitted)"
+      echo "  --warehouse-id ID     SQL Warehouse ID (skips warehouse lookup)"
+      echo "  --profile NAME        Databricks CLI profile to use"
+      echo "  --target TARGET       Bundle target: dev or prod (default: dev)"
+      echo "  --lakebase-host HOST  Lakebase endpoint host (optional, for faster reads)"
+      echo "  --lakebase-db NAME    Lakebase database name (default: quest_db)"
+      echo "  --skip-build          Skip frontend build (use existing app/static/)"
+      echo "  --skip-scoring        Skip running the scoring pipeline"
+      echo "  --help, -h            Show this help message"
+      exit 0
+      ;;
+    *) fail "Unknown option: $1. Run ./deploy.sh --help for usage." ;;
+  esac
+done
+
+# ── Banner ───────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════╗${NC}"
+echo -e "${BOLD}${CYAN}║         Databricks Quest — Deploy            ║${NC}"
+echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════╝${NC}"
+echo ""
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 1: Check Prerequisites
+# ══════════════════════════════════════════════════════════════════════════════
+step "Step 1/8: Checking prerequisites"
+
+# Find Databricks CLI — prefer the newest version available
+CLI=""
+BEST_VERSION="0.0.0"
+
+check_cli() {
+  local path="$1"
+  if [ -x "$path" ]; then
+    local ver
+    ver=$("$path" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "0.0.0")
+    # Compare: prefer higher version
+    if python3 -c "
+from packaging.version import Version
+import sys
+try:
+    sys.exit(0 if Version('$ver') > Version('$BEST_VERSION') else 1)
+except:
+    # packaging not available, compare as tuples
+    a = tuple(int(x) for x in '$ver'.split('.'))
+    b = tuple(int(x) for x in '$BEST_VERSION'.split('.'))
+    sys.exit(0 if a > b else 1)
+" 2>/dev/null; then
+      CLI="$path"
+      BEST_VERSION="$ver"
+    fi
+  fi
+}
+
+# Check all common locations
+check_cli "/opt/homebrew/bin/databricks"
+check_cli "/usr/local/bin/databricks"
+if command -v databricks &>/dev/null; then
+  check_cli "$(command -v databricks)"
+fi
+
+if [ -z "$CLI" ]; then
+  fail "Databricks CLI not found. Install it:
+    macOS:   brew install databricks/tap/databricks
+    Linux:   curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+    Docs:    https://docs.databricks.com/en/dev-tools/cli/install.html"
+fi
+
+CLI_VERSION="$BEST_VERSION"
+CLI_MAJOR=$(echo "$CLI_VERSION" | cut -d. -f1)
+CLI_MINOR=$(echo "$CLI_VERSION" | cut -d. -f2)
+if [[ "$CLI_MAJOR" -eq 0 && "$CLI_MINOR" -lt 285 ]]; then
+  fail "Databricks CLI v$CLI_VERSION is too old (need v0.285+ for Lakebase).
+    Upgrade: brew upgrade databricks/tap/databricks"
+fi
+success "Databricks CLI v$CLI_VERSION ($CLI)"
+
+# Check Node.js
+if ! command -v node &>/dev/null; then
+  fail "Node.js not found. Install it:
+    macOS:   brew install node
+    Other:   https://nodejs.org/"
+fi
+NODE_VERSION=$(node --version | grep -oE '[0-9]+' | head -1)
+if [[ "$NODE_VERSION" -lt 18 ]]; then
+  fail "Node.js v$(node --version) is too old (need v18+). Upgrade: brew install node"
+fi
+success "Node.js $(node --version)"
+
+# Check npm
+if ! command -v npm &>/dev/null; then
+  fail "npm not found. It should come with Node.js."
+fi
+success "npm $(npm --version)"
+
+# Check psql (needed for Lakebase setup)
+if ! command -v psql &>/dev/null; then
+  fail "psql not found. Install PostgreSQL client:
+    macOS:   brew install postgresql@16
+    Linux:   apt install postgresql-client"
+fi
+success "psql ($(psql --version | head -1))"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 2: Authenticate & Detect Workspace
+# ══════════════════════════════════════════════════════════════════════════════
+step "Step 2/8: Authenticating"
+
+# Try to get current user — this validates authentication
+USER_JSON=""
+if [ -n "$PROFILE_FLAG" ]; then
+  USER_JSON=$($CLI current-user me $PROFILE_FLAG -o json 2>/dev/null || true)
+else
+  USER_JSON=$($CLI current-user me -o json 2>/dev/null || true)
+fi
+
+if [ -z "$USER_JSON" ] || ! echo "$USER_JSON" | python3 -c "import sys,json; json.load(sys.stdin)" &>/dev/null; then
+  warn "Not authenticated. Let's log in now."
+  echo ""
+  read -rp "Enter your workspace URL (e.g. https://my-workspace.cloud.databricks.com): " WORKSPACE_URL
+  WORKSPACE_URL="${WORKSPACE_URL%/}"
+
+  if [ -z "$WORKSPACE_URL" ]; then
+    fail "Workspace URL cannot be empty."
+  fi
+
+  info "Opening browser for authentication..."
+  if [ -n "$PROFILE_NAME" ]; then
+    $CLI auth login --host "$WORKSPACE_URL" --profile "$PROFILE_NAME"
+  else
+    $CLI auth login --host "$WORKSPACE_URL"
+  fi
+
+  # Retry
+  if [ -n "$PROFILE_FLAG" ]; then
+    USER_JSON=$($CLI current-user me $PROFILE_FLAG -o json 2>/dev/null || true)
+  else
+    USER_JSON=$($CLI current-user me -o json 2>/dev/null || true)
+  fi
+
+  if [ -z "$USER_JSON" ]; then
+    fail "Authentication failed. Please run: databricks auth login --host YOUR_WORKSPACE_URL"
+  fi
+fi
+
+USER_EMAIL=$(echo "$USER_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('userName',''))")
+success "Authenticated as $USER_EMAIL"
+
+# Get workspace host
+if [ -n "$PROFILE_FLAG" ]; then
+  WORKSPACE_HOST=$($CLI auth env $PROFILE_FLAG 2>/dev/null | python3 -c "
+import sys,json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('env',{}).get('DATABRICKS_HOST',''))
+except: pass
+" 2>/dev/null || true)
+fi
+
+# Fallback: try to get host from CLI config
+if [ -z "${WORKSPACE_HOST:-}" ]; then
+  WORKSPACE_HOST=$($CLI auth env 2>/dev/null | python3 -c "
+import sys,json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('env',{}).get('DATABRICKS_HOST',''))
+except: pass
+" 2>/dev/null || true)
+fi
+
+# Another fallback: read from profiles
+if [ -z "${WORKSPACE_HOST:-}" ]; then
+  if [ -n "$PROFILE_NAME" ]; then
+    WORKSPACE_HOST=$(python3 -c "
+import configparser, os
+c = configparser.ConfigParser()
+c.read(os.path.expanduser('~/.databrickscfg'))
+print(c.get('$PROFILE_NAME', 'host', fallback=''))
+" 2>/dev/null || true)
+  fi
+fi
+
+if [ -z "${WORKSPACE_HOST:-}" ]; then
+  warn "Could not auto-detect workspace host."
+  read -rp "Enter your workspace URL: " WORKSPACE_HOST
+  WORKSPACE_HOST="${WORKSPACE_HOST%/}"
+fi
+
+WORKSPACE_HOST="${WORKSPACE_HOST%/}"
+success "Workspace: $WORKSPACE_HOST"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 3: Select SQL Warehouse
+# ══════════════════════════════════════════════════════════════════════════════
+step "Step 3/8: Selecting SQL Warehouse"
+
+if [ -n "$WAREHOUSE_ID" ]; then
+  success "Using warehouse ID: $WAREHOUSE_ID (provided via --warehouse-id)"
+else
+  # List available warehouses
+  info "Discovering SQL Warehouses..."
+  WAREHOUSES_JSON=$($CLI warehouses list $PROFILE_FLAG -o json 2>/dev/null || echo "[]")
+
+  WAREHOUSE_COUNT=$(echo "$WAREHOUSES_JSON" | python3 -c "
+import sys, json
+try:
+    whs = json.load(sys.stdin)
+    print(len(whs))
+except:
+    print(0)
+" 2>/dev/null)
+
+  if [ "$WAREHOUSE_COUNT" -eq 0 ]; then
+    fail "No SQL Warehouses found in your workspace.
+    Create one: Workspace sidebar > SQL Warehouses > Create warehouse
+    Then re-run this script."
+  fi
+
+  # Display warehouse list
+  echo "$WAREHOUSES_JSON" | python3 -c "
+import sys, json
+whs = json.load(sys.stdin)
+print()
+print('  #   Name                                      Type          Size    State')
+print('  ─── ───────────────────────────────────────── ──────────── ─────── ─────────')
+for i, wh in enumerate(whs, 1):
+    name = wh.get('name', '?')[:42]
+    wtype = wh.get('warehouse_type', '?')
+    if wtype == 'PRO': wtype = 'Pro'
+    elif wtype == 'CLASSIC': wtype = 'Classic'
+    else: wtype = 'Serverless'
+    size = wh.get('cluster_size', '?')
+    state = wh.get('state', '?')
+    print(f'  {i:<3} {name:<43} {wtype:<12} {size:<7} {state}')
+print()
+"
+
+  if [ -n "$WAREHOUSE_NAME" ]; then
+    # Match by name
+    WAREHOUSE_ID=$(echo "$WAREHOUSES_JSON" | python3 -c "
+import sys, json
+whs = json.load(sys.stdin)
+target = '$WAREHOUSE_NAME'.lower()
+for wh in whs:
+    if wh.get('name','').lower() == target:
+        print(wh['id'])
+        break
+" 2>/dev/null)
+    if [ -z "$WAREHOUSE_ID" ]; then
+      fail "No warehouse found matching name: '$WAREHOUSE_NAME'"
+    fi
+    success "Selected warehouse: $WAREHOUSE_NAME ($WAREHOUSE_ID)"
+  else
+    # Interactive selection
+    read -rp "  Select warehouse number [1]: " WH_CHOICE
+    WH_CHOICE="${WH_CHOICE:-1}"
+
+    WAREHOUSE_ID=$(echo "$WAREHOUSES_JSON" | python3 -c "
+import sys, json
+whs = json.load(sys.stdin)
+idx = int('$WH_CHOICE') - 1
+if 0 <= idx < len(whs):
+    print(whs[idx]['id'])
+else:
+    print('')
+" 2>/dev/null)
+
+    WAREHOUSE_NAME=$(echo "$WAREHOUSES_JSON" | python3 -c "
+import sys, json
+whs = json.load(sys.stdin)
+idx = int('$WH_CHOICE') - 1
+if 0 <= idx < len(whs):
+    print(whs[idx].get('name',''))
+" 2>/dev/null)
+
+    if [ -z "$WAREHOUSE_ID" ]; then
+      fail "Invalid selection. Please enter a number from the list."
+    fi
+    success "Selected: $WAREHOUSE_NAME ($WAREHOUSE_ID)"
+  fi
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 4: Configure Catalog
+# ══════════════════════════════════════════════════════════════════════════════
+if [ -z "$QUEST_CATALOG" ]; then
+  echo ""
+  info "Choose a Unity Catalog name for Quest data."
+  info "The scoring pipeline will create this catalog automatically if it doesn't exist."
+  info "If your workspace requires a storage location for new catalogs, create it first in the UI."
+  echo ""
+  read -rp "  Catalog name [quest_data]: " QUEST_CATALOG
+  QUEST_CATALOG="${QUEST_CATALOG:-quest_data}"
+fi
+success "Catalog: $QUEST_CATALOG (schema: $QUEST_SCHEMA)"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 5: Build Frontend
+# ══════════════════════════════════════════════════════════════════════════════
+step "Step 4/8: Building frontend"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FRONTEND_DIR="$SCRIPT_DIR/frontend"
+STATIC_DIR="$SCRIPT_DIR/app/static"
+
+if [ -n "$SKIP_BUILD" ] && [ -f "$STATIC_DIR/index.html" ]; then
+  success "Skipping build (--skip-build). Using existing app/static/."
+else
+  if [ ! -d "$FRONTEND_DIR" ]; then
+    fail "frontend/ directory not found. Are you running this from the repo root?"
+  fi
+
+  info "Installing dependencies..."
+  (cd "$FRONTEND_DIR" && npm install --silent 2>&1 | tail -1)
+  success "Dependencies installed"
+
+  info "Building React app..."
+  (cd "$FRONTEND_DIR" && npm run build 2>&1 | tail -3)
+
+  if [ ! -f "$STATIC_DIR/index.html" ]; then
+    fail "Build failed — app/static/index.html not found."
+  fi
+  success "Frontend built to app/static/"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 6: Update databricks.yml & Deploy Bundle
+# ══════════════════════════════════════════════════════════════════════════════
+step "Step 5/8: Deploying to Databricks"
+
+# Patch databricks.yml with the workspace host
+BUNDLE_FILE="$SCRIPT_DIR/databricks.yml"
+if [ ! -f "$BUNDLE_FILE" ]; then
+  fail "databricks.yml not found. Are you running this from the repo root?"
+fi
+
+# Update workspace host in databricks.yml (both dev and prod targets)
+python3 -c "
+import re, sys
+
+with open('$BUNDLE_FILE', 'r') as f:
+    content = f.read()
+
+# Replace placeholder or existing host in targets
+host = '$WORKSPACE_HOST'
+content = re.sub(
+    r'(host:\s*)https?://[^\s]+',
+    r'\1' + host,
+    content
+)
+
+with open('$BUNDLE_FILE', 'w') as f:
+    f.write(content)
+
+print('OK')
+" || fail "Failed to update databricks.yml"
+
+# Update app name if customized
+if [ "$APP_NAME" != "databricks-quest" ]; then
+  python3 -c "
+with open('$BUNDLE_FILE', 'r') as f:
+    content = f.read()
+# Replace all occurrences — bundle name, app resource name, and job parameter
+content = content.replace('databricks-quest', '$APP_NAME')
+with open('$BUNDLE_FILE', 'w') as f:
+    f.write(content)
+print('OK')
+" || warn "Could not update app name in databricks.yml"
+fi
+
+info "Deploying bundle (app + scoring job + notebook)..."
+set +e
+$CLI bundle deploy --target "$TARGET" $PROFILE_FLAG \
+  --var "warehouse_id=$WAREHOUSE_ID" \
+  --var "quest_catalog=$QUEST_CATALOG" \
+  --var "quest_schema=$QUEST_SCHEMA" \
+  --var "lakebase_host=$LAKEBASE_HOST" \
+  --var "lakebase_db=$LAKEBASE_DB"
+DEPLOY_EXIT=$?
+set -e
+if [ "$DEPLOY_EXIT" -ne 0 ]; then
+  fail "Bundle deploy failed (exit $DEPLOY_EXIT). Check the error above."
+fi
+
+success "Bundle deployed"
+
+# Start app compute and deploy source code
+# The bundle creates the app resource via Terraform but doesn't trigger an app deployment.
+# We need to explicitly start compute and deploy source code.
+info "Starting app and deploying source code..."
+
+# Determine the source code path the bundle uploaded to
+BUNDLE_USER_PATH="/Workspace/Users/${USER_EMAIL}/.bundle/${APP_NAME}/${TARGET}/files/app"
+
+# Start app compute (may already be running)
+$CLI apps start "$APP_NAME" $PROFILE_FLAG -o json 2>/dev/null | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    cs = d.get('compute_status', {})
+    print(f\"  Compute: {cs.get('state', '?')}\")
+except: pass
+" 2>/dev/null || true
+
+# Wait for compute to be active
+for i in $(seq 1 30); do
+  COMPUTE_STATE=$($CLI apps get "$APP_NAME" $PROFILE_FLAG -o json 2>/dev/null | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('compute_status', {}).get('state', 'UNKNOWN'))
+except: print('UNKNOWN')
+" 2>/dev/null || echo "UNKNOWN")
+  if [ "$COMPUTE_STATE" = "ACTIVE" ]; then
+    break
+  fi
+  sleep 5
+done
+
+# Deploy source code
+DEPLOY_RESULT=$($CLI apps deploy "$APP_NAME" \
+  --source-code-path "$BUNDLE_USER_PATH" \
+  $PROFILE_FLAG -o json 2>/dev/null || true)
+
+if echo "$DEPLOY_RESULT" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('status',{}).get('state') == 'SUCCEEDED'" 2>/dev/null; then
+  success "App deployed and running"
+else
+  DEPLOY_STATE=$(echo "$DEPLOY_RESULT" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    state = d.get('status', {}).get('state', 'UNKNOWN')
+    msg = d.get('status', {}).get('message', '')
+    print(f'{state}: {msg}')
+except: print('PENDING')
+" 2>/dev/null || echo "PENDING")
+  info "App deploy status: $DEPLOY_STATE (may still be starting)"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 6b: Provision Lakebase
+# ══════════════════════════════════════════════════════════════════════════════
+if [ -z "$LAKEBASE_HOST" ]; then
+  step "Step 6/8: Provisioning Lakebase"
+
+  LB_PROJECT_ID=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+
+  # Check if Lakebase project already exists
+  EXISTING_PROJECT=$($CLI postgres get-project "projects/$LB_PROJECT_ID" $PROFILE_FLAG -o json 2>/dev/null || true)
+  if echo "$EXISTING_PROJECT" | python3 -c "import sys,json; json.load(sys.stdin)" &>/dev/null 2>&1; then
+    info "Lakebase project '$LB_PROJECT_ID' already exists"
+  else
+    info "Creating Lakebase project '$LB_PROJECT_ID'..."
+    $CLI postgres create-project "$LB_PROJECT_ID" \
+      --json "{\"spec\": {\"display_name\": \"Databricks Quest\"}}" \
+      --no-wait \
+      $PROFILE_FLAG 2>&1 || true
+  fi
+
+  # Wait for endpoint to be ACTIVE
+  info "Waiting for Lakebase endpoint to be ready..."
+  for i in $(seq 1 60); do
+    EP_STATE=$($CLI postgres list-endpoints "projects/$LB_PROJECT_ID/branches/production" \
+      $PROFILE_FLAG -o json 2>/dev/null | python3 -c "
+import sys, json
+try:
+    eps = json.load(sys.stdin)
+    print(eps[0].get('status', {}).get('current_state', 'UNKNOWN'))
+except: print('PENDING')
+" 2>/dev/null || echo "PENDING")
+    if [ "$EP_STATE" = "ACTIVE" ]; then
+      break
+    fi
+    sleep 5
+  done
+
+  if [ "$EP_STATE" != "ACTIVE" ]; then
+    fail "Lakebase endpoint did not become ACTIVE (state: $EP_STATE). Check your workspace."
+  fi
+
+  # Get the endpoint host
+  LAKEBASE_HOST=$($CLI postgres list-endpoints "projects/$LB_PROJECT_ID/branches/production" \
+    $PROFILE_FLAG -o json 2>/dev/null | python3 -c "
+import sys, json
+eps = json.load(sys.stdin)
+print(eps[0]['status']['hosts']['host'])
+" 2>/dev/null)
+
+  success "Lakebase endpoint: $LAKEBASE_HOST"
+
+  # Generate credentials and create database + tables
+  info "Setting up Lakebase database and tables..."
+
+  LB_TOKEN=$($CLI postgres generate-database-credential \
+    "projects/$LB_PROJECT_ID/branches/production/endpoints/primary" \
+    $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+  # Create database (ignore error if it already exists)
+  PGPASSWORD="$LB_TOKEN" psql "host=$LAKEBASE_HOST port=5432 dbname=postgres user=$USER_EMAIL sslmode=require" \
+    -c "CREATE DATABASE $LAKEBASE_DB;" 2>/dev/null || true
+
+  # Create tables (idempotent with IF NOT EXISTS)
+  PGPASSWORD="$LB_TOKEN" psql "host=$LAKEBASE_HOST port=5432 dbname=$LAKEBASE_DB user=$USER_EMAIL sslmode=require" -c "
+CREATE TABLE IF NOT EXISTS mission_completions (
+  user_id TEXT, mission_id TEXT, mission_name TEXT, points_awarded INT,
+  completed_at TIMESTAMP, period_start DATE, period_end DATE, scored_at TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS user_points_fact (
+  user_id TEXT, event_type TEXT, mission_id TEXT, points INT,
+  reason TEXT, event_timestamp TIMESTAMP, scored_at TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS user_profile_snapshot (
+  user_id TEXT, display_name TEXT, total_points INT, level TEXT,
+  current_streak INT, max_streak INT, badge_count INT, missions_completed INT,
+  first_activity_date DATE, last_activity_date DATE, distinct_products_used INT,
+  updated_at TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS leaderboard (
+  user_id TEXT, display_name TEXT, total_points INT, weekly_points INT,
+  monthly_points INT, level TEXT, all_time_rank INT, weekly_rank INT,
+  monthly_rank INT, updated_at TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS badges (
+  user_id TEXT, badge_id TEXT, badge_name TEXT, badge_icon TEXT, earned_at TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS notifications (
+  id SERIAL PRIMARY KEY, user_id TEXT, notification_type TEXT, title TEXT,
+  message TEXT, mission_id TEXT, points INT, created_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_mc_user ON mission_completions(user_id);
+CREATE INDEX IF NOT EXISTS idx_lb_rank ON leaderboard(all_time_rank);
+CREATE INDEX IF NOT EXISTS idx_ups_user ON user_profile_snapshot(user_id);
+CREATE INDEX IF NOT EXISTS idx_badges_user ON badges(user_id);
+CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id);
+" 2>/dev/null
+
+  success "Database '$LAKEBASE_DB' and tables created"
+
+  # Grant app service principal access to Lakebase
+  info "Granting app service principal access to Lakebase..."
+
+  SP_CLIENT_ID=$($CLI apps get "$APP_NAME" $PROFILE_FLAG -o json 2>/dev/null | python3 -c "
+import sys, json
+print(json.load(sys.stdin).get('service_principal_client_id', ''))
+" 2>/dev/null || true)
+
+  if [ -n "$SP_CLIENT_ID" ]; then
+    # Create Postgres role for the SP (ignore error if exists)
+    $CLI postgres create-role "projects/$LB_PROJECT_ID/branches/production" \
+      --role-id "quest-sp" \
+      --json "{\"spec\": {\"identity_type\": \"SERVICE_PRINCIPAL\", \"postgres_role\": \"$SP_CLIENT_ID\", \"auth_method\": \"LAKEBASE_OAUTH_V1\", \"membership_roles\": [\"DATABRICKS_SUPERUSER\"]}}" \
+      $PROFILE_FLAG 2>/dev/null || true
+
+    # Grant SELECT on all tables
+    PGPASSWORD="$LB_TOKEN" psql "host=$LAKEBASE_HOST port=5432 dbname=$LAKEBASE_DB user=$USER_EMAIL sslmode=require" -c "
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO \"$SP_CLIENT_ID\";
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO \"$SP_CLIENT_ID\";
+" 2>/dev/null || true
+
+    success "Service principal ($SP_CLIENT_ID) granted Lakebase access"
+  else
+    warn "Could not find app service principal — you may need to grant Lakebase access manually"
+  fi
+
+  # Re-deploy bundle with the Lakebase host now set
+  info "Updating app configuration with Lakebase endpoint..."
+  $CLI bundle deploy --target "$TARGET" $PROFILE_FLAG \
+    --var "warehouse_id=$WAREHOUSE_ID" \
+    --var "quest_catalog=$QUEST_CATALOG" \
+    --var "quest_schema=$QUEST_SCHEMA" \
+    --var "lakebase_host=$LAKEBASE_HOST" \
+    --var "lakebase_db=$LAKEBASE_DB" 2>&1 || true
+
+  # Re-deploy app source code with updated config
+  $CLI apps deploy "$APP_NAME" \
+    --source-code-path "$BUNDLE_USER_PATH" \
+    $PROFILE_FLAG -o json 2>/dev/null || true
+
+  success "App updated with Lakebase configuration"
+else
+  step "Step 6/8: Lakebase"
+  success "Using provided Lakebase: $LAKEBASE_HOST/$LAKEBASE_DB"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 7: Run Scoring Pipeline
+# ══════════════════════════════════════════════════════════════════════════════
+step "Step 7/8: Running scoring pipeline"
+
+if [ -n "$SKIP_SCORING" ]; then
+  warn "Skipping scoring pipeline (--skip-scoring)."
+  warn "Run it manually later: databricks bundle run quest_scoring_pipeline --target $TARGET"
+else
+  info "This reads system tables, scores missions, creates tables, and grants permissions."
+  info "Takes 2-5 minutes on first run..."
+  echo ""
+
+  set +e
+  $CLI bundle run quest_scoring_pipeline --target "$TARGET" $PROFILE_FLAG \
+    --var "warehouse_id=$WAREHOUSE_ID" \
+    --var "quest_catalog=$QUEST_CATALOG" \
+    --var "quest_schema=$QUEST_SCHEMA" \
+    --var "lakebase_host=$LAKEBASE_HOST" \
+    --var "lakebase_db=$LAKEBASE_DB"
+  RUN_EXIT=$?
+  set -e
+  if [ "$RUN_EXIT" -ne 0 ]; then
+    warn "Scoring pipeline failed (exit $RUN_EXIT). You can re-run it manually later."
+  fi
+
+  success "Scoring pipeline complete"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 8: Get App URL & Print Success
+# ══════════════════════════════════════════════════════════════════════════════
+step "Step 8/8: Verifying deployment"
+
+# Wait a moment for the app to be registered
+sleep 2
+
+# Try to get the app info (dev mode prepends [dev deep_basu] to the name)
+DEV_APP_NAME="$APP_NAME"
+APP_JSON=$($CLI apps get "$DEV_APP_NAME" $PROFILE_FLAG -o json 2>/dev/null || true)
+
+if [ -z "$APP_JSON" ] || ! echo "$APP_JSON" | python3 -c "import sys,json; json.load(sys.stdin)" &>/dev/null; then
+  # In dev mode, the bundle may prefix the app name
+  DEV_APP_NAME="[dev ${USER_EMAIL%%@*}] $APP_NAME"
+  APP_JSON=$($CLI apps get "$DEV_APP_NAME" $PROFILE_FLAG -o json 2>/dev/null || true)
+fi
+
+if [ -z "$APP_JSON" ] || ! echo "$APP_JSON" | python3 -c "import sys,json; json.load(sys.stdin)" &>/dev/null; then
+  # Try without the brackets format (bundle dev mode uses different naming)
+  APP_JSON=""
+fi
+
+APP_URL=""
+APP_STATE=""
+if [ -n "$APP_JSON" ]; then
+  APP_URL=$(echo "$APP_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('url',''))" 2>/dev/null || true)
+  APP_STATE=$(echo "$APP_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',{}).get('state','UNKNOWN'))" 2>/dev/null || true)
+fi
+
+# ── Success Banner ───────────────────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}${GREEN}╔══════════════════════════════════════════════╗${NC}"
+echo -e "${BOLD}${GREEN}║        Databricks Quest — Deployed!          ║${NC}"
+echo -e "${BOLD}${GREEN}╚══════════════════════════════════════════════╝${NC}"
+echo ""
+echo -e "  ${BOLD}Workspace:${NC}     $WORKSPACE_HOST"
+echo -e "  ${BOLD}Catalog:${NC}       $QUEST_CATALOG.$QUEST_SCHEMA"
+echo -e "  ${BOLD}Warehouse:${NC}     ${WAREHOUSE_NAME:-$WAREHOUSE_ID}"
+echo -e "  ${BOLD}App Name:${NC}      $APP_NAME"
+if [ -n "$APP_URL" ]; then
+  echo -e "  ${BOLD}App URL:${NC}       ${CYAN}$APP_URL${NC}"
+fi
+if [ -n "$APP_STATE" ]; then
+  echo -e "  ${BOLD}App State:${NC}     $APP_STATE"
+fi
+echo -e "  ${BOLD}Lakebase:${NC}      $LAKEBASE_HOST/$LAKEBASE_DB"
+echo ""
+
+if [ -n "$APP_URL" ]; then
+  echo -e "  Open the app: ${BOLD}${CYAN}$APP_URL${NC}"
+else
+  echo -e "  Get the app URL:"
+  echo -e "    ${DIM}databricks apps get $APP_NAME $PROFILE_FLAG${NC}"
+fi
+
+echo ""
+echo -e "  ${DIM}The scoring pipeline is scheduled to run every 4 hours.${NC}"
+echo -e "  ${DIM}To re-run it manually:${NC}"
+echo -e "  ${DIM}  databricks bundle run quest_scoring_pipeline --target $TARGET \\${NC}"
+echo -e "  ${DIM}    --var warehouse_id=$WAREHOUSE_ID \\${NC}"
+echo -e "  ${DIM}    --var quest_catalog=$QUEST_CATALOG${NC}"
+echo ""

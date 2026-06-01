@@ -33,8 +33,23 @@ print(f"Quest output: {CATALOG}.{SCHEMA}")
 
 # COMMAND ----------
 
-spark.sql(f"CREATE CATALOG IF NOT EXISTS `{CATALOG}`")
-spark.sql(f"USE CATALOG `{CATALOG}`")
+try:
+    spark.sql(f"CREATE CATALOG IF NOT EXISTS `{CATALOG}`")
+    print(f"Catalog `{CATALOG}` ready.")
+except Exception as e:
+    # Some workspaces require a MANAGED LOCATION for new catalogs.
+    # If the catalog already exists, USE CATALOG will succeed anyway.
+    print(f"Note: CREATE CATALOG failed ({e}). Checking if catalog already exists...")
+
+try:
+    spark.sql(f"USE CATALOG `{CATALOG}`")
+except Exception as e:
+    raise RuntimeError(
+        f"Catalog `{CATALOG}` does not exist and could not be auto-created. "
+        f"Please create it manually in your workspace (Catalog > + Add > Add a catalog) "
+        f"and re-run the pipeline."
+    ) from e
+
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`")
 
 # COMMAND ----------
@@ -866,22 +881,62 @@ print("Badge counts synced to profiles.")
 # COMMAND ----------
 
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.sql import PermissionLevel, WarehouseAccessControlRequest, WarehousePermission
+
+dbutils.widgets.text("warehouse_id", "", "SQL Warehouse ID")
+WH_ID = dbutils.widgets.get("warehouse_id")
 
 try:
     w = WorkspaceClient()
     app_info = w.apps.get(APP_NAME)
-    sp_name = app_info.service_principal_name
+
+    # Try multiple attribute names — SDK versions vary
+    sp_name = getattr(app_info, 'service_principal_name', None) \
+        or getattr(app_info, 'effective_service_principal_name', None)
+    sp_id = getattr(app_info, 'service_principal_id', None)
+    sp_client_id = getattr(app_info, 'service_principal_client_id', None)
+
+    # Fallback: look up SP display name by client ID
+    if not sp_name and sp_client_id:
+        try:
+            for sp in w.service_principals.list(filter=f'applicationId eq "{sp_client_id}"'):
+                sp_name = sp.display_name
+                sp_id = sp.id
+                break
+        except Exception:
+            pass
+
     if sp_name:
-        print(f"App service principal: {sp_name}")
+        print(f"App service principal: {sp_name} (ID: {sp_id})")
+
+        # Grant catalog/schema permissions
         spark.sql(f"GRANT USE_CATALOG ON CATALOG `{CATALOG}` TO `{sp_name}`")
         spark.sql(f"GRANT USE_SCHEMA ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp_name}`")
         spark.sql(f"GRANT SELECT ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp_name}`")
-        print(f"Permissions granted to {sp_name} on {CATALOG}.{SCHEMA}")
+        print(f"Granted catalog/schema access to {sp_name} on {CATALOG}.{SCHEMA}")
+
+        # Grant CAN_USE on the SQL warehouse so the app can query data
+        if WH_ID:
+            try:
+                w.warehouses.set_permissions(
+                    warehouse_id=WH_ID,
+                    access_control_list=[
+                        WarehouseAccessControlRequest(
+                            service_principal_name=sp_name,
+                            permission_level=PermissionLevel.CAN_USE,
+                        )
+                    ],
+                )
+                print(f"Granted CAN_USE on warehouse {WH_ID} to {sp_name}")
+            except Exception as wh_err:
+                print(f"Warning: Warehouse grant failed (non-fatal): {wh_err}")
     else:
-        print(f"Warning: Could not find service principal name for app '{APP_NAME}'")
+        print(f"Warning: Could not resolve service principal for app '{APP_NAME}'")
+        print(f"  SP client ID: {sp_client_id}, SP ID: {sp_id}")
+        print("  You may need to grant permissions manually. See SETUP.md troubleshooting.")
 except Exception as e:
     print(f"Warning: Auto-grant failed (non-fatal): {e}")
-    print("You may need to manually grant permissions. See SETUP.md Step 7.")
+    print("You may need to manually grant permissions. See SETUP.md troubleshooting.")
 
 # COMMAND ----------
 
@@ -941,7 +996,9 @@ def tbl(name):
     return f"`{CATALOG}`.`{SCHEMA}`.`{name}`"
 
 w = WorkspaceClient()
-token = w.config.token
+headers = w.config.authenticate()
+auth_header = headers.get("Authorization", "")
+token = auth_header[7:] if auth_header.startswith("Bearer ") else w.config.token
 user_email = w.current_user.me().user_name
 
 def get_pg_conn():

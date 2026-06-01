@@ -2,16 +2,36 @@
 
 A gamification app that turns Databricks platform adoption into a game. Users earn points for building pipelines, running jobs, creating dashboards, querying data, and more. Weekly swag prizes keep things competitive.
 
-Built entirely on Databricks: system tables for usage tracking, Delta Lake for scoring, Lakebase (managed PostgreSQL) for fast reads, and Databricks Apps for hosting.
+Built entirely on Databricks: system tables for usage tracking, Delta Lake for scoring, and Databricks Apps for hosting. Users log in with their existing workspace credentials.
 
 ## How It Works
 
 1. A **scoring pipeline** runs every 4 hours, reading Databricks system tables to detect what each user has done on the platform
 2. It scores 10 missions (creating jobs, building pipelines, using Genie, etc.) and writes results to Delta tables
-3. Optionally syncs scored data to **Lakebase** (managed PostgreSQL) for sub-second app response times
-4. A **React + FastAPI app** runs as a Databricks App, showing each user their personalized dashboard, missions, leaderboard, and badges
+3. A **React + FastAPI app** runs as a Databricks App, showing each user their personalized dashboard, missions, leaderboard, and badges
 
-Users log in with their existing workspace credentials. No separate accounts needed.
+No separate accounts needed. Users log in with their workspace credentials and see their own data.
+
+## Deploy (One Command)
+
+```bash
+git clone https://github.com/deepbasu123/databricks-quest.git
+cd databricks-quest
+./deploy.sh
+```
+
+The script handles everything interactively:
+- Checks prerequisites (CLI, Node.js, psql)
+- Authenticates with your workspace (opens browser if needed)
+- Lists your SQL Warehouses and lets you pick one
+- Asks for a catalog name
+- Builds the React frontend
+- Deploys the app, notebook, and scheduled job
+- Provisions a Lakebase (managed PostgreSQL) database for sub-second app reads
+- Runs the scoring pipeline to populate data
+- Prints the app URL when done
+
+See **[SETUP.md](SETUP.md)** for prerequisites, flags for non-interactive use, and troubleshooting.
 
 ## What Users See
 
@@ -45,66 +65,14 @@ Users log in with their existing workspace credentials. No separate accounts nee
 | Platinum | 2,000 |
 | Elite | 5,000 |
 
----
-
-## Deployment
-
-Full step-by-step guide with explanations: **[SETUP.md](SETUP.md)**
-
-### Prerequisites
-
-- A Databricks workspace with Unity Catalog and system tables enabled
-- [Databricks CLI](https://docs.databricks.com/en/dev-tools/cli/install.html) v0.200+
-- [Node.js](https://nodejs.org/) 18+
-- A SQL Warehouse ID from your workspace
-
-### Quick Deploy (6 commands)
-
-```bash
-# 1. Clone and enter the repo
-git clone https://github.com/deepbasu123/databricks-quest.git
-cd databricks-quest
-
-# 2. Set your workspace URL in databricks.yml (the only file you need to edit)
-#    Change the host under targets > dev > workspace
-
-# 3. Authenticate with your workspace
-databricks auth login --host https://YOUR_WORKSPACE.cloud.databricks.com
-
-# 4. Build the frontend
-cd frontend && npm install && npm run build && cd ..
-
-# 5. Deploy everything (app + scoring job + notebook)
-databricks bundle deploy --target dev \
-  --var warehouse_id=YOUR_WAREHOUSE_ID \
-  --var quest_catalog=YOUR_CATALOG_NAME \
-  --var lakebase_host="" \
-  --var lakebase_db=quest_db
-
-# 6. Run the scoring pipeline (creates catalog/schema/tables, scores missions,
-#    grants app permissions — everything is automatic)
-databricks bundle run quest_scoring_pipeline --target dev
-```
-
-Then open the app:
-
-```bash
-databricks apps get databricks-quest
-# Open the URL from the output in your browser
-```
-
-That's it. The catalog, schema, tables, and app permissions are all created automatically by the scoring pipeline. A scheduled job re-runs the pipeline every 4 hours to keep data fresh.
-
----
-
 ## Architecture
 
 ```
 System Tables (read-only)          Quest App (Databricks App)
   system.billing.usage                 React Frontend
   system.lakeflow.jobs           <---  FastAPI Backend
-  system.lakeflow.pipelines            reads from Delta/Lakebase
-  system.query.history
+  system.lakeflow.pipelines            reads from Lakebase
+  system.query.history                 (sub-second queries)
   system.access.audit
         |
         v
@@ -112,10 +80,10 @@ System Tables (read-only)          Quest App (Databricks App)
   runs as serverless job
         |
         v
-  Delta Tables                   Lakebase (optional)
-  <catalog>.quest.*         ---> quest_db (PostgreSQL)
-  mission_completions            for sub-second reads
-  user_profile_snapshot
+  Delta Tables              --->  Lakebase (PostgreSQL)
+  <catalog>.quest.*                quest_db
+  mission_completions              synced on every
+  user_profile_snapshot            pipeline run
   leaderboard
   badges, notifications
 ```
@@ -125,34 +93,35 @@ System Tables (read-only)          Quest App (Databricks App)
 - **Frontend**: React 18, TypeScript, Tailwind CSS, Lucide icons, Vite
 - **Backend**: FastAPI, Python 3.10+
 - **Data**: Spark SQL, Delta Lake, system tables
-- **Database**: Lakebase (managed PostgreSQL) or SQL Warehouse
-- **Deployment**: Databricks Asset Bundles (DAB), Databricks Apps
-- **Auth**: Workspace OAuth (SSO) — users log in with their Databricks credentials
+- **Database**: Lakebase (managed PostgreSQL) for sub-second reads
+- **Deployment**: Databricks Asset Bundles, Databricks Apps
+- **Auth**: Workspace OAuth (SSO)
 
 ## Project Structure
 
 ```
 databricks-quest/
-  databricks.yml          # Bundle config — app, job, variables
+  deploy.sh               # One-shot deployment script
+  databricks.yml           # Bundle config (app, job, variables)
   app/
-    main.py               # FastAPI backend (API endpoints)
-    app.yaml              # Databricks App config
-    requirements.txt      # Python dependencies
-    static/               # Built React app (gitignored, generated by npm run build)
+    main.py                # FastAPI backend (API endpoints)
+    app.yaml               # Databricks App config
+    requirements.txt       # Python dependencies
+    static/                # Built React app (generated by npm run build)
   frontend/
     src/
-      App.tsx             # Main app with sidebar navigation
+      App.tsx              # Main app with sidebar navigation
       components/
-        Dashboard.tsx     # User dashboard with stats and badges
-        Missions.tsx      # Mission grid with completion status
-        Leaderboard.tsx   # Top 10 with podium and swag prizes
-        AdminPanel.tsx    # Admin stats and pipeline health
-      types.ts            # TypeScript interfaces
+        Dashboard.tsx      # User dashboard with stats and badges
+        Missions.tsx       # Mission grid with completion status
+        Leaderboard.tsx    # Top 10 with podium and swag prizes
+        AdminPanel.tsx     # Admin stats and pipeline health
+      types.ts             # TypeScript interfaces
     package.json
     vite.config.ts
   notebooks/
-    scoring_pipeline.py   # Spark notebook that scores all missions
-  SETUP.md                # Detailed deployment guide
+    scoring_pipeline.py    # Spark notebook that scores all missions
+  SETUP.md                 # Full deployment guide & troubleshooting
 ```
 
 ## License

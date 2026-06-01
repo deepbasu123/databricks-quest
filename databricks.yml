@@ -1,11 +1,15 @@
 bundle:
   name: databricks-quest
 
+sync:
+  include:
+    - app/static/**
+
 variables:
   warehouse_id:
     description: SQL Warehouse ID for the scoring pipeline job (find in SQL Warehouses page)
   quest_catalog:
-    description: Unity Catalog name for Quest data (auto-created if it doesn't exist)
+    description: Unity Catalog name for Quest data (auto-created if possible, or create manually)
   quest_schema:
     description: Schema name for Quest scored tables (auto-created by scoring pipeline)
     default: quest
@@ -52,6 +56,7 @@ resources:
               lakebase_host: ${var.lakebase_host}
               lakebase_db: ${var.lakebase_db}
               app_name: databricks-quest
+              warehouse_id: ${var.warehouse_id}
             source: WORKSPACE
           environment_key: default
       environments:

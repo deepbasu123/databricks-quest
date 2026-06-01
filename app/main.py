@@ -9,8 +9,6 @@ from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from databricks.sdk import WorkspaceClient
-import psycopg2
-import psycopg2.extras
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("databricks-quest")
@@ -19,6 +17,11 @@ app = FastAPI(title="Databricks Quest API")
 
 LAKEBASE_HOST = os.getenv("LAKEBASE_HOST", "")
 LAKEBASE_DB = os.getenv("LAKEBASE_DB", "quest_db")
+
+if not LAKEBASE_HOST:
+    logger.warning("LAKEBASE_HOST not set — database queries will fail until configured")
+else:
+    logger.info(f"Data source: Lakebase ({LAKEBASE_HOST}/{LAKEBASE_DB})")
 
 MISSION_DEFINITIONS = [
     {
@@ -186,6 +189,9 @@ _conn_cache = {"conn": None, "expiry": 0}
 
 
 def get_lakebase_connection():
+    import psycopg2
+    import psycopg2.extras
+
     now = time.time()
     cached = _conn_cache["conn"]
     if cached and _conn_cache["expiry"] > now:
@@ -222,6 +228,8 @@ def get_lakebase_connection():
 
 
 def execute_query(query: str, params: tuple = ()) -> List[Dict[str, Any]]:
+    import psycopg2.extras
+
     conn = get_lakebase_connection()
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(query, params)
