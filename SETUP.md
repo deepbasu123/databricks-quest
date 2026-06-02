@@ -63,6 +63,8 @@ All flags:
 | `--profile NAME` | Databricks CLI profile to use | Default profile |
 | `--target TARGET` | Bundle target (`dev` or `prod`) | `dev` |
 | `--lakebase-host HOST` | Lakebase endpoint for faster reads | None (uses SQL Warehouse) |
+| `--full` | Full deploy with DAB bundle + scoring job | Default |
+| `--quick` | Quick deploy via Apps API (like Forge) | Interactive prompt |
 | `--skip-build` | Skip frontend build (reuse existing) | Builds every time |
 | `--skip-scoring` | Skip running the scoring pipeline | Runs every time |
 

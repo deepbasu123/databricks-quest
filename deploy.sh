@@ -33,6 +33,7 @@ LAKEBASE_DB="quest_db"
 TARGET="dev"
 SKIP_BUILD=""
 SKIP_SCORING=""
+DEPLOY_MODE=""  # "full" (DAB bundle) or "quick" (direct API, like Forge)
 
 # ── Colors ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -65,6 +66,8 @@ while [[ $# -gt 0 ]]; do
     --lakebase-db)    LAKEBASE_DB="$2"; shift 2 ;;
     --skip-build)     SKIP_BUILD=1; shift ;;
     --skip-scoring)   SKIP_SCORING=1; shift ;;
+    --quick)          DEPLOY_MODE="quick"; shift ;;
+    --full)           DEPLOY_MODE="full"; shift ;;
     --help|-h)
       echo "Usage: ./deploy.sh [OPTIONS]"
       echo ""
@@ -78,6 +81,8 @@ while [[ $# -gt 0 ]]; do
       echo "  --target TARGET       Bundle target: dev or prod (default: dev)"
       echo "  --lakebase-host HOST  Lakebase endpoint host (optional, for faster reads)"
       echo "  --lakebase-db NAME    Lakebase database name (default: quest_db)"
+      echo "  --quick               Quick deploy: direct API (no DAB bundle, like Forge)"
+      echo "  --full                Full deploy: DAB bundle with scoring job (default)"
       echo "  --skip-build          Skip frontend build (use existing app/static/)"
       echo "  --skip-scoring        Skip running the scoring pipeline"
       echo "  --help, -h            Show this help message"
@@ -174,6 +179,34 @@ if ! command -v psql &>/dev/null; then
     Linux:   apt install postgresql-client"
 fi
 success "psql ($(psql --version | head -1))"
+
+# ── Deploy Mode Selection ────────────────────────────────────────────────────
+if [ -z "$DEPLOY_MODE" ]; then
+  echo ""
+  echo -e "  ${BOLD}Choose deployment mode:${NC}"
+  echo ""
+  echo -e "  ${CYAN}1)${NC} ${BOLD}Full Deploy${NC} (recommended)"
+  echo -e "     Uses Databricks Asset Bundles. Deploys the app, scoring notebook,"
+  echo -e "     and a scheduled job that re-scores every 4 hours."
+  echo ""
+  echo -e "  ${CYAN}2)${NC} ${BOLD}Quick Deploy${NC}"
+  echo -e "     Uses the Databricks Apps API directly (like Forge)."
+  echo -e "     Deploys only the app. You run the scoring notebook manually."
+  echo ""
+  read -rp "  Select mode [1]: " MODE_CHOICE
+  MODE_CHOICE="${MODE_CHOICE:-1}"
+  if [ "$MODE_CHOICE" = "2" ]; then
+    DEPLOY_MODE="quick"
+  else
+    DEPLOY_MODE="full"
+  fi
+fi
+
+if [ "$DEPLOY_MODE" = "quick" ]; then
+  success "Deploy mode: Quick (direct API)"
+else
+  success "Deploy mode: Full (DAB bundle + scoring job)"
+fi
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 2: Authenticate & Detect Workspace
@@ -398,69 +431,122 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 6: Update databricks.yml & Deploy Bundle
+# STEP 5: Deploy App
 # ══════════════════════════════════════════════════════════════════════════════
 step "Step 5/8: Deploying to Databricks"
 
-# Patch databricks.yml with the workspace host
 BUNDLE_FILE="$SCRIPT_DIR/databricks.yml"
-if [ ! -f "$BUNDLE_FILE" ]; then
-  fail "databricks.yml not found. Are you running this from the repo root?"
-fi
 
-# Update workspace host in databricks.yml (both dev and prod targets)
-python3 -c "
+if [ "$DEPLOY_MODE" = "quick" ]; then
+  # ── Quick Deploy: Direct API (like Forge) ──────────────────────────────────
+  info "Creating app via Apps API..."
+
+  # Create the app (ignore error if already exists)
+  $CLI apps create "$APP_NAME" \
+    --description "Databricks Quest - Gamification app for platform adoption" \
+    $PROFILE_FLAG 2>/dev/null || true
+
+  # Upload app source code to workspace
+  APP_WORKSPACE_PATH="/Workspace/Users/${USER_EMAIL}/databricks-quest/app"
+  info "Uploading app source to $APP_WORKSPACE_PATH..."
+  $CLI workspace import-dir "$SCRIPT_DIR/app" "$APP_WORKSPACE_PATH" \
+    --overwrite $PROFILE_FLAG 2>&1 || true
+
+  # Upload scoring notebook
+  NB_WORKSPACE_PATH="/Workspace/Users/${USER_EMAIL}/databricks-quest/notebooks"
+  info "Uploading scoring notebook..."
+  $CLI workspace import-dir "$SCRIPT_DIR/notebooks" "$NB_WORKSPACE_PATH" \
+    --overwrite $PROFILE_FLAG 2>&1 || true
+
+  # Start app compute
+  $CLI apps start "$APP_NAME" $PROFILE_FLAG 2>/dev/null || true
+
+  # Wait for compute
+  for i in $(seq 1 30); do
+    COMPUTE_STATE=$($CLI apps get "$APP_NAME" $PROFILE_FLAG -o json 2>/dev/null | python3 -c "
+import sys, json
+try: print(json.load(sys.stdin).get('compute_status', {}).get('state', 'UNKNOWN'))
+except: print('UNKNOWN')
+" 2>/dev/null || echo "UNKNOWN")
+    if [ "$COMPUTE_STATE" = "ACTIVE" ]; then break; fi
+    sleep 5
+  done
+
+  # Deploy source code to the app
+  DEPLOY_RESULT=$($CLI apps deploy "$APP_NAME" \
+    --source-code-path "$APP_WORKSPACE_PATH" \
+    $PROFILE_FLAG -o json 2>/dev/null || true)
+
+  DEPLOY_STATE=$(echo "$DEPLOY_RESULT" | python3 -c "
+import sys, json
+try: print(json.load(sys.stdin).get('status', {}).get('state', 'PENDING'))
+except: print('PENDING')
+" 2>/dev/null || echo "PENDING")
+
+  if [ "$DEPLOY_STATE" = "SUCCEEDED" ]; then
+    success "App deployed and running"
+  else
+    info "App deploy status: $DEPLOY_STATE (may still be starting)"
+  fi
+
+  # Set environment variables on the app
+  info "Configuring app environment..."
+  $CLI apps update "$APP_NAME" \
+    --json "{\"config\": {\"command\": [\"uvicorn\", \"main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\"], \"env\": [{\"name\": \"LAKEBASE_HOST\", \"value\": \"$LAKEBASE_HOST\"}, {\"name\": \"LAKEBASE_DB\", \"value\": \"$LAKEBASE_DB\"}]}}" \
+    $PROFILE_FLAG 2>/dev/null || true
+
+  success "Quick deploy complete"
+
+else
+  # ── Full Deploy: DAB Bundle ────────────────────────────────────────────────
+  if [ ! -f "$BUNDLE_FILE" ]; then
+    fail "databricks.yml not found. Are you running this from the repo root?"
+  fi
+
+  # Update workspace host in databricks.yml
+  python3 -c "
 import re, sys
-
 with open('$BUNDLE_FILE', 'r') as f:
     content = f.read()
-
-# Replace placeholder or existing host in targets
 host = '$WORKSPACE_HOST'
-content = re.sub(
-    r'(host:\s*)https?://[^\s]+',
-    r'\1' + host,
-    content
-)
-
+content = re.sub(r'(host:\s*)https?://[^\s]+', r'\1' + host, content)
 with open('$BUNDLE_FILE', 'w') as f:
     f.write(content)
-
 print('OK')
 " || fail "Failed to update databricks.yml"
 
-# Update app name if customized
-if [ "$APP_NAME" != "databricks-quest" ]; then
-  python3 -c "
+  # Update app name if customized
+  if [ "$APP_NAME" != "databricks-quest" ]; then
+    python3 -c "
 with open('$BUNDLE_FILE', 'r') as f:
     content = f.read()
-# Replace all occurrences — bundle name, app resource name, and job parameter
 content = content.replace('databricks-quest', '$APP_NAME')
 with open('$BUNDLE_FILE', 'w') as f:
     f.write(content)
 print('OK')
 " || warn "Could not update app name in databricks.yml"
+  fi
+
+  info "Deploying bundle (app + scoring job + notebook)..."
+  set +e
+  $CLI bundle deploy --target "$TARGET" $PROFILE_FLAG \
+    --var "warehouse_id=$WAREHOUSE_ID" \
+    --var "quest_catalog=$QUEST_CATALOG" \
+    --var "quest_schema=$QUEST_SCHEMA" \
+    --var "lakebase_host=$LAKEBASE_HOST" \
+    --var "lakebase_db=$LAKEBASE_DB"
+  DEPLOY_EXIT=$?
+  set -e
+  if [ "$DEPLOY_EXIT" -ne 0 ]; then
+    fail "Bundle deploy failed (exit $DEPLOY_EXIT). Check the error above."
+  fi
+
+  success "Bundle deployed"
 fi
 
-info "Deploying bundle (app + scoring job + notebook)..."
-set +e
-$CLI bundle deploy --target "$TARGET" $PROFILE_FLAG \
-  --var "warehouse_id=$WAREHOUSE_ID" \
-  --var "quest_catalog=$QUEST_CATALOG" \
-  --var "quest_schema=$QUEST_SCHEMA" \
-  --var "lakebase_host=$LAKEBASE_HOST" \
-  --var "lakebase_db=$LAKEBASE_DB"
-DEPLOY_EXIT=$?
-set -e
-if [ "$DEPLOY_EXIT" -ne 0 ]; then
-  fail "Bundle deploy failed (exit $DEPLOY_EXIT). Check the error above."
-fi
-
-success "Bundle deployed"
-
-# Start app compute and deploy source code
+# Start app compute and deploy source code (full deploy mode only)
 # The bundle creates the app resource via Terraform but doesn't trigger an app deployment.
-# We need to explicitly start compute and deploy source code.
+if [ "$DEPLOY_MODE" != "quick" ]; then
 info "Starting app and deploying source code..."
 
 # Determine the source code path the bundle uploaded to
@@ -510,6 +596,8 @@ except: print('PENDING')
 " 2>/dev/null || echo "PENDING")
   info "App deploy status: $DEPLOY_STATE (may still be starting)"
 fi
+
+fi  # end full deploy app start/deploy
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 6b: Provision Lakebase
@@ -663,7 +751,28 @@ step "Step 7/8: Running scoring pipeline"
 
 if [ -n "$SKIP_SCORING" ]; then
   warn "Skipping scoring pipeline (--skip-scoring)."
-  warn "Run it manually later: databricks bundle run quest_scoring_pipeline --target $TARGET"
+  if [ "$DEPLOY_MODE" = "quick" ]; then
+    warn "Run the scoring notebook manually from your workspace."
+  else
+    warn "Run it manually later: databricks bundle run quest_scoring_pipeline --target $TARGET"
+  fi
+elif [ "$DEPLOY_MODE" = "quick" ]; then
+  info "Running scoring notebook via one-time job..."
+  info "Takes 2-5 minutes on first run..."
+  echo ""
+
+  NB_WORKSPACE_PATH="/Workspace/Users/${USER_EMAIL}/databricks-quest/notebooks/scoring_pipeline"
+  set +e
+  $CLI jobs submit \
+    --json "{\"run_name\": \"Quest Scoring (one-time)\", \"tasks\": [{\"task_key\": \"run_scoring\", \"notebook_task\": {\"notebook_path\": \"$NB_WORKSPACE_PATH\", \"base_parameters\": {\"quest_catalog\": \"$QUEST_CATALOG\", \"quest_schema\": \"$QUEST_SCHEMA\", \"lakebase_host\": \"$LAKEBASE_HOST\", \"lakebase_db\": \"$LAKEBASE_DB\", \"app_name\": \"$APP_NAME\", \"warehouse_id\": \"$WAREHOUSE_ID\"}, \"source\": \"WORKSPACE\"}, \"environment_key\": \"default\"}], \"environments\": [{\"environment_key\": \"default\", \"spec\": {\"client\": \"1\", \"dependencies\": [\"psycopg2-binary\"]}}]}" \
+    $PROFILE_FLAG 2>&1
+  RUN_EXIT=$?
+  set -e
+  if [ "$RUN_EXIT" -ne 0 ]; then
+    warn "Scoring pipeline submit failed (exit $RUN_EXIT). Run the notebook manually from your workspace."
+  else
+    success "Scoring pipeline submitted"
+  fi
 else
   info "This reads system tables, scores missions, creates tables, and grants permissions."
   info "Takes 2-5 minutes on first run..."

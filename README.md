@@ -20,28 +20,33 @@ cd databricks-quest
 ./deploy.sh
 ```
 
-The script handles everything interactively:
-- Checks prerequisites (CLI, Node.js, psql)
-- Authenticates with your workspace (opens browser if needed)
-- Lists your SQL Warehouses and lets you pick one
-- Asks for a catalog name
-- Builds the React frontend
-- Deploys the app, notebook, and scheduled job
-- Provisions a Lakebase (managed PostgreSQL) database for sub-second app reads
-- Runs the scoring pipeline to populate data
-- Prints the app URL when done
+The script handles everything interactively. Choose your deployment mode:
+
+**Full Deploy** (recommended) — Uses Databricks Asset Bundles. Deploys the app, scoring notebook, and a scheduled job that re-scores every 4 hours automatically.
+
+**Quick Deploy** — Uses the Databricks Apps API directly (like [Forge](https://github.com/althrussell/databricks-forge)). Deploys only the app. You run the scoring notebook manually.
+
+Both modes handle:
+- Prerequisite checks (CLI, Node.js, psql)
+- Authentication (opens browser if needed)
+- Interactive warehouse selection
+- Frontend build
+- Lakebase auto-provisioning (database, tables, indexes, SP grants)
+- Scoring pipeline execution
+- App URL at the end
 
 See **[SETUP.md](SETUP.md)** for prerequisites, flags for non-interactive use, and troubleshooting.
 
 ## What Users See
 
 - **Dashboard** — Current level, points, streak, badges, and next missions to complete
-- **Missions** — 10 missions across Data Engineering, Analytics, and Engagement categories
+- **Missions** — 30+ missions across Data Engineering, Analytics, AI/ML, Streaming, Consumption, and Engagement
 - **Leaderboard** — Top 10 users with weekly swag prizes (1st: hoodie/tshirt, 2nd: coffee cup/water bottle/notebook, 3rd: stickers)
 - **Admin** — Pipeline health, user stats, mission completion charts, level distribution
 
 ## Missions
 
+### Getting Started & Data Engineering
 | Mission | Points | What To Do |
 |---------|--------|------------|
 | First Steps | 25 | Use any Databricks compute for the first time |
@@ -50,10 +55,52 @@ See **[SETUP.md](SETUP.md)** for prerequisites, flags for non-interactive use, a
 | Pipeline Runner | 200 | Run a pipeline successfully |
 | Scheduler | 150 | Set up a scheduled or CRON-triggered job |
 | Auto Loader Pioneer | 250 | Use Auto Loader in a pipeline |
+| Multi-Task Orchestrator | 200 | Create a workflow with 3+ tasks |
+| Liquid Clustering Adopter | 200 | Enable Liquid Clustering on a table |
+
+### Analytics
+| Mission | Points | What To Do |
+|---------|--------|------------|
 | Genie Creator | 200 | Create an AI/BI Genie space |
 | Dashboard Designer | 150 | Create a Databricks Dashboard |
-| Consistent Operator | 300 | Run jobs/pipelines on 7 days within a 30-day window (repeatable monthly) |
-| Data Explorer | 150 | Execute 50+ SQL queries in a single week (repeatable weekly) |
+| Data Explorer | 150 | Execute 50+ SQL queries in a single week (repeatable) |
+| Power Analyst | 200 | Execute 200+ SQL queries in a single week (repeatable) |
+| Alert Creator | 150 | Create a SQL Alert with a schedule |
+| Dashboard Publisher | 200 | Publish a dashboard shared with 3+ viewers |
+
+### AI / ML
+| Mission | Points | What To Do |
+|---------|--------|------------|
+| Model Deployer | 300 | Deploy a model to a serving endpoint |
+| AI Function Builder | 250 | Use ai_query() in a SQL statement |
+| Vector Search Pioneer | 200 | Create a Vector Search index |
+| MLflow Experimenter | 150 | Log 10+ MLflow experiment runs |
+
+### Streaming
+| Mission | Points | What To Do |
+|---------|--------|------------|
+| Stream Starter | 250 | Run a Structured Streaming job for 24+ hours |
+
+### Consumption (DBU-based)
+| Mission | Points | What To Do |
+|---------|--------|------------|
+| First 100 DBUs | 50 | Reach 100 lifetime DBUs |
+| 1K DBU Club | 200 | Reach 1,000 lifetime DBUs |
+| 10K DBU Club | 500 | Reach 10,000 lifetime DBUs |
+| 100K DBU Club | 1,000 | Reach 100,000 lifetime DBUs |
+| SQL Analyst | 100 | 50+ SQL Warehouse DBUs in a month (repeatable) |
+| Job Runner | 100 | 50+ Jobs Compute DBUs in a month (repeatable) |
+| ML Practitioner | 150 | Any Model Serving DBUs in a month (repeatable) |
+| Pipeline Operator | 100 | 50+ DLT DBUs in a month (repeatable) |
+
+Plus **continuous consumption points**: 1 point per 10 DBUs consumed, scored weekly. This keeps the leaderboard dynamic and rewards sustained platform usage.
+
+### Engagement
+| Mission | Points | What To Do |
+|---------|--------|------------|
+| Consistent Operator | 300 | Run jobs/pipelines on 7 days within 30 days (repeatable) |
+| Daily Driver | 400 | Active on 20+ days in a 30-day window (repeatable) |
+| Cross-Product Champion | 500 | Use 6+ distinct Databricks products in a month (repeatable) |
 
 ## Levels
 

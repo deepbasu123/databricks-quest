@@ -516,6 +516,381 @@ print("Mission scored: Dashboard Designer")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ### Mission: Multi-Task Orchestrator (200 pts)
+# MAGIC Create a workflow with 3+ tasks.
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    j.creator_user_name AS user_id,
+    'multi_task_orchestrator' AS mission_id,
+    'Multi-Task Orchestrator' AS mission_name,
+    200 AS points_awarded,
+    MIN(j.change_time) AS completed_at,
+    CAST(MIN(j.change_time) AS DATE) AS period_start,
+    CAST(MIN(j.change_time) AS DATE) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY workspace_id, job_id ORDER BY change_time DESC) AS rn
+    FROM system.lakeflow.jobs
+  ) j
+  JOIN system.lakeflow.job_tasks t ON j.job_id = t.job_id AND j.workspace_id = t.workspace_id
+  WHERE j.rn = 1
+    AND j.delete_time IS NULL
+    AND j.creator_user_name IS NOT NULL AND j.creator_user_name != ''
+  GROUP BY j.creator_user_name
+  HAVING COUNT(DISTINCT t.task_key) >= 3
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: Multi-Task Orchestrator")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: Power Analyst (200 pts)
+# MAGIC Execute 200+ SQL queries in a week.
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    executed_by AS user_id,
+    'power_analyst' AS mission_id,
+    'Power Analyst' AS mission_name,
+    200 AS points_awarded,
+    CAST(MAX(start_time) AS TIMESTAMP) AS completed_at,
+    DATE_TRUNC('WEEK', start_time) AS period_start,
+    DATE_ADD(DATE_TRUNC('WEEK', start_time), 6) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.query.history
+  WHERE executed_by IS NOT NULL AND executed_by != ''
+    AND statement_type IN ('SELECT', 'INSERT', 'MERGE', 'CREATE', 'ALTER')
+    AND start_time >= DATE_SUB(CURRENT_DATE(), 30)
+  GROUP BY executed_by, DATE_TRUNC('WEEK', start_time)
+  HAVING COUNT(*) >= 200
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id AND target.period_start = source.period_start
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: Power Analyst")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: Alert Creator (150 pts)
+# MAGIC Create a SQL Alert with a schedule.
+
+# COMMAND ----------
+
+try:
+    spark.sql(f"""
+    MERGE INTO {tbl('mission_completions')} AS target
+    USING (
+      SELECT
+        user_identity.email AS user_id,
+        'alert_creator' AS mission_id,
+        'Alert Creator' AS mission_name,
+        150 AS points_awarded,
+        MIN(event_time) AS completed_at,
+        CAST(MIN(event_time) AS DATE) AS period_start,
+        CAST(MIN(event_time) AS DATE) AS period_end,
+        CAST('{NOW}' AS TIMESTAMP) AS scored_at
+      FROM system.access.audit
+      WHERE action_name IN ('createAlert', 'createLegacyAlert')
+        AND response.status_code = 200
+        AND user_identity.email IS NOT NULL AND user_identity.email != ''
+      GROUP BY user_identity.email
+    ) AS source
+    ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+    WHEN NOT MATCHED THEN INSERT *
+    """)
+    print("Mission scored: Alert Creator")
+except Exception as e:
+    print(f"Mission skipped: Alert Creator ({e})")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: Model Deployer (300 pts)
+# MAGIC Deploy a model to a serving endpoint.
+
+# COMMAND ----------
+
+try:
+    spark.sql(f"""
+    MERGE INTO {tbl('mission_completions')} AS target
+    USING (
+      SELECT
+        user_identity.email AS user_id,
+        'model_deployer' AS mission_id,
+        'Model Deployer' AS mission_name,
+        300 AS points_awarded,
+        MIN(event_time) AS completed_at,
+        CAST(MIN(event_time) AS DATE) AS period_start,
+        CAST(MIN(event_time) AS DATE) AS period_end,
+        CAST('{NOW}' AS TIMESTAMP) AS scored_at
+      FROM system.access.audit
+      WHERE action_name IN ('createServingEndpoint', 'create_serving_endpoint')
+        AND response.status_code = 200
+        AND user_identity.email IS NOT NULL AND user_identity.email != ''
+      GROUP BY user_identity.email
+    ) AS source
+    ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+    WHEN NOT MATCHED THEN INSERT *
+    """)
+    print("Mission scored: Model Deployer")
+except Exception as e:
+    print(f"Mission skipped: Model Deployer ({e})")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: AI Function Builder (250 pts)
+# MAGIC Use ai_query() in a SQL statement.
+
+# COMMAND ----------
+
+try:
+    spark.sql(f"""
+    MERGE INTO {tbl('mission_completions')} AS target
+    USING (
+      SELECT
+        executed_by AS user_id,
+        'ai_function_builder' AS mission_id,
+        'AI Function Builder' AS mission_name,
+        250 AS points_awarded,
+        CAST(MIN(start_time) AS TIMESTAMP) AS completed_at,
+        CAST(MIN(start_time) AS DATE) AS period_start,
+        CAST(MIN(start_time) AS DATE) AS period_end,
+        CAST('{NOW}' AS TIMESTAMP) AS scored_at
+      FROM system.query.history
+      WHERE LOWER(statement_text) LIKE '%ai_query%'
+        AND executed_by IS NOT NULL AND executed_by != ''
+        AND execution_status = 'FINISHED'
+      GROUP BY executed_by
+    ) AS source
+    ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+    WHEN NOT MATCHED THEN INSERT *
+    """)
+    print("Mission scored: AI Function Builder")
+except Exception as e:
+    print(f"Mission skipped: AI Function Builder ({e})")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: MLflow Experimenter (150 pts)
+# MAGIC Log 10+ MLflow experiment runs.
+
+# COMMAND ----------
+
+try:
+    spark.sql(f"""
+    MERGE INTO {tbl('mission_completions')} AS target
+    USING (
+      SELECT
+        user_identity.email AS user_id,
+        'mlflow_experimenter' AS mission_id,
+        'MLflow Experimenter' AS mission_name,
+        150 AS points_awarded,
+        CAST(MAX(event_time) AS TIMESTAMP) AS completed_at,
+        CAST(MIN(event_time) AS DATE) AS period_start,
+        CAST(MAX(event_time) AS DATE) AS period_end,
+        CAST('{NOW}' AS TIMESTAMP) AS scored_at
+      FROM system.access.audit
+      WHERE action_name IN ('createRun', 'mlflowCreateRun')
+        AND response.status_code = 200
+        AND user_identity.email IS NOT NULL AND user_identity.email != ''
+      GROUP BY user_identity.email
+      HAVING COUNT(*) >= 10
+    ) AS source
+    ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+    WHEN NOT MATCHED THEN INSERT *
+    """)
+    print("Mission scored: MLflow Experimenter")
+except Exception as e:
+    print(f"Mission skipped: MLflow Experimenter ({e})")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Consumption Missions: DBU milestones and product-specific usage
+
+# COMMAND ----------
+
+# DBU Milestones (one-time)
+for milestone_id, milestone_name, threshold, pts in [
+    ("dbu_100", "First 100 DBUs", 100, 50),
+    ("dbu_1k", "1K DBU Club", 1000, 200),
+    ("dbu_10k", "10K DBU Club", 10000, 500),
+    ("dbu_100k", "100K DBU Club", 100000, 1000),
+]:
+    spark.sql(f"""
+    MERGE INTO {tbl('mission_completions')} AS target
+    USING (
+      SELECT
+        identity_metadata.run_as AS user_id,
+        '{milestone_id}' AS mission_id,
+        '{milestone_name}' AS mission_name,
+        {pts} AS points_awarded,
+        CAST(MAX(usage_date) AS TIMESTAMP) AS completed_at,
+        CAST(MIN(usage_date) AS DATE) AS period_start,
+        CAST(MAX(usage_date) AS DATE) AS period_end,
+        CAST('{NOW}' AS TIMESTAMP) AS scored_at
+      FROM system.billing.usage
+      WHERE identity_metadata.run_as IS NOT NULL AND identity_metadata.run_as != ''
+        AND usage_quantity > 0
+      GROUP BY identity_metadata.run_as
+      HAVING SUM(usage_quantity) >= {threshold}
+    ) AS source
+    ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+    WHEN NOT MATCHED THEN INSERT *
+    """)
+    print(f"Mission scored: {milestone_name}")
+
+# COMMAND ----------
+
+# Product-specific consumption missions (repeatable monthly)
+PRODUCT_MISSIONS = [
+    ("sql_analyst", "SQL Analyst", 100, "SQL", 50),
+    ("job_runner", "Job Runner", 100, "JOBS", 50),
+    ("ml_practitioner", "ML Practitioner", 150, "MODEL_SERVING", 1),
+    ("dlt_operator", "Pipeline Operator", 100, "DLT", 50),
+]
+
+for m_id, m_name, m_pts, product_filter, dbu_threshold in PRODUCT_MISSIONS:
+    try:
+        spark.sql(f"""
+        MERGE INTO {tbl('mission_completions')} AS target
+        USING (
+          SELECT
+            identity_metadata.run_as AS user_id,
+            '{m_id}' AS mission_id,
+            '{m_name}' AS mission_name,
+            {m_pts} AS points_awarded,
+            CAST(MAX(usage_date) AS TIMESTAMP) AS completed_at,
+            DATE_TRUNC('MONTH', usage_date) AS period_start,
+            LAST_DAY(usage_date) AS period_end,
+            CAST('{NOW}' AS TIMESTAMP) AS scored_at
+          FROM system.billing.usage
+          WHERE identity_metadata.run_as IS NOT NULL AND identity_metadata.run_as != ''
+            AND usage_quantity > 0
+            AND billing_origin_product = '{product_filter}'
+            AND usage_date >= DATE_TRUNC('MONTH', DATE_SUB(CURRENT_DATE(), 60))
+          GROUP BY identity_metadata.run_as, DATE_TRUNC('MONTH', usage_date), LAST_DAY(usage_date)
+          HAVING SUM(usage_quantity) >= {dbu_threshold}
+        ) AS source
+        ON target.user_id = source.user_id AND target.mission_id = source.mission_id AND target.period_start = source.period_start
+        WHEN NOT MATCHED THEN INSERT *
+        """)
+        print(f"Mission scored: {m_name}")
+    except Exception as e:
+        print(f"Mission skipped: {m_name} ({e})")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Consumption Points: Weekly DBU-based points (1 pt per 10 DBUs)
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('user_points_fact')} AS target
+USING (
+  SELECT
+    identity_metadata.run_as AS user_id,
+    'consumption' AS event_type,
+    'weekly_dbu' AS mission_id,
+    CAST(FLOOR(SUM(usage_quantity) / 10) AS INT) AS points,
+    CONCAT('Weekly compute: ', ROUND(SUM(usage_quantity), 1), ' DBUs') AS reason,
+    CAST(MAX(usage_date) AS TIMESTAMP) AS event_timestamp,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.billing.usage
+  WHERE identity_metadata.run_as IS NOT NULL AND identity_metadata.run_as != ''
+    AND usage_quantity > 0
+    AND usage_date >= DATE_SUB(CURRENT_DATE(), 90)
+  GROUP BY identity_metadata.run_as, DATE_TRUNC('WEEK', usage_date)
+  HAVING SUM(usage_quantity) >= 10
+) AS source
+ON target.user_id = source.user_id
+  AND target.mission_id = source.mission_id
+  AND target.event_timestamp = source.event_timestamp
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Consumption points scored (1 pt per 10 DBUs weekly)")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Engagement: Daily Driver (400 pts) and Cross-Product Champion (500 pts)
+
+# COMMAND ----------
+
+# Daily Driver: 20+ active days in 30 days
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    identity_metadata.run_as AS user_id,
+    'daily_driver' AS mission_id,
+    'Daily Driver' AS mission_name,
+    400 AS points_awarded,
+    CAST(MAX(usage_date) AS TIMESTAMP) AS completed_at,
+    DATE_SUB(CURRENT_DATE(), 30) AS period_start,
+    CURRENT_DATE() AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.billing.usage
+  WHERE identity_metadata.run_as IS NOT NULL AND identity_metadata.run_as != ''
+    AND usage_quantity > 0
+    AND usage_date >= DATE_SUB(CURRENT_DATE(), 30)
+  GROUP BY identity_metadata.run_as
+  HAVING COUNT(DISTINCT usage_date) >= 20
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id AND target.period_start = source.period_start
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: Daily Driver")
+
+# Cross-Product Champion: 6+ distinct products in a month
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    identity_metadata.run_as AS user_id,
+    'cross_product_champion' AS mission_id,
+    'Cross-Product Champion' AS mission_name,
+    500 AS points_awarded,
+    CAST(MAX(usage_date) AS TIMESTAMP) AS completed_at,
+    DATE_TRUNC('MONTH', usage_date) AS period_start,
+    LAST_DAY(usage_date) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.billing.usage
+  WHERE identity_metadata.run_as IS NOT NULL AND identity_metadata.run_as != ''
+    AND usage_quantity > 0
+    AND usage_date >= DATE_TRUNC('MONTH', DATE_SUB(CURRENT_DATE(), 60))
+  GROUP BY identity_metadata.run_as, DATE_TRUNC('MONTH', usage_date), LAST_DAY(usage_date)
+  HAVING COUNT(DISTINCT billing_origin_product) >= 6
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id AND target.period_start = source.period_start
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: Cross-Product Champion")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Step 3: Generate User Points Fact Table
 # MAGIC Consolidate all mission completions into the points fact table.
 
@@ -618,11 +993,20 @@ print("Product breadth computed.")
 spark.sql(f"""
 CREATE OR REPLACE TEMP VIEW user_point_totals AS
 SELECT
-  user_id,
-  SUM(points_awarded) AS total_points,
-  COUNT(*) AS missions_completed
-FROM {tbl('mission_completions')}
-GROUP BY user_id
+  COALESCE(m.user_id, c.user_id) AS user_id,
+  COALESCE(m.mission_points, 0) + COALESCE(c.consumption_points, 0) AS total_points,
+  COALESCE(m.missions_completed, 0) AS missions_completed
+FROM (
+  SELECT user_id, SUM(points_awarded) AS mission_points, COUNT(*) AS missions_completed
+  FROM {tbl('mission_completions')}
+  GROUP BY user_id
+) m
+FULL OUTER JOIN (
+  SELECT user_id, SUM(points) AS consumption_points
+  FROM {tbl('user_points_fact')}
+  WHERE event_type = 'consumption'
+  GROUP BY user_id
+) c ON m.user_id = c.user_id
 """)
 
 spark.sql(f"""
