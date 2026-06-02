@@ -2,17 +2,24 @@
 
 A gamification app that turns Databricks platform adoption into a game. Users earn points for building pipelines, running jobs, creating dashboards, querying data, and more. Weekly swag prizes keep things competitive.
 
-Built entirely on Databricks: system tables for usage tracking, Delta Lake for scoring, and Databricks Apps for hosting. Users log in with their existing workspace credentials.
+Built entirely on Databricks: system tables for usage tracking, Delta Lake for scoring, Lakebase for fast reads, and Databricks Apps for hosting. Users log in with their existing workspace credentials.
 
 ## How It Works
 
 1. A **scoring pipeline** runs every 4 hours, reading Databricks system tables to detect what each user has done on the platform
-2. It scores 10 missions (creating jobs, building pipelines, using Genie, etc.) and writes results to Delta tables
-3. A **React + FastAPI app** runs as a Databricks App, showing each user their personalized dashboard, missions, leaderboard, and badges
+2. It scores 30+ missions across Data Engineering, Analytics, AI/ML, and Engagement categories, plus continuous consumption points based on DBU spend
+3. Scored data is synced to **Lakebase** (managed PostgreSQL) for sub-second reads
+4. A **React + FastAPI app** runs as a Databricks App, showing each user their dashboard, missions, leaderboard, and badges
 
-No separate accounts needed. Users log in with their workspace credentials and see their own data.
+No separate accounts needed. Users log in with their workspace credentials.
 
-## Deploy (One Command)
+---
+
+## Deploy
+
+Full step-by-step instructions: **[SETUP.md](SETUP.md)**
+
+Short version:
 
 ```bash
 git clone https://github.com/deepbasu123/databricks-quest.git
@@ -20,29 +27,16 @@ cd databricks-quest
 ./deploy.sh
 ```
 
-The script handles everything interactively. Choose your deployment mode:
+The script handles everything: prerequisites check, authentication, warehouse selection, frontend build, Lakebase provisioning, app deployment, scoring pipeline, and data sync. Takes about 15 minutes end to end.
 
-**Full Deploy** (recommended) — Uses Databricks Asset Bundles. Deploys the app, scoring notebook, and a scheduled job that re-scores every 4 hours automatically.
-
-**Quick Deploy** — Uses the Databricks Apps API directly (like [Forge](https://github.com/althrussell/databricks-forge)). Deploys only the app. You run the scoring notebook manually.
-
-Both modes handle:
-- Prerequisite checks (CLI, Node.js, psql)
-- Authentication (opens browser if needed)
-- Interactive warehouse selection
-- Frontend build
-- Lakebase auto-provisioning (database, tables, indexes, SP grants)
-- Scoring pipeline execution
-- App URL at the end
-
-See **[SETUP.md](SETUP.md)** for prerequisites, flags for non-interactive use, and troubleshooting.
+---
 
 ## What Users See
 
-- **Dashboard** — Current level, points, streak, badges, and next missions to complete
-- **Missions** — 30+ missions across Data Engineering, Analytics, AI/ML, Streaming, Consumption, and Engagement
-- **Leaderboard** — Top 10 users with weekly swag prizes (1st: hoodie/tshirt, 2nd: coffee cup/water bottle/notebook, 3rd: stickers)
-- **Admin** — Pipeline health, user stats, mission completion charts, level distribution
+- **Dashboard** -- Current level, points, streak, badges, and next missions to complete
+- **Missions** -- 30+ missions across Data Engineering, Analytics, AI/ML, Streaming, Consumption, and Engagement
+- **Leaderboard** -- Top 10 users ranked by points, resets every Saturday. Weekly swag prizes for the top 3.
+- **Admin** -- Pipeline health, user stats, mission completion charts, level distribution
 
 ## Missions
 
@@ -129,7 +123,7 @@ System Tables (read-only)          Quest App (Databricks App)
         v
   Delta Tables              --->  Lakebase (PostgreSQL)
   <catalog>.quest.*                quest_db
-  mission_completions              synced on every
+  mission_completions              synced after every
   user_profile_snapshot            pipeline run
   leaderboard
   badges, notifications
