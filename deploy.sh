@@ -296,6 +296,17 @@ fi
 WORKSPACE_HOST="${WORKSPACE_HOST%/}"
 success "Workspace: $WORKSPACE_HOST"
 
+# Export env var auth so CLI commands don't rely on the token cache
+# (the cache can expire mid-operation during long Terraform applies)
+CLI_TOKEN=$($CLI auth token $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || true)
+if [ -n "$CLI_TOKEN" ]; then
+  export DATABRICKS_HOST="$WORKSPACE_HOST"
+  export DATABRICKS_TOKEN="$CLI_TOKEN"
+  export DATABRICKS_AUTH_TYPE=pat
+  # Clear profile flag so CLI uses env vars instead
+  PROFILE_FLAG=""
+fi
+
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 3: Select SQL Warehouse
 # ══════════════════════════════════════════════════════════════════════════════

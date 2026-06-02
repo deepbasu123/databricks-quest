@@ -20,10 +20,13 @@ CATALOG = dbutils.widgets.get("quest_catalog")
 SCHEMA = dbutils.widgets.get("quest_schema")
 APP_NAME = dbutils.widgets.get("app_name")
 
+# Only look at the past 30 days of system table data for performance
+LOOKBACK_DAYS = 30
+
 def tbl(name):
     return f"`{CATALOG}`.`{SCHEMA}`.`{name}`"
 
-print(f"Quest output: {CATALOG}.{SCHEMA}")
+print(f"Quest output: {CATALOG}.{SCHEMA} (lookback: {LOOKBACK_DAYS} days)")
 
 # COMMAND ----------
 
@@ -179,6 +182,7 @@ USING (
     AND identity_metadata.run_as NOT LIKE '%service-principal%'
     AND identity_metadata.run_as NOT LIKE '%ServicePrincipal%'
     AND usage_quantity > 0
+    AND usage_date >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
   GROUP BY identity_metadata.run_as
 ) AS source
 ON target.user_id = source.user_id AND target.mission_id = source.mission_id
@@ -211,6 +215,7 @@ USING (
   WHERE creator_user_name IS NOT NULL
     AND creator_user_name != ''
     AND delete_time IS NULL
+    AND change_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
   GROUP BY creator_user_name
 ) AS source
 ON target.user_id = source.user_id AND target.mission_id = source.mission_id
@@ -244,6 +249,7 @@ USING (
     AND created_by != ''
     AND delete_time IS NULL
     AND pipeline_type = 'ETL_PIPELINE'
+    AND change_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
   GROUP BY created_by
 ) AS source
 ON target.user_id = source.user_id AND target.mission_id = source.mission_id
@@ -276,6 +282,7 @@ USING (
   WHERE result_state = 'COMPLETED'
     AND run_as_user_name IS NOT NULL
     AND run_as_user_name != ''
+    AND period_start_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
   GROUP BY run_as_user_name
 ) AS source
 ON target.user_id = source.user_id AND target.mission_id = source.mission_id
@@ -307,6 +314,7 @@ USING (
   FROM (
     SELECT *, ROW_NUMBER() OVER (PARTITION BY workspace_id, job_id ORDER BY change_time DESC) AS rn
     FROM system.lakeflow.jobs
+    WHERE change_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
   ) j
   WHERE j.rn = 1
     AND j.trigger_type IN ('CRON', 'PERIODIC')
@@ -349,6 +357,7 @@ USING (
     AND p.created_by IS NOT NULL
     AND p.created_by != ''
     AND u.billing_origin_product = 'DLT'
+    AND u.usage_date >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
   GROUP BY p.created_by
 ) AS source
 ON target.user_id = source.user_id AND target.mission_id = source.mission_id
@@ -472,6 +481,7 @@ USING (
     AND response.status_code = 200
     AND user_identity.email IS NOT NULL
     AND user_identity.email != ''
+    AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
   GROUP BY user_identity.email
 ) AS source
 ON target.user_id = source.user_id AND target.mission_id = source.mission_id
@@ -505,6 +515,7 @@ USING (
     AND response.status_code = 200
     AND user_identity.email IS NOT NULL
     AND user_identity.email != ''
+    AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
   GROUP BY user_identity.email
 ) AS source
 ON target.user_id = source.user_id AND target.mission_id = source.mission_id
@@ -536,6 +547,7 @@ USING (
   FROM (
     SELECT *, ROW_NUMBER() OVER (PARTITION BY workspace_id, job_id ORDER BY change_time DESC) AS rn
     FROM system.lakeflow.jobs
+    WHERE change_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
   ) j
   JOIN system.lakeflow.job_tasks t ON j.job_id = t.job_id AND j.workspace_id = t.workspace_id
   WHERE j.rn = 1
@@ -608,6 +620,7 @@ try:
       WHERE action_name IN ('createAlert', 'createLegacyAlert')
         AND response.status_code = 200
         AND user_identity.email IS NOT NULL AND user_identity.email != ''
+        AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
       GROUP BY user_identity.email
     ) AS source
     ON target.user_id = source.user_id AND target.mission_id = source.mission_id
@@ -642,6 +655,7 @@ try:
       WHERE action_name IN ('createServingEndpoint', 'create_serving_endpoint')
         AND response.status_code = 200
         AND user_identity.email IS NOT NULL AND user_identity.email != ''
+        AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
       GROUP BY user_identity.email
     ) AS source
     ON target.user_id = source.user_id AND target.mission_id = source.mission_id
@@ -710,6 +724,7 @@ try:
       WHERE action_name IN ('createRun', 'mlflowCreateRun')
         AND response.status_code = 200
         AND user_identity.email IS NOT NULL AND user_identity.email != ''
+        AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
       GROUP BY user_identity.email
       HAVING COUNT(*) >= 10
     ) AS source
@@ -933,6 +948,7 @@ WITH daily_activity AS (
   WHERE identity_metadata.run_as IS NOT NULL
     AND identity_metadata.run_as != ''
     AND usage_quantity > 0
+    AND usage_date >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
   GROUP BY identity_metadata.run_as, usage_date
 ),
 streak_groups AS (
@@ -978,6 +994,7 @@ FROM system.billing.usage
 WHERE identity_metadata.run_as IS NOT NULL
   AND identity_metadata.run_as != ''
   AND usage_quantity > 0
+  AND usage_date >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
 GROUP BY identity_metadata.run_as
 """)
 
@@ -1018,6 +1035,7 @@ SELECT
 FROM system.billing.usage
 WHERE identity_metadata.run_as IS NOT NULL
   AND identity_metadata.run_as != ''
+  AND usage_date >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
 GROUP BY identity_metadata.run_as
 """)
 
@@ -1081,14 +1099,29 @@ print("User profile snapshots updated.")
 spark.sql(f"""
 MERGE INTO {tbl('leaderboard')} AS target
 USING (
-  WITH totals AS (
+  WITH mission_pts AS (
+    SELECT user_id, SUM(points_awarded) AS pts,
+      SUM(CASE WHEN completed_at >= DATE_SUB(CURRENT_DATE(), (DAYOFWEEK(CURRENT_DATE()) + 1) % 7)
+        THEN points_awarded ELSE 0 END) AS weekly_pts,
+      SUM(CASE WHEN completed_at >= DATE_TRUNC('MONTH', CURRENT_DATE())
+        THEN points_awarded ELSE 0 END) AS monthly_pts
+    FROM {tbl('mission_completions')} GROUP BY user_id
+  ),
+  consumption_pts AS (
+    SELECT user_id, SUM(points) AS pts,
+      SUM(CASE WHEN event_timestamp >= DATE_SUB(CURRENT_DATE(), (DAYOFWEEK(CURRENT_DATE()) + 1) % 7)
+        THEN points ELSE 0 END) AS weekly_pts,
+      SUM(CASE WHEN event_timestamp >= DATE_TRUNC('MONTH', CURRENT_DATE())
+        THEN points ELSE 0 END) AS monthly_pts
+    FROM {tbl('user_points_fact')} WHERE event_type = 'consumption' GROUP BY user_id
+  ),
+  totals AS (
     SELECT
-      user_id,
-      SUM(points_awarded) AS total_points,
-      SUM(CASE WHEN completed_at >= DATE_SUB(CURRENT_TIMESTAMP(), 7) THEN points_awarded ELSE 0 END) AS weekly_points,
-      SUM(CASE WHEN completed_at >= DATE_TRUNC('MONTH', CURRENT_DATE()) THEN points_awarded ELSE 0 END) AS monthly_points
-    FROM {tbl('mission_completions')}
-    GROUP BY user_id
+      COALESCE(m.user_id, c.user_id) AS user_id,
+      COALESCE(m.pts, 0) + COALESCE(c.pts, 0) AS total_points,
+      COALESCE(m.weekly_pts, 0) + COALESCE(c.weekly_pts, 0) AS weekly_points,
+      COALESCE(m.monthly_pts, 0) + COALESCE(c.monthly_pts, 0) AS monthly_points
+    FROM mission_pts m FULL OUTER JOIN consumption_pts c ON m.user_id = c.user_id
   )
   SELECT
     t.user_id,
