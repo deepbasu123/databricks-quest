@@ -988,7 +988,7 @@ print("Streak data computed.")
 
 # COMMAND ----------
 
-spark.sql("""
+spark.sql(f"""
 CREATE OR REPLACE TEMP VIEW user_products AS
 SELECT
   identity_metadata.run_as AS user_id,
