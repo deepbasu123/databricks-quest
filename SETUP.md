@@ -28,18 +28,12 @@ curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.s
 
 Full docs: [docs.databricks.com/dev-tools/cli/install](https://docs.databricks.com/en/dev-tools/cli/install.html)
 
-### Node.js (v18 or newer)
+### Node.js (v18 or newer) -- optional
 
-Check if you have it:
-
-```bash
-node --version
-```
-
-If it's missing, install it from [nodejs.org](https://nodejs.org/) or:
+The repo includes pre-built frontend files, so Node.js is only needed if you want to modify the frontend code. If you don't have Node.js, the deploy script will use the pre-built files automatically.
 
 ```bash
-brew install node
+node --version  # Optional check
 ```
 
 ### psql (PostgreSQL client)
@@ -103,7 +97,7 @@ That's it. The script walks you through everything interactively. Here's what it
 
 4. **Asks for a catalog name** -- You choose where Quest's Delta tables will live (e.g. `quest_data`). The scoring pipeline creates this catalog and schema automatically if they don't exist.
 
-5. **Builds the frontend** -- Runs `npm install` and `npm run build` in the `frontend/` directory. This compiles the React app into static files.
+5. **Checks the frontend** -- If Node.js is installed, rebuilds the React app. If not, uses the pre-built static files included in the repo. Either way, no action needed from you.
 
 6. **Deploys to Databricks** -- Uses Databricks Asset Bundles to deploy three things to your workspace:
    - A **Databricks App** (the web UI)
@@ -276,7 +270,23 @@ GRANT SELECT ON SCHEMA <your_catalog>.quest TO `<service_principal_name>`;
 
 ### Frontend build fails
 
-Make sure you have Node.js 18+ (`node --version`). If `npm install` fails, delete `frontend/node_modules/` and try again:
+Make sure you have Node.js 18+ (`node --version`). If `npm install` fails:
+
+**npm proxy / registry errors**: If you see errors connecting to `npm-proxy.dev.databricks.com` or any internal npm registry, your machine is configured to use a corporate npm proxy. Fix it by pointing npm to the public registry:
+
+```bash
+npm config set registry https://registry.npmjs.org/
+```
+
+Or delete the proxy config entirely:
+
+```bash
+npm config delete registry
+```
+
+The deploy script already includes an `.npmrc` that forces the public registry, but your global npm config may override it.
+
+**Other npm errors**: Delete `node_modules` and retry:
 
 ```bash
 rm -rf frontend/node_modules

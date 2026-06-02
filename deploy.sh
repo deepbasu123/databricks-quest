@@ -154,23 +154,15 @@ if [[ "$CLI_MAJOR" -eq 0 && "$CLI_MINOR" -lt 285 ]]; then
 fi
 success "Databricks CLI v$CLI_VERSION ($CLI)"
 
-# Check Node.js
-if ! command -v node &>/dev/null; then
-  fail "Node.js not found. Install it:
-    macOS:   brew install node
-    Other:   https://nodejs.org/"
+# Check Node.js (optional — pre-built frontend is included in the repo)
+if command -v node &>/dev/null; then
+  success "Node.js $(node --version)"
+  if command -v npm &>/dev/null; then
+    success "npm $(npm --version)"
+  fi
+else
+  info "Node.js not found (optional — pre-built frontend is included in the repo)"
 fi
-NODE_VERSION=$(node --version | grep -oE '[0-9]+' | head -1)
-if [[ "$NODE_VERSION" -lt 18 ]]; then
-  fail "Node.js v$(node --version) is too old (need v18+). Upgrade: brew install node"
-fi
-success "Node.js $(node --version)"
-
-# Check npm
-if ! command -v npm &>/dev/null; then
-  fail "npm not found. It should come with Node.js."
-fi
-success "npm $(npm --version)"
 
 # Check psql (needed for Lakebase setup)
 if ! command -v psql &>/dev/null; then
@@ -421,15 +413,29 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FRONTEND_DIR="$SCRIPT_DIR/frontend"
 STATIC_DIR="$SCRIPT_DIR/app/static"
 
-if [ -n "$SKIP_BUILD" ] && [ -f "$STATIC_DIR/index.html" ]; then
+if [ -f "$STATIC_DIR/index.html" ] && [ -z "$SKIP_BUILD" ]; then
+  # Pre-built static files exist in the repo — only rebuild if Node.js is available
+  if command -v node &>/dev/null && command -v npm &>/dev/null; then
+    info "Rebuilding frontend (pre-built files exist, but refreshing)..."
+    (cd "$FRONTEND_DIR" && npm install --registry https://registry.npmjs.org/ --silent 2>&1 | tail -1 && npm run build 2>&1 | tail -3) || true
+    success "Frontend built to app/static/"
+  else
+    success "Using pre-built frontend from repo (Node.js not required)"
+  fi
+elif [ -f "$STATIC_DIR/index.html" ]; then
   success "Skipping build (--skip-build). Using existing app/static/."
 else
-  if [ ! -d "$FRONTEND_DIR" ]; then
-    fail "frontend/ directory not found. Are you running this from the repo root?"
+  # No pre-built files — Node.js is required
+  if ! command -v node &>/dev/null; then
+    fail "No pre-built frontend found and Node.js is not installed.
+    Install Node.js 18+: brew install node (macOS) or https://nodejs.org/"
+  fi
+  if ! command -v npm &>/dev/null; then
+    fail "npm not found. It should come with Node.js."
   fi
 
   info "Installing dependencies..."
-  (cd "$FRONTEND_DIR" && npm install --silent 2>&1 | tail -1)
+  (cd "$FRONTEND_DIR" && npm install --registry https://registry.npmjs.org/ --silent 2>&1 | tail -1)
   success "Dependencies installed"
 
   info "Building React app..."
