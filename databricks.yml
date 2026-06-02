@@ -42,7 +42,7 @@ resources:
   jobs:
     quest_scoring_pipeline:
       name: "[Quest] Scoring Pipeline"
-      description: "Reads system tables, computes missions, points, badges, and leaderboards. Syncs results to Lakebase."
+      description: "Reads system tables, computes missions, points, badges, and leaderboards."
       schedule:
         quartz_cron_expression: "0 0 */4 * * ?"
         timezone_id: UTC
@@ -53,8 +53,6 @@ resources:
             base_parameters:
               quest_catalog: ${var.quest_catalog}
               quest_schema: ${var.quest_schema}
-              lakebase_host: ${var.lakebase_host}
-              lakebase_db: ${var.lakebase_db}
               app_name: databricks-quest
               warehouse_id: ${var.warehouse_id}
             source: WORKSPACE
@@ -63,8 +61,6 @@ resources:
         - environment_key: default
           spec:
             client: "1"
-            dependencies:
-              - psycopg2-binary
 
 targets:
   dev:
