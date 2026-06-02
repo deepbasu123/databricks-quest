@@ -28,6 +28,10 @@ def tbl(name):
 
 print(f"Quest output: {CATALOG}.{SCHEMA} (lookback: {LOOKBACK_DAYS} days)")
 
+# Enable automatic retry on Delta write conflicts (concurrent MERGE operations)
+spark.conf.set("spark.databricks.delta.retryWriteConflict.enabled", "true")
+spark.conf.set("spark.databricks.delta.retryWriteConflict.limit", "3")
+
 # COMMAND ----------
 
 # MAGIC %md
