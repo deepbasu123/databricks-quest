@@ -181,7 +181,7 @@ def get_user_email(request: Request) -> str:
     if not email:
         email = request.headers.get("X-Forwarded-User", "")
     if not email:
-        email = os.getenv("QUEST_DEFAULT_USER", "demo@databricks.com")
+        email = os.getenv("QUEST_DEFAULT_USER", "unknown@example.com")
     return email
 
 

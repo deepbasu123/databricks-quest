@@ -417,7 +417,11 @@ if [ -f "$STATIC_DIR/index.html" ] && [ -z "$SKIP_BUILD" ]; then
   # Pre-built static files exist in the repo — only rebuild if Node.js is available
   if command -v node &>/dev/null && command -v npm &>/dev/null; then
     info "Rebuilding frontend (pre-built files exist, but refreshing)..."
-    (cd "$FRONTEND_DIR" && npm install --registry https://registry.npmjs.org/ --silent 2>&1 | tail -1 && npm run build 2>&1 | tail -3) || true
+    (cd "$FRONTEND_DIR" && \
+      (npm install --registry https://registry.npmjs.org/ --silent 2>/dev/null || \
+       npm install --registry https://npm-proxy.dev.databricks.com/ --silent 2>/dev/null || \
+       npm install --silent 2>/dev/null) && \
+      npm run build 2>&1 | tail -3) || true
     success "Frontend built to app/static/"
   else
     success "Using pre-built frontend from repo (Node.js not required)"
@@ -435,8 +439,14 @@ else
   fi
 
   info "Installing dependencies..."
-  (cd "$FRONTEND_DIR" && npm install --registry https://registry.npmjs.org/ --silent 2>&1 | tail -1)
-  success "Dependencies installed"
+  # Try public npm registry first, fall back to Databricks internal proxy
+  if (cd "$FRONTEND_DIR" && npm install --registry https://registry.npmjs.org/ --silent 2>&1 | tail -1); then
+    success "Dependencies installed (public registry)"
+  elif (cd "$FRONTEND_DIR" && npm install --registry https://npm-proxy.dev.databricks.com/ --silent 2>&1 | tail -1); then
+    success "Dependencies installed (internal registry)"
+  else
+    fail "npm install failed. Check your network connection and npm configuration."
+  fi
 
   info "Building React app..."
   (cd "$FRONTEND_DIR" && npm run build 2>&1 | tail -3)
