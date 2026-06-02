@@ -735,8 +735,28 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO \"$SP_CLIENT
     warn "Could not find app service principal — you may need to grant Lakebase access manually"
   fi
 
+  # Patch app.yaml with actual Lakebase values (valueFrom doesn't work
+  # when app config isn't set by the bundle's Terraform lifecycle)
+  info "Updating app.yaml with Lakebase endpoint..."
+  APP_YAML="$SCRIPT_DIR/app/app.yaml"
+  cat > "$APP_YAML" << APPYAML
+command:
+  - uvicorn
+  - main:app
+  - --host
+  - 0.0.0.0
+  - --port
+  - "8000"
+
+env:
+  - name: LAKEBASE_HOST
+    value: "$LAKEBASE_HOST"
+  - name: LAKEBASE_DB
+    value: "$LAKEBASE_DB"
+APPYAML
+
   # Re-deploy bundle with the Lakebase host now set
-  info "Updating app configuration with Lakebase endpoint..."
+  info "Redeploying with Lakebase configuration..."
   $CLI bundle deploy --target "$TARGET" $PROFILE_FLAG \
     --var "warehouse_id=$WAREHOUSE_ID" \
     --var "quest_catalog=$QUEST_CATALOG" \
@@ -744,7 +764,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO \"$SP_CLIENT
     --var "lakebase_host=$LAKEBASE_HOST" \
     --var "lakebase_db=$LAKEBASE_DB" 2>&1 || true
 
-  # Re-deploy app source code with updated config
+  # Re-deploy app source code with updated app.yaml
   $CLI apps deploy "$APP_NAME" \
     --source-code-path "$BUNDLE_USER_PATH" \
     $PROFILE_FLAG -o json 2>/dev/null || true
