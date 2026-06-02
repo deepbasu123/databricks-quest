@@ -33,6 +33,7 @@ LAKEBASE_DB="quest_db"
 TARGET="dev"
 SKIP_BUILD=""
 SKIP_SCORING=""
+SKIP_AUTH_CHECK=""
 DEPLOY_MODE=""  # "full" (DAB bundle) or "quick" (direct API, like Forge)
 
 # ── Colors ───────────────────────────────────────────────────────────────────
@@ -66,6 +67,7 @@ while [[ $# -gt 0 ]]; do
     --lakebase-db)    LAKEBASE_DB="$2"; shift 2 ;;
     --skip-build)     SKIP_BUILD=1; shift ;;
     --skip-scoring)   SKIP_SCORING=1; shift ;;
+    --skip-auth-check) SKIP_AUTH_CHECK=1; shift ;;
     --quick)          DEPLOY_MODE="quick"; shift ;;
     --full)           DEPLOY_MODE="full"; shift ;;
     --help|-h)
@@ -85,6 +87,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --full                Full deploy: DAB bundle with scoring job (default)"
       echo "  --skip-build          Skip frontend build (use existing app/static/)"
       echo "  --skip-scoring        Skip running the scoring pipeline"
+      echo "  --skip-auth-check     Skip authentication validation (use if already authenticated)"
       echo "  --help, -h            Show this help message"
       exit 0
       ;;
@@ -205,45 +208,51 @@ fi
 # ══════════════════════════════════════════════════════════════════════════════
 step "Step 2/8: Authenticating"
 
-# Try to get current user — this validates authentication
-USER_JSON=""
-if [ -n "$PROFILE_FLAG" ]; then
-  USER_JSON=$($CLI current-user me $PROFILE_FLAG -o json 2>/dev/null || true)
+if [ -n "$SKIP_AUTH_CHECK" ]; then
+  warn "Skipping authentication check (--skip-auth-check flag set)"
+  info "Make sure you've already run: databricks auth login --host YOUR_WORKSPACE_URL"
+  USER_EMAIL="(authentication skipped)"
 else
-  USER_JSON=$($CLI current-user me -o json 2>/dev/null || true)
-fi
-
-if [ -z "$USER_JSON" ] || ! echo "$USER_JSON" | python3 -c "import sys,json; json.load(sys.stdin)" &>/dev/null; then
-  warn "Not authenticated. Let's log in now."
-  echo ""
-  read -rp "Enter your workspace URL (e.g. https://my-workspace.cloud.databricks.com): " WORKSPACE_URL
-  WORKSPACE_URL="${WORKSPACE_URL%/}"
-
-  if [ -z "$WORKSPACE_URL" ]; then
-    fail "Workspace URL cannot be empty."
-  fi
-
-  info "Opening browser for authentication..."
-  if [ -n "$PROFILE_NAME" ]; then
-    $CLI auth login --host "$WORKSPACE_URL" --profile "$PROFILE_NAME"
-  else
-    $CLI auth login --host "$WORKSPACE_URL"
-  fi
-
-  # Retry
+  # Try to get current user — this validates authentication
+  USER_JSON=""
   if [ -n "$PROFILE_FLAG" ]; then
     USER_JSON=$($CLI current-user me $PROFILE_FLAG -o json 2>/dev/null || true)
   else
     USER_JSON=$($CLI current-user me -o json 2>/dev/null || true)
   fi
 
-  if [ -z "$USER_JSON" ]; then
-    fail "Authentication failed. Please run: databricks auth login --host YOUR_WORKSPACE_URL"
-  fi
-fi
+  if [ -z "$USER_JSON" ] || ! echo "$USER_JSON" | python3 -c "import sys,json; json.load(sys.stdin)" &>/dev/null; then
+    warn "Not authenticated. Let's log in now."
+    echo ""
+    read -rp "Enter your workspace URL (e.g. https://my-workspace.cloud.databricks.com): " WORKSPACE_URL
+    WORKSPACE_URL="${WORKSPACE_URL%/}"
 
-USER_EMAIL=$(echo "$USER_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('userName',''))")
-success "Authenticated as $USER_EMAIL"
+    if [ -z "$WORKSPACE_URL" ]; then
+      fail "Workspace URL cannot be empty."
+    fi
+
+    info "Opening browser for authentication..."
+    if [ -n "$PROFILE_NAME" ]; then
+      $CLI auth login --host "$WORKSPACE_URL" --profile "$PROFILE_NAME"
+    else
+      $CLI auth login --host "$WORKSPACE_URL"
+    fi
+
+    # Retry
+    if [ -n "$PROFILE_FLAG" ]; then
+      USER_JSON=$($CLI current-user me $PROFILE_FLAG -o json 2>/dev/null || true)
+    else
+      USER_JSON=$($CLI current-user me -o json 2>/dev/null || true)
+    fi
+
+    if [ -z "$USER_JSON" ]; then
+      fail "Authentication failed. Please run: databricks auth login --host YOUR_WORKSPACE_URL"
+    fi
+  fi
+
+  USER_EMAIL=$(echo "$USER_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('userName',''))")
+  success "Authenticated as $USER_EMAIL"
+fi
 
 # Get workspace host
 if [ -n "$PROFILE_FLAG" ]; then
