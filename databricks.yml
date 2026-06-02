@@ -1,5 +1,5 @@
 bundle:
-  name: quest-gamify
+  name: databricks-quest
 
 sync:
   include:
@@ -22,7 +22,7 @@ variables:
 resources:
   apps:
     databricks_quest:
-      name: quest-gamify
+      name: databricks-quest
       description: "Databricks Quest - Gamification app for platform adoption"
       source_code_path: ./app
       config:
@@ -53,7 +53,7 @@ resources:
             base_parameters:
               quest_catalog: ${var.quest_catalog}
               quest_schema: ${var.quest_schema}
-              app_name: quest-gamify
+              app_name: databricks-quest
               warehouse_id: ${var.warehouse_id}
             source: WORKSPACE
           environment_key: default
@@ -67,9 +67,9 @@ targets:
     mode: development
     default: true
     workspace:
-      host: https://fevm-deep-test-1.cloud.databricks.com
+      host: https://YOUR_WORKSPACE.cloud.databricks.com
 
   prod:
     mode: production
     workspace:
-      host: https://fevm-deep-test-1.cloud.databricks.com
+      host: https://YOUR_WORKSPACE.cloud.databricks.com
