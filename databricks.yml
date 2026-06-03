@@ -67,9 +67,9 @@ targets:
     mode: development
     default: true
     workspace:
-      host: https://YOUR_WORKSPACE.cloud.databricks.com
+      host: https://fevm-anzgt-us-01.cloud.databricks.com
 
   prod:
     mode: production
     workspace:
-      host: https://YOUR_WORKSPACE.cloud.databricks.com
+      host: https://fevm-anzgt-us-01.cloud.databricks.com

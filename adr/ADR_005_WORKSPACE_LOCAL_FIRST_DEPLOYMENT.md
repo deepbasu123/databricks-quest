@@ -34,3 +34,12 @@ The MVP will run inside a single Databricks workspace using workspace-local reso
 - Use Unity Catalog for event resources.
 - Use Lakebase in the same workspace.
 - Keep account-level workspace provisioning as a future option.
+
+## Follow-up
+
+Multi-workspace event federation (the "Cross-workspace event orchestration is
+out of scope initially" consequence above) is now addressed by
+**ADR_006 — Shared-Lakebase Multi-Workspace GameDay Federation**. That decision
+keeps this workspace-local model as the unchanged `standalone` default and adds
+`master`/`child` roles that share one Lakebase, selected purely by the
+`QUEST_ROLE` parameter (one codebase, one build).

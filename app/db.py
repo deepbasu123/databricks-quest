@@ -20,6 +20,7 @@ responses, exactly as the adoption-mode endpoints already do.
 import os
 import time
 import logging
+from contextlib import contextmanager
 from datetime import datetime, date
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
@@ -29,6 +30,18 @@ logger = logging.getLogger("databricks-quest.db")
 LAKEBASE_HOST = os.getenv("LAKEBASE_HOST", "")
 LAKEBASE_DB = os.getenv("LAKEBASE_DB", "quest_db")
 LAKEBASE_PORT = int(os.getenv("LAKEBASE_PORT", "5432"))
+
+# Explicit writer credential (federation child role). When set, these override
+# the Databricks workspace-OAuth path so a child app can authenticate to the
+# MASTER workspace's shared Lakebase with the shared event-writer credential.
+# This is the param-driven seam from ADR_006: standalone/master leave these
+# unset and keep using workspace identity. ``LAKEBASE_WRITER_TOKEN`` is accepted
+# as an alias for the password so the credential can be distributed as a token.
+LAKEBASE_USER = os.getenv("LAKEBASE_USER", "").strip()
+LAKEBASE_PASSWORD = (
+    os.getenv("LAKEBASE_PASSWORD", "").strip()
+    or os.getenv("LAKEBASE_WRITER_TOKEN", "").strip()
+)
 
 # OAuth tokens are valid ~1h; refresh the cached connection well before expiry.
 _CONN_TTL_SECONDS = 2700  # 45 minutes
@@ -127,12 +140,22 @@ def get_connection(
             except Exception:
                 pass
 
-    resolved_user, token = _workspace_credentials()
+    # Resolve credentials. A configured explicit writer credential
+    # (LAKEBASE_USER + LAKEBASE_PASSWORD/LAKEBASE_WRITER_TOKEN) takes precedence
+    # over the workspace-OAuth path — this is how a federation `child` app
+    # authenticates to the master's shared Lakebase. Standalone/master leave
+    # these unset and fall through to the workspace identity, unchanged.
+    if LAKEBASE_USER and LAKEBASE_PASSWORD:
+        resolved_user, token = LAKEBASE_USER, LAKEBASE_PASSWORD
+        auth_kind = "writer credential"
+    else:
+        resolved_user, token = _workspace_credentials()
+        auth_kind = "workspace identity"
     conn = _connect(host, dbname, resolved_user, token, port)
     if use_cache:
         _conn_cache["conn"] = conn
         _conn_cache["expiry"] = now + _CONN_TTL_SECONDS
-    logger.info("Lakebase connection established as %s", resolved_user)
+    logger.info("Lakebase connection established as %s (%s)", resolved_user, auth_kind)
     return conn
 
 
@@ -164,6 +187,28 @@ def execute(query: str, params: Tuple = ()) -> int:
     with conn.cursor() as cur:
         cur.execute(query, params)
         return cur.rowcount
+
+
+@contextmanager
+def transaction():
+    """Yield a cursor inside an atomic transaction on the shared connection.
+
+    Commits on success, rolls back on any exception, and restores the
+    connection's prior autocommit setting. Use for multi-statement writes that
+    must be all-or-nothing (e.g. importing a quest pack).
+    """
+    conn = get_connection()
+    prev = conn.autocommit
+    conn.autocommit = False
+    try:
+        with conn.cursor() as cur:
+            yield cur
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.autocommit = prev
 
 
 def healthcheck() -> bool:

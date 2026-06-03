@@ -36,6 +36,15 @@ SKIP_SCORING=""
 SKIP_AUTH_CHECK=""
 DEPLOY_MODE=""  # "full" (DAB bundle) or "quick" (direct API, like Forge)
 
+# ── Federation (ADR_006) — one codebase, role selected by these flags ────────
+QUEST_ROLE=""               # standalone (default) | master | child
+MASTER_LAKEBASE_HOST=""     # child: the MASTER workspace's shared Lakebase host
+MASTER_LAKEBASE_TOKEN=""    # child: the shared event-writer credential/secret
+MASTER_LAKEBASE_USER="quest_event_writer"  # child: writer role name
+EVENT_SLUG=""               # event this deployment is wired to
+WORKSPACE_ID=""             # child: id used to attribute federated writes
+EVENT_WRITER_PASSWORD=""    # master: generated secret for the writer role
+
 # ── Colors ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -79,6 +88,85 @@ run_gameday_migrations() {
   fi
 }
 
+# Provision the shared INSERT-only event-writer Postgres role on the MASTER
+# Lakebase and grant it exactly the privileges a child app needs (ADR_006):
+#   INSERT  on the four event-fact tables
+#   SELECT  on the leaderboard read surface (so children can render the
+#           event-wide leaderboard and locate their own team's rank)
+#   INSERT/UPDATE/SELECT on event_workspaces (for the startup check-in upsert)
+# No UPDATE/DELETE on facts, no access to secrets. Idempotent: re-running
+# resets the role's password (rotate-per-event) and re-applies grants.
+# Args: <host> <db> <admin_user> <admin_token> <writer_user> <writer_password>
+provision_event_writer_role() {
+  local host="$1" db="$2" admin_user="$3" admin_token="$4" writer="$5" wpass="$6"
+  if [ -z "$host" ] || [ -z "$admin_token" ]; then
+    warn "Lakebase host/token unavailable — skipping event-writer role provisioning."
+    return 1
+  fi
+  info "Provisioning shared event-writer role '$writer'..."
+  # Escape single quotes for safe SQL string literals.
+  local esc_pass="${wpass//\'/\'\'}"
+  local esc_writer="${writer//\'/\'\'}"
+  if PGPASSWORD="$admin_token" psql "host=$host port=5432 dbname=$db user=$admin_user sslmode=require" \
+      -v ON_ERROR_STOP=1 -q -c "
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$esc_writer') THEN
+    EXECUTE format('CREATE ROLE %I WITH LOGIN PASSWORD %L', '$esc_writer', '$esc_pass');
+  ELSE
+    EXECUTE format('ALTER ROLE %I WITH LOGIN PASSWORD %L', '$esc_writer', '$esc_pass');
+  END IF;
+  EXECUTE format('GRANT INSERT ON scoring_events, task_attempts, validation_results, hints_taken TO %I', '$esc_writer');
+  EXECUTE format('GRANT INSERT, UPDATE, SELECT ON event_workspaces TO %I', '$esc_writer');
+  EXECUTE format('GRANT SELECT ON event_leaderboard, team_scores, teams, participant_identity_map, events, announcements TO %I', '$esc_writer');
+  EXECUTE format('GRANT SELECT ON quest_packs, quest_pack_versions, quests, quest_tasks, task_hints, task_validators TO %I', '$esc_writer');
+END \$\$;
+"; then
+    success "Event-writer role '$writer' provisioned and granted (INSERT-only on facts)"
+    return 0
+  fi
+  warn "Event-writer role provisioning failed (non-fatal). Provision it manually before the event,
+    then verify with: python3 scripts/federation_spike.py --host $host --db $db --user $writer"
+  return 1
+}
+
+# Write app/app.yaml with role-appropriate env. Standalone emits exactly the
+# two-variable file it always has (byte-for-byte unchanged). master/child add
+# the federation env (QUEST_ROLE, workspace id, event slug, and — for child —
+# the explicit writer credential pointed at the master's shared Lakebase).
+# Args: <lakebase_host> <lakebase_db>
+write_app_yaml() {
+  local lb_host="$1" lb_db="$2"
+  local app_yaml="${SCRIPT_DIR:-$(pwd)}/app/app.yaml"
+  {
+    echo "command:"
+    echo "  - uvicorn"
+    echo "  - main:app"
+    echo "  - --host"
+    echo "  - 0.0.0.0"
+    echo "  - --port"
+    echo "  - \"8000\""
+    echo ""
+    echo "env:"
+    echo "  - name: LAKEBASE_HOST"
+    echo "    value: \"$lb_host\""
+    echo "  - name: LAKEBASE_DB"
+    echo "    value: \"$lb_db\""
+    if [ -n "$QUEST_ROLE" ] && [ "$QUEST_ROLE" != "standalone" ]; then
+      echo "  - name: QUEST_ROLE"
+      echo "    value: \"$QUEST_ROLE\""
+      [ -n "$EVENT_SLUG" ]   && { echo "  - name: QUEST_EVENT_SLUG"; echo "    value: \"$EVENT_SLUG\""; }
+      [ -n "$WORKSPACE_ID" ] && { echo "  - name: QUEST_WORKSPACE_ID"; echo "    value: \"$WORKSPACE_ID\""; }
+      if [ "$QUEST_ROLE" = "child" ]; then
+        echo "  - name: LAKEBASE_USER"
+        echo "    value: \"$MASTER_LAKEBASE_USER\""
+        echo "  - name: LAKEBASE_PASSWORD"
+        echo "    value: \"$MASTER_LAKEBASE_TOKEN\""
+      fi
+    fi
+  } > "$app_yaml"
+}
+
 # ── Parse Arguments ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -96,6 +184,12 @@ while [[ $# -gt 0 ]]; do
     --skip-auth-check) SKIP_AUTH_CHECK=1; shift ;;
     --quick)          DEPLOY_MODE="quick"; shift ;;
     --full)           DEPLOY_MODE="full"; shift ;;
+    --role)               QUEST_ROLE="$2"; shift 2 ;;
+    --master-lakebase-host)  MASTER_LAKEBASE_HOST="$2"; shift 2 ;;
+    --master-lakebase-token) MASTER_LAKEBASE_TOKEN="$2"; shift 2 ;;
+    --master-lakebase-user)  MASTER_LAKEBASE_USER="$2"; shift 2 ;;
+    --event)              EVENT_SLUG="$2"; shift 2 ;;
+    --workspace-id)       WORKSPACE_ID="$2"; shift 2 ;;
     --help|-h)
       echo "Usage: ./deploy.sh [OPTIONS]"
       echo ""
@@ -114,12 +208,54 @@ while [[ $# -gt 0 ]]; do
       echo "  --skip-build          Skip frontend build (use existing app/static/)"
       echo "  --skip-scoring        Skip running the scoring pipeline"
       echo "  --skip-auth-check     Skip authentication validation (use if already authenticated)"
+      echo ""
+      echo "Multi-workspace federation (ADR_006 — one codebase, role-driven):"
+      echo "  --role ROLE              standalone (default) | master | child"
+      echo "  --event SLUG             Event slug this deployment is wired to"
+      echo "  --workspace-id ID        Child: id used to attribute federated writes"
+      echo "                           (defaults to the workspace host if omitted)"
+      echo "  --master-lakebase-host H Child: the MASTER workspace's shared Lakebase host"
+      echo "                           (setting this defaults --role to child)"
+      echo "  --master-lakebase-token T Child: shared event-writer credential/secret"
+      echo "  --master-lakebase-user U Child: writer role name (default: quest_event_writer)"
+      echo ""
+      echo "  master: provisions its own Lakebase, runs migrations, creates the shared"
+      echo "          event-writer role and prints its credential to hand to children."
+      echo "  child:  skips local Lakebase + migrations; points at the master Lakebase"
+      echo "          with the writer credential and stamps writes with --workspace-id."
       echo "  --help, -h            Show this help message"
       exit 0
       ;;
     *) fail "Unknown option: $1. Run ./deploy.sh --help for usage." ;;
   esac
 done
+
+# ── Resolve federation role (ADR_006) ────────────────────────────────────────
+# Role precedence: explicit --role wins; else presence of --master-lakebase-host
+# implies child; else standalone (today's default, unchanged).
+if [ -z "$QUEST_ROLE" ]; then
+  if [ -n "$MASTER_LAKEBASE_HOST" ]; then
+    QUEST_ROLE="child"
+  else
+    QUEST_ROLE="standalone"
+  fi
+fi
+case "$QUEST_ROLE" in
+  standalone|master|child) ;;
+  *) fail "Invalid --role '$QUEST_ROLE'. Use standalone, master, or child." ;;
+esac
+
+if [ "$QUEST_ROLE" = "child" ]; then
+  [ -n "$MASTER_LAKEBASE_HOST" ] || fail "child role requires --master-lakebase-host."
+  [ -n "$MASTER_LAKEBASE_TOKEN" ] || fail "child role requires --master-lakebase-token (shared event-writer credential)."
+  # Point the app's Lakebase layer at the master's shared endpoint. Setting
+  # LAKEBASE_HOST here makes the script take the "provided Lakebase" path
+  # (skips local provisioning); migrations are additionally skipped for child.
+  LAKEBASE_HOST="$MASTER_LAKEBASE_HOST"
+  # The child has only INSERT on the shared facts — it must never run the
+  # adoption scoring pipeline or the Delta→Lakebase sync.
+  SKIP_SCORING=1
+fi
 
 # ── Banner ───────────────────────────────────────────────────────────────────
 echo ""
@@ -324,6 +460,17 @@ fi
 WORKSPACE_HOST="${WORKSPACE_HOST%/}"
 success "Workspace: $WORKSPACE_HOST"
 
+# Federation role echo + default the child workspace id from the workspace host.
+if [ "$QUEST_ROLE" != "standalone" ]; then
+  if [ -z "$WORKSPACE_ID" ]; then
+    WORKSPACE_ID=$(echo "$WORKSPACE_HOST" | sed -E 's#^https?://##; s#/.*$##')
+  fi
+  success "Federation role: $QUEST_ROLE${EVENT_SLUG:+  event=$EVENT_SLUG}${WORKSPACE_ID:+  workspace_id=$WORKSPACE_ID}"
+  if [ "$QUEST_ROLE" = "child" ]; then
+    info "Child points at MASTER Lakebase: $MASTER_LAKEBASE_HOST/$LAKEBASE_DB (writer: $MASTER_LAKEBASE_USER)"
+  fi
+fi
+
 # Export env var auth so CLI commands don't rely on the token cache
 # (the cache can expire mid-operation during long Terraform applies)
 CLI_TOKEN=$($CLI auth token $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || true)
@@ -499,6 +646,14 @@ fi
 step "Step 5/8: Deploying to Databricks"
 
 BUNDLE_FILE="$SCRIPT_DIR/databricks.yml"
+
+# Child apps skip local Lakebase provisioning (which is where master/standalone
+# write app.yaml), so write the federation app.yaml now — before the app source
+# is uploaded by the bundle/Apps deploy.
+if [ "$QUEST_ROLE" = "child" ]; then
+  info "Writing child app.yaml (role=child, points at master Lakebase)..."
+  write_app_yaml "$MASTER_LAKEBASE_HOST" "$LAKEBASE_DB"
+fi
 
 if [ "$DEPLOY_MODE" = "quick" ]; then
   # ── Quick Deploy: Direct API (like Forge) ──────────────────────────────────
@@ -765,6 +920,13 @@ CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id);
   # service principal GRANT below also covers the newly-created GameDay tables.
   run_gameday_migrations "$LAKEBASE_HOST" "$LAKEBASE_DB" "$USER_EMAIL" "$LB_TOKEN"
 
+  # master: provision the shared event-writer role children will use.
+  if [ "$QUEST_ROLE" = "master" ]; then
+    EVENT_WRITER_PASSWORD=$(python3 -c "import secrets; print(secrets.token_urlsafe(24))")
+    provision_event_writer_role "$LAKEBASE_HOST" "$LAKEBASE_DB" "$USER_EMAIL" "$LB_TOKEN" \
+      "$MASTER_LAKEBASE_USER" "$EVENT_WRITER_PASSWORD" || true
+  fi
+
   # Grant app service principal access to Lakebase
   info "Granting app service principal access to Lakebase..."
 
@@ -792,24 +954,11 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO \"$SP_CLIENT
   fi
 
   # Patch app.yaml with actual Lakebase values (valueFrom doesn't work
-  # when app config isn't set by the bundle's Terraform lifecycle)
+  # when app config isn't set by the bundle's Terraform lifecycle). The helper
+  # emits the unchanged two-var file for standalone and adds federation env
+  # (QUEST_ROLE etc.) for master.
   info "Updating app.yaml with Lakebase endpoint..."
-  APP_YAML="$SCRIPT_DIR/app/app.yaml"
-  cat > "$APP_YAML" << APPYAML
-command:
-  - uvicorn
-  - main:app
-  - --host
-  - 0.0.0.0
-  - --port
-  - "8000"
-
-env:
-  - name: LAKEBASE_HOST
-    value: "$LAKEBASE_HOST"
-  - name: LAKEBASE_DB
-    value: "$LAKEBASE_DB"
-APPYAML
+  write_app_yaml "$LAKEBASE_HOST" "$LAKEBASE_DB"
 
   # Re-deploy bundle with the Lakebase host now set
   info "Redeploying with Lakebase configuration..."
@@ -826,6 +975,12 @@ APPYAML
     $PROFILE_FLAG -o json 2>/dev/null || true
 
   success "App updated with Lakebase configuration"
+elif [ "$QUEST_ROLE" = "child" ]; then
+  step "Step 6/8: Lakebase (child → master)"
+  success "Child uses MASTER shared Lakebase: $LAKEBASE_HOST/$LAKEBASE_DB"
+  info "Skipping local Lakebase provisioning and migrations (master owns the schema)."
+  # app.yaml was already written for the child before the deploy step. Nothing
+  # to provision here — the child only connects with the shared writer credential.
 else
   step "Step 6/8: Lakebase"
   success "Using provided Lakebase: $LAKEBASE_HOST/$LAKEBASE_DB"
@@ -840,6 +995,15 @@ else
     LB_TOKEN="${DATABRICKS_TOKEN:-}"
   fi
   run_gameday_migrations "$LAKEBASE_HOST" "$LAKEBASE_DB" "$USER_EMAIL" "$LB_TOKEN"
+
+  # master with a pre-provided Lakebase: provision the shared event-writer role
+  # and refresh app.yaml with master federation env.
+  if [ "$QUEST_ROLE" = "master" ]; then
+    EVENT_WRITER_PASSWORD=$(python3 -c "import secrets; print(secrets.token_urlsafe(24))")
+    provision_event_writer_role "$LAKEBASE_HOST" "$LAKEBASE_DB" "$USER_EMAIL" "$LB_TOKEN" \
+      "$MASTER_LAKEBASE_USER" "$EVENT_WRITER_PASSWORD" || true
+    write_app_yaml "$LAKEBASE_HOST" "$LAKEBASE_DB"
+  fi
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1062,7 +1226,32 @@ if [ -n "$APP_STATE" ]; then
   echo -e "  ${BOLD}App State:${NC}     $APP_STATE"
 fi
 echo -e "  ${BOLD}Lakebase:${NC}      $LAKEBASE_HOST/$LAKEBASE_DB"
+if [ "$QUEST_ROLE" != "standalone" ]; then
+  echo -e "  ${BOLD}Role:${NC}          $QUEST_ROLE${EVENT_SLUG:+  (event: $EVENT_SLUG)}"
+  [ -n "$WORKSPACE_ID" ] && echo -e "  ${BOLD}Workspace ID:${NC}  $WORKSPACE_ID"
+fi
 echo ""
+
+# master: print the shared event-writer credential to hand to child deploys.
+if [ "$QUEST_ROLE" = "master" ] && [ -n "$EVENT_WRITER_PASSWORD" ]; then
+  echo -e "${BOLD}${YELLOW}── Shared event-writer credential (give to child workspaces) ──${NC}"
+  echo ""
+  echo -e "  Children deploy with these flags (rotate per event):"
+  echo ""
+  echo -e "    ${CYAN}./deploy.sh \\\\${NC}"
+  echo -e "    ${CYAN}  --role child \\\\${NC}"
+  echo -e "    ${CYAN}  --event ${EVENT_SLUG:-<event-slug>} \\\\${NC}"
+  echo -e "    ${CYAN}  --master-lakebase-host $LAKEBASE_HOST \\\\${NC}"
+  echo -e "    ${CYAN}  --master-lakebase-user $MASTER_LAKEBASE_USER \\\\${NC}"
+  echo -e "    ${CYAN}  --master-lakebase-token '$EVENT_WRITER_PASSWORD'${NC}"
+  echo ""
+  echo -e "  ${DIM}Verify connectivity from a child first:${NC}"
+  echo -e "  ${DIM}  PGPASSWORD='$EVENT_WRITER_PASSWORD' python3 scripts/federation_spike.py \\\\${NC}"
+  echo -e "  ${DIM}    --host $LAKEBASE_HOST --db $LAKEBASE_DB --user $MASTER_LAKEBASE_USER${NC}"
+  echo ""
+  warn "Store this secret securely — it is shown once and is not persisted by this script."
+  echo ""
+fi
 
 if [ -n "$APP_URL" ]; then
   echo -e "  Open the app: ${BOLD}${CYAN}$APP_URL${NC}"
