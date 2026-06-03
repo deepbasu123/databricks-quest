@@ -25,13 +25,14 @@ migrations are skipped. Enable GameDay explicitly with `--event-mode` (or set
 
 **Live status lives in one place:
 [`docs/STATUS.md`](docs/STATUS.md)** — the authoritative per-PR tracker (what's
-landed, what's deployable/testable, known gaps). In short: PR01–PR10 and the
+landed, what's deployable/testable, known gaps). In short: PR01–PR11 and the
 federation plumbing (PR13–PR16) have landed — schema, quest packs, the
 validation/scoring write path, event/team lifecycle, the player gameplay UI, the
 host console, the live player leaderboard with hint-penalty scoring,
 namespace-guarded team resource bootstrap/reset, two shipped sample quest packs,
-and security/observability hardening (request ids, structured logs, expanded
-health, permission-model docs).
+security/observability hardening (request ids, structured logs, expanded
+health, permission-model docs), and the post-event report with JSON/CSV/Markdown
+export for account follow-up.
 
 > **What this means for testing:** the full loop is testable now — a host can
 > create an event, import a pack, run the lifecycle, players join and submit
@@ -426,6 +427,29 @@ Run flow and customization guide:
 create an event + teams → bootstrap resources → start → play. The first quest
 opens with a warehouse-independent `SELECT 1` check so teams can confirm their
 warehouse binding before the timed quests.
+
+---
+
+## Post-event report & export (works today — PR11)
+
+When an event wraps, the host gets a **Report** panel in the Host console (and two
+API endpoints) that turn the event into an enablement/account leave-behind:
+
+- **Structured report** — `GET /api/host/events/{event_id}/report` returns event
+  summary, leaderboard, a team×task completion matrix, validation failures, hint
+  usage, blockers (hardest tasks), champions/high performers, and **recommended
+  follow-ups**. The follow-ups are heuristics for the field motion: reinforce the
+  tasks most teams got stuck on, review hint-heavy tasks for doc/product gaps, set
+  up 1:1s for low-completion teams, and recognise top performers as potential
+  champions/references.
+- **Export** — `GET /api/host/events/{event_id}/export?format=json|csv|markdown`
+  downloads the report. **CSV** is team-centric (rank, points, completion %, hints
+  used, plus a 0/1 column per task) and drops straight into a spreadsheet; cells
+  are guarded against formula injection. **Markdown** is a readable recap.
+  **JSON** is the full structured payload.
+
+Every export is audited (`report.export`). The endpoints are host-only and
+read-only, and degrade gracefully if Lakebase is only partially available.
 
 ---
 

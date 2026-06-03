@@ -744,17 +744,61 @@ target falls outside the namespace — nothing is dropped. Bootstrap is idempote
 (including `resources.reset.refused`), and resource health is tracked in
 `event_resources`.
 
-### Export event report
+### Event report & export (PR11)
+
+Post-event artifacts for enablement and account follow-up. Both endpoints are
+host-only (`require_host`) and read-only; every repo call degrades to empty so a
+partially-available Lakebase still yields a (smaller) report rather than a 500.
 
 ```http
-GET /api/host/events/{event_id}/export
+GET /api/host/events/{event_id}/report                 # structured JSON (for the UI panel)
+GET /api/host/events/{event_id}/export?format=json|csv|markdown   # downloadable artifact
 ```
 
-Return formats:
+`format` defaults to `json`; an unknown value returns `400 BAD_FORMAT`. Each
+export sets `Content-Disposition: attachment; filename="<slug>-report.<ext>"` and
+is written to `event_audit_log` as `report.export` (with the chosen format).
 
-- JSON
-- CSV
-- Markdown
+The report (and the `report` JSON endpoint body) contains:
+
+```json
+{
+  "summary": { "event_id": "evt_1", "slug": "ai-bi-day", "title": "AI/BI GameDay",
+               "status": "completed", "participants": 24, "teams": 6,
+               "quests": 3, "tasks": 6, "attempts": 142,
+               "attempts_by_status": { "passed": 120, "failed": 22 } },
+  "leaderboard": [ { "rank": 1, "team_id": "team_red", "team_name": "Red Team", "total_points": 1250 } ],
+  "teams": [ { "team_id": "team_red", "team_name": "Red Team", "members": 4 } ],
+  "completion_matrix": [ { "team_id": "team_red", "team_name": "Red Team",
+                           "completed_count": 6, "total_tasks": 6, "completion_pct": 100.0,
+                           "completed": ["t1","t2","t3","t4","t5","t6"] } ],
+  "task_catalog": [ { "task_id": "t1", "task_title": "First query", "quest_title": "Warm up", "points": 20 } ],
+  "validation_failures": [ { "task_id": "t6", "task_title": "Dashboard", "status": "failed", "attempts": 8 } ],
+  "hint_usage": [ { "team_id": "team_blue", "team_name": "Blue Team", "task_title": "Dashboard", "hint_id": "h1", "penalty": -10 } ],
+  "hint_total_penalty": -30,
+  "blockers": [ { "task_id": "t6", "task_title": "Dashboard", "quest_title": "Dashboards",
+                  "solved_teams": 2, "total_teams": 6, "failed_attempts": 8 } ],
+  "champions": [ { "rank": 1, "team_id": "team_red", "team_name": "Red Team", "total_points": 1250 } ],
+  "fastest_team": { "team_id": "team_red", "team_name": "Red Team", "first_solves": 5 },
+  "recommended_follow_ups": [ "Reinforce 'Dashboard' (Dashboards): only 2/6 teams completed it — …" ]
+}
+```
+
+- **Blockers** are tasks a minority of teams solved or that drew failed/errored
+  attempts, ordered hardest-first (fewest solves, then most failures).
+- **Champions** are the top 3 ranked teams; **fastest_team** is the team with the
+  most first-solves (first team to complete each task).
+- **Recommended follow-ups** are derived heuristics for the account/enablement
+  motion (reinforce blocker tasks, review hint-heavy tasks for doc/product gaps,
+  1:1s for low-completion teams, recognise champions). When no blockers, weak
+  teams, or hint usage are detected, a "smooth event — try a harder pack" signal
+  is emitted instead.
+- **CSV** is team-centric: `rank, team, points, tasks_completed, total_tasks,
+  completion_pct, hints_used`, then one `0/1` column per task. Cells beginning
+  with `=`, `+`, `-`, or `@` are prefixed with `'` to neutralise spreadsheet
+  formula injection.
+- **Markdown** renders summary, leaderboard, champions, completion, blockers,
+  hint usage, and follow-ups as a readable leave-behind.
 
 ## Multi-workspace federation endpoints (ADR_006)
 

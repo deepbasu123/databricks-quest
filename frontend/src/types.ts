@@ -453,3 +453,77 @@ export interface ResourcePlan {
   blockers: ResourcePlanItem[]
   warehouse_configured: boolean
 }
+
+// ── Event report (PR11) ──────────────────────────────────────────────────────
+
+export interface ReportSummary {
+  event_id: string
+  slug: string | null
+  title: string | null
+  status: string
+  starts_at: string | null
+  ends_at: string | null
+  participants: number
+  teams: number
+  quests: number
+  tasks: number
+  attempts: number
+  attempts_by_status: Record<string, number>
+}
+
+export interface ReportLeaderboardRow {
+  rank: number | null
+  team_id: string
+  team_name: string
+  total_points: number
+  last_scored_at: string | null
+}
+
+export interface ReportCompletionRow {
+  team_id: string
+  team_name: string
+  completed: string[]
+  completed_count: number
+  total_tasks: number
+  completion_pct: number
+}
+
+export interface ReportBlocker {
+  task_id: string
+  task_title: string
+  quest_title: string
+  solved_teams: number
+  total_teams: number
+  failed_attempts: number
+}
+
+export interface ReportHint {
+  team_id: string
+  team_name: string
+  task_title: string | null
+  hint_id: string
+  penalty: number
+  at: string | null
+}
+
+export interface ReportChampion {
+  rank: number | null
+  team_id: string
+  team_name: string
+  total_points: number
+}
+
+export interface EventReport {
+  summary: ReportSummary
+  leaderboard: ReportLeaderboardRow[]
+  teams: { team_id: string; team_name: string; members: number }[]
+  completion_matrix: ReportCompletionRow[]
+  task_catalog: { task_id: string; task_title: string; quest_title: string; points: number }[]
+  validation_failures: { task_id: string; task_title: string | null; status: string; attempts: number }[]
+  hint_usage: ReportHint[]
+  hint_total_penalty: number
+  blockers: ReportBlocker[]
+  champions: ReportChampion[]
+  fastest_team: { team_id: string; team_name: string; first_solves: number } | null
+  recommended_follow_ups: string[]
+}
