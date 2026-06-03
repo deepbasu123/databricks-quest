@@ -1,22 +1,28 @@
 import os
-import time
 import logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from typing import List, Dict, Any, Optional
-from decimal import Decimal
 
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
-from databricks.sdk import WorkspaceClient
+
+# Lakebase connection handling is centralized in db.py so the app and the
+# migration runner share one implementation.
+import db
+from db import (
+    LAKEBASE_HOST,
+    LAKEBASE_DB,
+    serialize,
+    get_workspace_client,
+    get_lakebase_connection,
+    execute_query,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("databricks-quest")
 
 app = FastAPI(title="Databricks Quest API")
-
-LAKEBASE_HOST = os.getenv("LAKEBASE_HOST", "")
-LAKEBASE_DB = os.getenv("LAKEBASE_DB", "quest_db")
 
 if not LAKEBASE_HOST:
     logger.warning("LAKEBASE_HOST not set — database queries will fail until configured")
@@ -109,73 +115,6 @@ def get_level_progress(points: int) -> dict:
     return {"level": "Bronze", "current_points": 0, "level_floor": 0, "level_ceiling": 300, "progress_pct": 0}
 
 
-def serialize(obj):
-    if isinstance(obj, (datetime, date)):
-        return obj.isoformat()
-    if isinstance(obj, Decimal):
-        return float(obj)
-    return obj
-
-
-def get_workspace_client() -> WorkspaceClient:
-    return WorkspaceClient()
-
-
-# --- Lakebase connection with token caching ---
-_conn_cache = {"conn": None, "expiry": 0}
-
-
-def get_lakebase_connection():
-    import psycopg2
-    import psycopg2.extras
-
-    now = time.time()
-    cached = _conn_cache["conn"]
-    if cached and _conn_cache["expiry"] > now:
-        try:
-            with cached.cursor() as c:
-                c.execute("SELECT 1")
-            return cached
-        except Exception:
-            try:
-                cached.close()
-            except Exception:
-                pass
-
-    w = get_workspace_client()
-    headers = w.config.authenticate()
-    auth_header = headers.get("Authorization", "")
-    token = auth_header[7:] if auth_header.startswith("Bearer ") else w.config.token
-    user = w.current_user.me().user_name
-
-    conn = psycopg2.connect(
-        host=LAKEBASE_HOST,
-        port=5432,
-        dbname=LAKEBASE_DB,
-        user=user,
-        password=token,
-        sslmode="require",
-        connect_timeout=10,
-    )
-    conn.autocommit = True
-    _conn_cache["conn"] = conn
-    _conn_cache["expiry"] = now + 2700  # 45 min
-    logger.info(f"Lakebase connection established as {user}")
-    return conn
-
-
-def execute_query(query: str, params: tuple = ()) -> List[Dict[str, Any]]:
-    import psycopg2.extras
-
-    conn = get_lakebase_connection()
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(query, params)
-        if cur.description:
-            rows = cur.fetchall()
-            return [{k: serialize(v) for k, v in dict(row).items()} for row in rows]
-        return []
-
-
 def get_user_email(request: Request) -> str:
     email = request.headers.get("X-Forwarded-Email", "")
     if not email:
@@ -196,7 +135,18 @@ async def health():
         db_ok = len(result) > 0
     except Exception:
         db_ok = False
-    return {"status": "ok" if db_ok else "degraded", "db_connected": db_ok, "timestamp": datetime.utcnow().isoformat()}
+
+    # GameDay migration status — empty when migrations have not run yet or
+    # Lakebase is unavailable, so health never fails because of this.
+    migrations = db.applied_migrations()
+
+    return {
+        "status": "ok" if db_ok else "degraded",
+        "db_connected": db_ok,
+        "migrations_applied": migrations,
+        "migrations_count": len(migrations),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
 
 
 @app.get("/api/profile")

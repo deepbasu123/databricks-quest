@@ -53,6 +53,32 @@ warn()    { echo -e "${YELLOW}!${NC} $*"; }
 fail()    { echo -e "${RED}✗${NC} $*"; exit 1; }
 step()    { echo -e "\n${BOLD}${CYAN}── $* ──${NC}\n"; }
 
+# Apply GameDay schema migrations to Lakebase (idempotent; safe to re-run).
+# Args: <host> <db> <user> <token>. Non-fatal — adoption mode works without it.
+run_gameday_migrations() {
+  local host="$1" db="$2" user="$3" token="$4"
+  local runner="${SCRIPT_DIR:-$(pwd)}/app/migrations/run_migrations.py"
+  if [ ! -f "$runner" ]; then
+    warn "Migration runner not found ($runner) — skipping GameDay migrations."
+    return 0
+  fi
+  if [ -z "$host" ] || [ -z "$token" ]; then
+    warn "Lakebase host/token unavailable — skipping GameDay migrations."
+    return 0
+  fi
+  info "Applying GameDay schema migrations..."
+  if PGPASSWORD="$token" python3 "$runner" \
+      --lakebase-host "$host" \
+      --lakebase-db "$db" \
+      --user "$user"; then
+    success "GameDay migrations applied"
+  else
+    warn "GameDay migrations failed (non-fatal). Re-run later with:
+    PGPASSWORD=<token> python3 app/migrations/run_migrations.py \\
+      --lakebase-host $host --lakebase-db $db --user $user"
+  fi
+}
+
 # ── Parse Arguments ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -735,6 +761,10 @@ CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id);
 
   success "Database '$LAKEBASE_DB' and tables created"
 
+  # Apply GameDay (Event Mode) schema migrations before granting access, so the
+  # service principal GRANT below also covers the newly-created GameDay tables.
+  run_gameday_migrations "$LAKEBASE_HOST" "$LAKEBASE_DB" "$USER_EMAIL" "$LB_TOKEN"
+
   # Grant app service principal access to Lakebase
   info "Granting app service principal access to Lakebase..."
 
@@ -799,6 +829,17 @@ APPYAML
 else
   step "Step 6/8: Lakebase"
   success "Using provided Lakebase: $LAKEBASE_HOST/$LAKEBASE_DB"
+
+  # Apply GameDay migrations against the provided Lakebase endpoint. Mint a
+  # database credential if we can; otherwise fall back to the workspace token.
+  LB_PROJECT_ID=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+  LB_TOKEN=$($CLI postgres generate-database-credential \
+    "projects/$LB_PROJECT_ID/branches/production/endpoints/primary" \
+    $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])" 2>/dev/null || true)
+  if [ -z "$LB_TOKEN" ]; then
+    LB_TOKEN="${DATABRICKS_TOKEN:-}"
+  fi
+  run_gameday_migrations "$LAKEBASE_HOST" "$LAKEBASE_DB" "$USER_EMAIL" "$LB_TOKEN"
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
