@@ -7,6 +7,7 @@ from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel
 
 # Lakebase connection handling is centralized in db.py so the app and the
@@ -40,6 +41,7 @@ from services import federation as fed
 from services import record_audit
 from services import namespace as ns
 from services import resource_service as rsvc
+from services import observability as obs
 from services.validation_engine import default_engine, aggregate_status
 from services.scoring_service import default_scoring_service
 from services.resource_service import default_resource_service
@@ -49,6 +51,74 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("databricks-quest")
 
 app = FastAPI(title="Databricks Quest API")
+
+
+# ── Request correlation + standard error envelope (PR10) ─────────────────────
+
+
+@app.middleware("http")
+async def _request_id_middleware(request: Request, call_next):
+    """Assign a correlation id to every request and echo it on the response.
+
+    Stored on ``request.state.request_id`` so handlers and the exception
+    handlers below can stamp it into structured logs and error bodies.
+    """
+    rid = obs.normalize_request_id(request.headers.get(obs.REQUEST_ID_HEADER))
+    request.state.request_id = rid
+    try:
+        response = await call_next(request)
+    except Exception:
+        # Let the exception handlers below build the body; re-raise so they run.
+        logger.exception("unhandled error request_id=%s path=%s", rid, request.url.path)
+        raise
+    response.headers[obs.REQUEST_ID_HEADER] = rid
+    return response
+
+
+def _error_body(code: str, message: str, request_id: Optional[str], extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    err: Dict[str, Any] = {"code": code, "message": message}
+    if request_id:
+        err["request_id"] = request_id
+    if extra:
+        err.update(extra)
+    return {"error": err}
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """Normalize HTTPException bodies to ``{"error": {..., request_id}}``.
+
+    Handlers across the app already raise ``detail={"error": {...}}``; we merge
+    the request id into that error object (or wrap a bare string detail) without
+    changing the existing ``code``/``message`` shape clients depend on.
+    """
+    rid = getattr(request.state, "request_id", None)
+    detail = exc.detail
+    if isinstance(detail, dict) and isinstance(detail.get("error"), dict):
+        err = dict(detail["error"])
+        if rid and "request_id" not in err:
+            err["request_id"] = rid
+        body = {"error": err}
+    else:
+        body = _error_body("HTTP_ERROR", str(detail), rid)
+    headers = {obs.REQUEST_ID_HEADER: rid} if rid else None
+    return JSONResponse(status_code=exc.status_code, content=body, headers=headers)
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    """Catch-all: never leak internals; return a player-safe error + request id."""
+    rid = getattr(request.state, "request_id", None)
+    logger.exception("unhandled error request_id=%s: %s", rid, exc)
+    return JSONResponse(
+        status_code=500,
+        content=_error_body(
+            "INTERNAL_ERROR",
+            "Something went wrong. Quote the request id to your host if it persists.",
+            rid,
+        ),
+        headers={obs.REQUEST_ID_HEADER: rid} if rid else None,
+    )
 
 if not LAKEBASE_HOST:
     logger.warning("LAKEBASE_HOST not set — database queries will fail until configured")
@@ -342,9 +412,15 @@ async def _admin_seed_startup() -> None:
 
 @app.get("/api/health")
 async def health():
+    # Lakebase round-trip with a measured latency, so an operator can see slow
+    # DB as "degraded" rather than a binary up/down.
+    db_ok = False
+    db_latency_ms: Optional[float] = None
+    started = time.time()
     try:
         result = execute_query("SELECT 1 AS ok")
         db_ok = len(result) > 0
+        db_latency_ms = round((time.time() - started) * 1000, 1)
     except Exception:
         db_ok = False
 
@@ -352,11 +428,29 @@ async def health():
     # Lakebase is unavailable, so health never fails because of this.
     migrations = db.applied_migrations()
 
+    # Validator + scoring subsystem indicators (no DB writes).
+    validator_types = default_engine.supported_types()
+    warehouse_configured = bool(os.getenv("QUEST_SQL_WAREHOUSE_ID", "").strip())
+
+    checks = {
+        "lakebase": {"ok": db_ok, "latency_ms": db_latency_ms},
+        "migrations": {"ok": bool(migrations), "applied": len(migrations)},
+        "validators": {"ok": bool(validator_types), "types": validator_types},
+        "scoring": {"ok": db_ok},  # scoring needs the ledger (Lakebase)
+        "sql_warehouse": {"ok": warehouse_configured, "configured": warehouse_configured},
+    }
+    # Overall status: degraded if the DB is down; healthy otherwise. The
+    # warehouse being unset is informational (dry-run still works), not degraded.
+    status = "ok" if db_ok else "degraded"
+
     return {
-        "status": "ok" if db_ok else "degraded",
+        "status": status,
         "db_connected": db_ok,
+        "db_latency_ms": db_latency_ms,
         "migrations_applied": migrations,
         "migrations_count": len(migrations),
+        "validator_types": validator_types,
+        "checks": checks,
         "event_mode": config.event_mode_enabled(),
         "role": config.QUEST_ROLE,
         "federation": config.summary(),
@@ -1859,11 +1953,22 @@ async def submit_attempt(
     submission = body.submission or {}
     validators = quest_packs_repo.list_validators(task_id)
 
+    request_id = getattr(request.state, "request_id", None)
     outcomes = []
     public_results = []
     for v in validators:
         outcome = default_engine.run_validator(v, submission, variables)
         outcomes.append(outcome)
+        obs.log_validation(
+            request_id=request_id,
+            event_id=resolved_event_id,
+            task_id=task_id,
+            team_id=team_id,
+            validator_id=v.get("validator_id"),
+            validator_type=v.get("type"),
+            status=outcome.status,
+            score_delta=outcome.score_delta,
+        )
         try:
             attempts_repo.record_validation_result(
                 attempt_id=attempt_id,
@@ -1899,6 +2004,16 @@ async def submit_attempt(
         points_awarded = award["points"]
         already_awarded = bool(
             (not award["awarded"]) and task_points > 0 and (team_id or workspace_id)
+        )
+        obs.log_scoring(
+            request_id=request_id,
+            event_id=resolved_event_id,
+            team_id=team_id,
+            workspace_id=workspace_id,
+            source_type="validation",
+            points_delta=points_awarded,
+            awarded=bool(award["awarded"]),
+            reason="task_passed",
         )
 
     error_sentinel = "validation_error" if status == "error" else None

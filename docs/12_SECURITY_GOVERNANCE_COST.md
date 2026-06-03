@@ -21,6 +21,62 @@ Map users to event roles:
 
 Role assignments are stored in Lakebase.
 
+## Permission model (as implemented — PR04/PR10)
+
+The running app enforces three concentric rings. Identity comes from the
+Databricks App forwarded headers (`X-Forwarded-Email`/`X-Forwarded-User`),
+falling back to `QUEST_DEFAULT_USER` for local dev.
+
+| Ring | Surface | Enforced by | Rule |
+|------|---------|-------------|------|
+| Admin | `/api/admin/*` | `require_admin` | Caller must be in the effective admin set: `QUEST_ADMIN_ALLOWLIST` (env, deploy-time) ∪ the shared `quest_admins` Lakebase table. **Fail-open only when no admin is configured anywhere** (empty env + empty/unreachable table) for local-dev/legacy parity. |
+| Host | `/api/host/*` | `require_host` | Event Mode must be enabled (else `404 EVENT_MODE_DISABLED`); caller must be in `QUEST_HOST_ALLOWLIST` when that env is set (else open, matching `/api/admin`). `require_master_host` additionally `404`s on a child deployment for master-only surfaces (roster, workspace health). |
+| Player | `/api/events/*` | server-resolved identity | A player acts only as themselves. The team they submit for is resolved **server-side** from `(event_id, user)` — never taken from the request body. Validator template slots (`${team_catalog}`, `${team_schema}`, …) are filled from that resolved team, and the SQL safety layer rejects any `${...}` slot the server did not provide, so a player cannot redirect a check at another team's namespace. |
+
+Notes / current limitations:
+
+- The host ring is currently a single global allowlist: any host can act on any
+  event in the deployment. Per-event host ownership (the `event_hosts` table) is
+  modelled in the schema for a future finer-grained check; today it records
+  ownership for reporting but is not a gate.
+- Event Mode is opt-in. With it off, every GameDay surface (`/api/host/*`,
+  `/api/events/*`) behaves as if it does not exist (`404`), so a legacy adoption
+  deployment exposes no GameDay attack surface.
+
+## Validation & SQL safety (PR03/PR10)
+
+- `sql_assertion` validators are **read-only by default**: only a single
+  `SELECT`/`WITH` statement is allowed. DDL/DML/admin verbs
+  (`INSERT/UPDATE/DELETE/MERGE/DROP/ALTER/CREATE/GRANT/TRUNCATE/CALL/…`) are
+  blocked, comments are stripped before analysis, and stacked statements
+  (`;`-separated) are rejected — defending against stacked-query injection.
+- Template values are scrubbed of statement-breaking metacharacters; an
+  unresolved or unsafe slot is a hard error.
+- Resource bootstrap/reset is gated by `services/namespace.py`: a destructive
+  action can only ever touch a schema the event's namespace computes (never
+  `system`/`main`/`hive_metastore`, a bare catalog, a wildcard, or another
+  event's schema). See PR08.
+- Validators never raise to the player: any failure normalises to a player-safe
+  `error` outcome; raw diagnostics are persisted to
+  `validation_results.private_message` for the host only.
+
+## Audit & observability (PR10)
+
+- **Audit:** every host/admin/player mutation writes a row to `event_audit_log`
+  (lifecycle transitions, team/participant management, manual score adjustments,
+  announcements, quest-pack imports, attempt submissions, and resource
+  bootstrap/reset — including refused resets).
+- **Request correlation:** every request gets an `X-Request-ID` (honouring an
+  inbound one), echoed on the response and embedded in every error envelope
+  (`{"error": {"code", "message", "request_id"}}`), so a player-reported failure
+  ties to exact server logs.
+- **Structured logs:** each validator outcome and scoring decision emits one
+  `key=value` line (ids, type, status, point delta, awarded/idempotent) with no
+  player payloads.
+- **Health:** `GET /api/health` reports per-subsystem checks — Lakebase
+  (with latency), migrations applied, registered validator types, scoring
+  reachability, and SQL-warehouse configuration.
+
 ## Service principals
 
 Recommended service principals:
