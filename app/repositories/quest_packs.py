@@ -206,6 +206,22 @@ class QuestPacksRepository:
             logger.warning("find_pack_by_slug failed: %s", exc)
             return None
 
+    def get_version(self, pack_version_id: str) -> Optional[Dict[str, Any]]:
+        """Return a pack version row including its stored ``manifest_json``.
+
+        Used by the resource bootstrap service to read the pack's optional
+        ``resources`` section (seed SQL) for an event's pack version.
+        """
+        try:
+            rows = db.execute_query(
+                "SELECT * FROM quest_pack_versions WHERE pack_version_id = %s",
+                (pack_version_id,),
+            )
+            return rows[0] if rows else None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("get_version failed: %s", exc)
+            return None
+
     def find_version(self, pack_id: str, version: str) -> Optional[Dict[str, Any]]:
         try:
             rows = db.execute_query(

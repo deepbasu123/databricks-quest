@@ -653,11 +653,58 @@ GET /api/host/events/{event_id}/attempts?status=failed
 POST /api/host/events/{event_id}/announcements
 ```
 
-### Reset event resources
+### Resource bootstrap & reset (PR08)
+
+Provision and tear down each team's Databricks resources (catalogs/schemas, plus
+optional pack seed SQL). Every target is computed by `services/namespace.py`,
+the single authority on what is in-namespace; a destructive action can only ever
+touch a schema this event's namespace computes (never `system`/`main`/
+`hive_metastore`, a bare catalog, a wildcard, or another event's schema).
+
+The per-team target resolves as: `catalog` = `team_catalog` or
+`config_json.resource_namespace.catalog` or `quest_<event-slug>`; `schema` =
+`team_schema` or `<schema_prefix><team-name>`. These same values fill the
+`${team_catalog}` / `${team_schema}` validator slots, so bootstrapped resources
+line up with what validators check.
 
 ```http
-POST /api/host/events/{event_id}/reset
+GET  /api/host/events/{event_id}/resources          # health: namespace, per-team targets, registry
+POST /api/host/events/{event_id}/resources/plan      # dry-run: { action: "bootstrap"|"reset" } → plan + blockers
+POST /api/host/events/{event_id}/resources/bootstrap # CREATE CATALOG/SCHEMA (+ seed) per team
+POST /api/host/events/{event_id}/resources/reset     # DROP SCHEMA ... CASCADE per team — needs { confirm: true }
 ```
+
+`GET .../resources` →
+
+```json
+{
+  "namespace": { "catalog": "quest_ai_bi_day", "schema_prefix": "team_" },
+  "namespace_error": null,
+  "targets": [ { "team_id": "team_red", "team_name": "Red", "catalog": "quest_ai_bi_day", "schema": "team_red", "fqn": "quest_ai_bi_day.team_red" } ],
+  "resources": [ { "resource_id": "res_…", "team_id": "team_red", "resource_type": "schema", "fqn": "quest_ai_bi_day.team_red", "status": "active", "message": null } ],
+  "warehouse_configured": true
+}
+```
+
+`POST .../resources/plan` returns the ordered statements without executing:
+
+```json
+{
+  "action": "bootstrap",
+  "plan": [ { "op": "create_schema", "team_id": "team_red", "resource_type": "schema", "target": "quest_ai_bi_day.team_red", "sql": "CREATE SCHEMA IF NOT EXISTS quest_ai_bi_day.team_red", "within_namespace": true } ],
+  "blockers": [],
+  "warehouse_configured": true
+}
+```
+
+**Behaviour:** `bootstrap`/`reset` require a SQL warehouse
+(`QUEST_SQL_WAREHOUSE_ID`) and return `503 NO_WAREHOUSE` otherwise; `plan` works
+without one (dry-run). `reset` requires `confirm: true` (`400 CONFIRM_REQUIRED`
+otherwise) and **refuses the whole plan** with `409 OUTSIDE_NAMESPACE` if any
+target falls outside the namespace — nothing is dropped. Bootstrap is idempotent
+(`CREATE ... IF NOT EXISTS`). Every action is written to `event_audit_log`
+(including `resources.reset.refused`), and resource health is tracked in
+`event_resources`.
 
 ### Export event report
 
