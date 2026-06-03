@@ -80,6 +80,19 @@ export interface PipelineStatus {
   total_events_scored: number
 }
 
+export interface AdminEntry {
+  email: string
+  added_by: string | null
+  source: string
+  added_at: string | null
+}
+
+export interface AdminListResponse {
+  admins: AdminEntry[]
+  caller: string
+  caller_is_admin: boolean
+}
+
 export type Page = 'dashboard' | 'missions' | 'leaderboard' | 'admin' | 'federation'
 
 // ── Multi-workspace federation (ADR_006) ────────────────────────────────────

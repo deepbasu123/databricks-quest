@@ -106,6 +106,9 @@ run_gameday_migrations() {
 #   SELECT  on the leaderboard read surface (so children can render the
 #           event-wide leaderboard and locate their own team's rank)
 #   INSERT/UPDATE/SELECT on event_workspaces (for the startup check-in upsert)
+#   SELECT/INSERT on quest_admins (shared admin allowlist — children read it so
+#           admins are global, and admins can ADD admins from a child; removal
+#           requires the master/standalone app — no DELETE for the writer role)
 # No UPDATE/DELETE on facts, no access to secrets. Idempotent: re-running
 # resets the role's password (rotate-per-event) and re-applies grants.
 # Args: <host> <db> <admin_user> <admin_token> <writer_user> <writer_password>
@@ -132,6 +135,14 @@ BEGIN
   EXECUTE format('GRANT INSERT, UPDATE, SELECT ON event_workspaces TO %I', '$esc_writer');
   EXECUTE format('GRANT SELECT ON event_leaderboard, team_scores, teams, participant_identity_map, events, announcements TO %I', '$esc_writer');
   EXECUTE format('GRANT SELECT ON quest_packs, quest_pack_versions, quests, quest_tasks, task_hints, task_validators TO %I', '$esc_writer');
+  -- Shared admin allowlist: children read it (so admins are global) and may
+  -- ADD admins through the app. No DELETE — removing an admin requires the
+  -- master/standalone app (full workspace identity); a leaked child credential
+  -- must never be able to delete. Guarded so a missing table (migrations not
+  -- yet applied) doesn't abort role provisioning.
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'quest_admins') THEN
+    EXECUTE format('GRANT SELECT, INSERT ON quest_admins TO %I', '$esc_writer');
+  END IF;
 END \$\$;
 "; then
     success "Event-writer role '$writer' provisioned and granted (INSERT-only on facts)"
@@ -234,9 +245,11 @@ while [[ $# -gt 0 ]]; do
       echo "  --skip-build          Skip frontend build (use existing app/static/)"
       echo "  --skip-scoring        Skip running the scoring pipeline"
       echo "  --skip-auth-check     Skip authentication validation (use if already authenticated)"
-      echo "  --admins EMAILS       Comma-separated emails allowed on the Admin page."
-      echo "                        Defaults to the deploying user when omitted, so the"
-      echo "                        Admin page is never open to all authenticated users."
+      echo "  --admins EMAILS       Comma-separated emails seeded as Admin-page admins."
+      echo "                        Defaults to the deploying user when omitted (except"
+      echo "                        --role child, which inherits admins from the master)."
+      echo "                        Stored in Lakebase (quest_admins) and shared across"
+      echo "                        master/child; admins can add more admins in-app."
       echo ""
       echo "Event Mode (GameDay) — opt-in; legacy adoption app is the default:"
       echo "  --event-mode             Enable GameDay/Event Mode (default: OFF)."
@@ -460,9 +473,11 @@ else
 fi
 
 # Default the Admin allowlist to the deploying user so the Admin page is gated
-# (never wide open) even when --admins is not passed. Only do so for a real
-# email (skip the "(authentication skipped)" placeholder).
-if [ -z "$QUEST_ADMIN_ALLOWLIST" ] && [[ "$USER_EMAIL" == *"@"* ]]; then
+# (never wide open) even when --admins is not passed. Only for a real email
+# (skip the "(authentication skipped)" placeholder). Skipped for child apps:
+# children inherit the shared admin list from the master's quest_admins table,
+# so they must NOT seed their own deployer as a global admin.
+if [ -z "$QUEST_ADMIN_ALLOWLIST" ] && [[ "$USER_EMAIL" == *"@"* ]] && [ "$QUEST_ROLE" != "child" ]; then
   QUEST_ADMIN_ALLOWLIST="$USER_EMAIL"
 fi
 
@@ -1291,7 +1306,9 @@ else
   echo -e "  ${BOLD}Event Mode:${NC}    off (legacy adoption app)"
 fi
 if [ -n "$QUEST_ADMIN_ALLOWLIST" ]; then
-  echo -e "  ${BOLD}Admins:${NC}        $QUEST_ADMIN_ALLOWLIST"
+  echo -e "  ${BOLD}Admins:${NC}        $QUEST_ADMIN_ALLOWLIST ${DIM}(seeded to quest_admins; manage more in-app)${NC}"
+elif [ "$QUEST_ROLE" = "child" ]; then
+  echo -e "  ${BOLD}Admins:${NC}        inherited from master (shared quest_admins)"
 else
   echo -e "  ${BOLD}Admins:${NC}        ${YELLOW}open${NC} (no allowlist — Admin page visible to all)"
 fi

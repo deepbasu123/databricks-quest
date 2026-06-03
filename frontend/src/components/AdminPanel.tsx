@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -6,13 +6,16 @@ import {
   Clock,
   Database,
   Gauge,
+  Plus,
+  ShieldCheck,
   Target,
+  Trash2,
   TrendingUp,
   Users,
   type LucideIcon,
 } from 'lucide-react'
 import { Bar, BarChart, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import type { AdminStats, PipelineStatus } from '../types'
+import type { AdminListResponse, AdminStats, PipelineStatus } from '../types'
 import { useApi } from '../lib/api'
 import { QuestCard } from './quest/QuestCard'
 import { EmptyState, ErrorState, Skeleton, SkeletonText } from './quest/States'
@@ -159,7 +162,130 @@ export default function AdminPanel() {
           ))}
         </div>
       </QuestCard>
+
+      <AdminsManager />
     </div>
+  )
+}
+
+function AdminsManager() {
+  const admins = useApi<AdminListResponse>('/api/admin/admins')
+  const [email, setEmail] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const list = admins.data?.admins ?? []
+
+  async function add(e: React.FormEvent) {
+    e.preventDefault()
+    const value = email.trim().toLowerCase()
+    if (!value) return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/admin/admins', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: value }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => null)
+        throw new Error(body?.detail?.error?.message || `Request failed: ${res.status}`)
+      }
+      setEmail('')
+      admins.reload()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not add admin')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function remove(target: string) {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`/api/admin/admins/${encodeURIComponent(target)}`, { method: 'DELETE' })
+      if (!res.ok) {
+        const body = await res.json().catch(() => null)
+        throw new Error(body?.detail?.error?.message || `Request failed: ${res.status}`)
+      }
+      admins.reload()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not remove admin')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <QuestCard title="Admin Access" eyebrow="Governance">
+      <div className="relative z-10 space-y-4">
+        <p className="text-sm text-slate-400">
+          Admins can view this console and manage who else is an admin. The list is stored in Lakebase
+          and shared across the master and all child workspaces.
+        </p>
+
+        <form onSubmit={add} className="flex flex-wrap items-center gap-2">
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="name@company.com"
+            className="min-w-[220px] flex-1 rounded-xl border border-white/10 bg-white/[0.03] px-3.5 py-2.5 text-sm text-white placeholder:text-slate-500 focus:border-[#FF5F1F]/60 focus:outline-none"
+          />
+          <button
+            type="submit"
+            disabled={busy || !email.trim()}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-[#FF5F1F] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#ff7440] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Plus className="h-4 w-4" /> Add admin
+          </button>
+        </form>
+
+        {error && (
+          <p className="rounded-lg border border-[#F43F5E]/30 bg-[#F43F5E]/10 px-3 py-2 text-sm text-[#FCA5A5]">{error}</p>
+        )}
+
+        {admins.loading && !admins.loaded ? (
+          <SkeletonText lines={3} />
+        ) : list.length > 0 ? (
+          <ul className="divide-y divide-white/5 overflow-hidden rounded-xl border border-white/10">
+            {list.map((a) => (
+              <li key={a.email} className="flex items-center gap-3 bg-white/[0.02] px-4 py-3">
+                <ShieldCheck className="h-4 w-4 shrink-0 text-[#22C55E]" />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium text-white">{a.email}</p>
+                  <p className="text-xs text-slate-500">
+                    {a.source === 'env'
+                      ? 'from deploy config (--admins)'
+                      : a.source === 'seed'
+                        ? 'seeded at deploy'
+                        : a.added_by
+                          ? `added by ${a.added_by}`
+                          : 'added in-app'}
+                  </p>
+                </div>
+                {a.source === 'env' ? (
+                  <span className="rounded-md bg-white/5 px-2 py-1 text-xs text-slate-400">deploy</span>
+                ) : (
+                  <button
+                    onClick={() => remove(a.email)}
+                    disabled={busy}
+                    title="Remove admin"
+                    className="rounded-lg p-2 text-slate-400 transition hover:bg-[#F43F5E]/10 hover:text-[#F43F5E] disabled:opacity-50"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <EmptyState icon={ShieldCheck} title="No admins recorded" message="Add an email above to grant admin access." />
+        )}
+      </div>
+    </QuestCard>
   )
 }
 

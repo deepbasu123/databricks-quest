@@ -26,22 +26,54 @@ The adoption endpoints (`/api/profile`, `/api/missions`, `/api/leaderboard`,
 `/api/admin/*`, `/api/health`, `/api/notifications`) are always available.
 `GET /api/health` reports `"event_mode": true|false` so clients can gate UI.
 
-### Admin page gating (`QUEST_ADMIN_ALLOWLIST`)
+### Admin page gating (DB-backed, shared)
 
 `/api/admin/*` is gated by an admin allowlist independent of Event Mode. The
-allowlist is the comma-separated env var `QUEST_ADMIN_ALLOWLIST` (set by
-`deploy.sh --admins a@x.com,b@y.com`; `deploy.sh` defaults it to the deploying
-user when the flag is omitted, so the Admin page is never wide open in a real
-deployment). Behaviour:
+durable source of truth is the Lakebase table `quest_admins`, which is **shared
+across apps** — in federation the master owns it and child apps read/write it
+through the shared event-writer role, so an admin is automatically an admin on
+the standalone GameDay app, the master, and every child workspace.
 
-- When the allowlist is **set**, requests from users not on it return
+The effective admin set is the **union** of:
+
+- `quest_admins` (DB, source of truth), and
+- `QUEST_ADMIN_ALLOWLIST` (env bootstrap/fallback — set by
+  `deploy.sh --admins a@x.com,b@y.com`, defaulting to the deploying user except
+  for `--role child`, which inherits admins from the master).
+
+On startup the env allowlist is seeded into `quest_admins` (standalone/master
+only). Gating behaviour:
+
+- When the effective set is **non-empty**, users not in it get
   `403 { "error": { "code": "FORBIDDEN", "message": "Admin access required." } }`.
-- When the allowlist is **unset** (e.g. local dev), the endpoints stay open
-  (prior behaviour).
+- When it is **empty** (no env allowlist and an empty/unreachable table, e.g.
+  local dev), the endpoints stay open (prior behaviour).
+- If the DB read fails, gating falls back to the env allowlist so the deployer
+  keeps access.
 
-`GET /api/profile` returns `"is_admin": true|false` for the calling user so the
-frontend can hide the Admin nav for non-admins (defence-in-depth; the 403 gate
-is the real boundary).
+`GET /api/profile` returns `"is_admin": true|false` for the caller so the
+frontend can hide the Admin nav (defence-in-depth; the 403 gate is the real
+boundary).
+
+#### Admin management endpoints (admin-only, always available)
+
+```http
+GET    /api/admin/admins
+POST   /api/admin/admins           { "email": "new@corp.com" }
+DELETE /api/admin/admins/{email}
+```
+
+- `GET` returns `{ admins: [{ email, added_by, source, added_at }], caller,
+  caller_is_admin }`. `source` is `manual` (added in-app), `seed` (from the
+  deploy allowlist), or `env` (deploy-config-only, not in the DB).
+- `POST` adds an admin (admins can grant admin). `400 INVALID_EMAIL` on a
+  malformed address; `503 ADMIN_WRITE_FAILED` if Lakebase isn't writable from
+  this app.
+- `DELETE` removes a DB admin. Guards: `404 NOT_FOUND` if not an admin,
+  `409 LAST_ADMIN` to prevent lockout, `409 ENV_ADMIN` for deploy-config admins
+  (remove those via the deployment's `--admins`), and `403 REMOVE_NOT_PERMITTED`
+  from a child app (the writer role has no DELETE — remove from the
+  master/standalone app).
 
 ## Existing endpoints to preserve
 

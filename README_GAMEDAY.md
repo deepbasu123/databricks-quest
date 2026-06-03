@@ -59,9 +59,17 @@ for why children connect directly to the master's Lakebase over Postgres
 
 ### Admin page access (`--admins`)
 
-The **Admin** page (`/api/admin/*`) is gated by an allowlist. This is
-independent of Event Mode and applies to **every deploy**, including the legacy
-adoption app. Pass `--admins` with a comma-separated list of emails:
+The **Admin** page (`/api/admin/*`) is gated by an allowlist, independent of
+Event Mode and applies to **every deploy**, including the legacy adoption app.
+
+Admins are stored in **Lakebase** (the `quest_admins` table), which is the
+shared source of truth. In federation the master owns it and child apps read it
+through the shared event-writer credential — so **an admin is automatically an
+admin across the standalone app, the master, and every child workspace**. The
+effective admin set is the union of that table and the deploy-time env
+allowlist (the bootstrap/fallback).
+
+Seed the initial admins with `--admins`:
 
 ```bash
 ./deploy.sh --admins "alice@corp.com,bob@corp.com"
@@ -69,18 +77,31 @@ adoption app. Pass `--admins` with a comma-separated list of emails:
 
 Behaviour:
 
-- **`--admins` provided** → only those emails see the Admin page; everyone else
-  gets `403` from the admin APIs and the Admin nav item is hidden.
-- **`--admins` omitted** → `deploy.sh` defaults the allowlist to the **deploying
-  user**, so the Admin page is never open to every authenticated user. Add more
-  admins later by redeploying with `--admins`.
+- **`--admins` provided** → those emails are seeded into `quest_admins`; only
+  admins see the Admin page (others get `403` and the nav item is hidden).
+- **`--admins` omitted** → `deploy.sh` defaults to the **deploying user** (so
+  the page is never open to everyone) — **except `--role child`**, which seeds
+  nothing and inherits the admin list from the master's shared DB.
 
-Mechanics: the flag sets `QUEST_ADMIN_ALLOWLIST` (comma-separated emails) in
-`app.yaml`, and `/api/profile` returns `is_admin` so the frontend can hide the
-nav. The allowlist is only "open to all" when `QUEST_ADMIN_ALLOWLIST` is
-**absent** from the environment (e.g. running the app locally without
-`deploy.sh`) — `deploy.sh` always sets it to at least the deploying user, so a
-deployed Admin page is never wide open.
+**Admins manage admins in-app.** The Admin page has an *Admin Access* card to
+add/remove admins at runtime (or use the API directly):
+
+```bash
+# List admins
+curl -s "$APP/api/admin/admins"
+# Add an admin (any admin can grant admin; works from master or a child app)
+curl -s -X POST "$APP/api/admin/admins" -H 'Content-Type: application/json' \
+  -d '{"email":"carol@corp.com"}'
+# Remove an admin — from the MASTER/standalone app only (child role has no
+# DELETE on the shared table; last-admin removal is refused to avoid lockout)
+curl -s -X DELETE "$APP/api/admin/admins/carol@corp.com"
+```
+
+Mechanics: `--admins` sets `QUEST_ADMIN_ALLOWLIST` in `app.yaml` (the seed +
+fallback), and `/api/profile` returns `is_admin` so the frontend hides the nav.
+The page is "open to all" only when nothing is configured anywhere — no env
+allowlist **and** an empty/unreachable `quest_admins` (e.g. running locally
+without `deploy.sh`).
 
 ---
 

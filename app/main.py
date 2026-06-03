@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 from datetime import datetime, date
 from typing import List, Dict, Any, Optional
@@ -28,6 +29,7 @@ from repositories import (
     LeaderboardRepository,
     FederationRepository,
     RosterImportError,
+    AdminsRepository,
 )
 from repositories.events import attempts_open, JOINABLE_STATUSES
 from services import quest_pack_loader
@@ -158,20 +160,62 @@ QUEST_HOST_ALLOWLIST = [
     e.strip().lower() for e in os.getenv("QUEST_HOST_ALLOWLIST", "").split(",") if e.strip()
 ]
 
-# Admin allowlist for the adoption Admin page (/api/admin/*). Set from
-# deploy.sh's --admins flag (comma-separated emails); deploy.sh defaults it to
-# the deploying user so the page is never wide open in a real deployment. When
-# unset (e.g. local dev) the endpoints stay open, matching prior behaviour.
+# Env admin allowlist — the *bootstrap/fallback* for the Admin page
+# (/api/admin/*). Set from deploy.sh's --admins flag (comma-separated emails),
+# defaulting to the deploying user. The durable source of truth is the
+# Lakebase `quest_admins` table (shared across master/child); this env list is
+# seeded into it on startup and is always unioned in as a fallback so the
+# deployer keeps access even if the table is empty/unreachable. When BOTH are
+# empty (e.g. local dev) the endpoints stay open, matching prior behaviour.
 QUEST_ADMIN_ALLOWLIST = [
     e.strip().lower() for e in os.getenv("QUEST_ADMIN_ALLOWLIST", "").split(",") if e.strip()
 ]
 
+admins_repo = AdminsRepository()
+
+# Small TTL cache over the DB admin set so we don't query Lakebase on every
+# request (profile + each admin call). Invalidated locally on add/remove; other
+# app instances pick up changes within the TTL.
+_ADMIN_CACHE: Dict[str, Any] = {"emails": set(), "expiry": 0.0}
+_ADMIN_CACHE_TTL = 30.0
+
+
+def _invalidate_admin_cache() -> None:
+    _ADMIN_CACHE["expiry"] = 0.0
+
+
+def _db_admin_emails() -> set:
+    """DB admin emails (cached). Returns empty set if the table is unreachable."""
+    now = time.time()
+    if _ADMIN_CACHE["expiry"] > now:
+        return _ADMIN_CACHE["emails"]
+    try:
+        emails = set(admins_repo.list_emails())
+        _ADMIN_CACHE["emails"] = emails
+        _ADMIN_CACHE["expiry"] = now + _ADMIN_CACHE_TTL
+        return emails
+    except Exception as exc:  # noqa: BLE001 - fall back to env allowlist
+        logger.warning("admin list read failed; using env allowlist only: %s", exc)
+        _ADMIN_CACHE["emails"] = set()
+        _ADMIN_CACHE["expiry"] = now + 5.0  # brief negative cache
+        return set()
+
+
+def admin_emails() -> set:
+    """Effective admin set: env allowlist ∪ DB allowlist (both lowercased)."""
+    return set(QUEST_ADMIN_ALLOWLIST) | _db_admin_emails()
+
 
 def is_admin_user(user: str) -> bool:
-    """True if the user may see the Admin page. Open when no allowlist is set."""
-    if not QUEST_ADMIN_ALLOWLIST:
+    """True if the user may see the Admin page.
+
+    Open only when no admin is configured anywhere (no env allowlist and an
+    empty/unreachable DB table) — preserving local-dev/legacy parity.
+    """
+    effective = admin_emails()
+    if not effective:
         return True
-    return (user or "").lower() in QUEST_ADMIN_ALLOWLIST
+    return (user or "").lower() in effective
 
 
 def require_admin(request: Request) -> str:
@@ -258,6 +302,29 @@ async def _federation_startup() -> None:
         fed.startup_checkin()
     except Exception as exc:  # noqa: BLE001 - never block startup
         logger.warning("federation startup check-in skipped: %s", exc)
+
+
+@app.on_event("startup")
+async def _admin_seed_startup() -> None:
+    """Seed the shared quest_admins table from the env allowlist.
+
+    Runs for standalone/master (which own the table and connect with DDL
+    rights); child apps inherit the shared admin list from the master DB, so
+    they neither seed nor get a default allowlist. Best-effort — never blocks
+    startup and a read-only role simply no-ops.
+    """
+    if config.QUEST_ROLE == "child":
+        return
+    if not QUEST_ADMIN_ALLOWLIST:
+        return
+    try:
+        admins_repo.ensure_schema()
+        added = admins_repo.seed(QUEST_ADMIN_ALLOWLIST)
+        if added:
+            logger.info("seeded %d admin(s) from QUEST_ADMIN_ALLOWLIST", added)
+        _invalidate_admin_cache()
+    except Exception as exc:  # noqa: BLE001 - never block startup
+        logger.warning("admin seed skipped: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +518,101 @@ async def get_pipeline_status(user: str = Depends(require_admin)):
         }
     except Exception:
         return {"status": "not_initialized", "last_run": None, "total_events_scored": 0}
+
+
+# ---------------------------------------------------------------------------
+# Admin allowlist management — DB-backed, shared across master/child apps.
+# Always available (not Event-Mode gated), admin-only. The env allowlist is the
+# bootstrap/fallback; quest_admins in Lakebase is the durable source of truth.
+# ---------------------------------------------------------------------------
+
+class AddAdminPayload(BaseModel):
+    email: str
+
+
+@app.get("/api/admin/admins")
+async def list_admins(user: str = Depends(require_admin)):
+    """List admins: DB rows plus any env-only (seed/fallback) entries."""
+    try:
+        rows = admins_repo.list_admins()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("list_admins failed: %s", exc)
+        rows = []
+    db_emails = {(r.get("email") or "").lower() for r in rows}
+    env_only = [
+        {"email": e, "added_by": None, "source": "env", "added_at": None}
+        for e in QUEST_ADMIN_ALLOWLIST
+        if e not in db_emails
+    ]
+    return {"admins": rows + env_only, "caller": user, "caller_is_admin": True}
+
+
+@app.post("/api/admin/admins")
+async def add_admin(payload: AddAdminPayload, user: str = Depends(require_admin)):
+    """Add an admin to the shared allowlist. Admins can grant admin."""
+    email = (payload.email or "").strip().lower()
+    if "@" not in email or email.startswith("@") or email.endswith("@"):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "INVALID_EMAIL", "message": "A valid email is required."}},
+        )
+    try:
+        admins_repo.ensure_schema()
+        created = bool(admins_repo.add(email, added_by=user))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("add_admin failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "ADMIN_WRITE_FAILED",
+                              "message": "Could not persist admin (is Lakebase writable from this app?)."}},
+        )
+    _invalidate_admin_cache()
+    return {"email": email, "added": created, "added_by": user}
+
+
+@app.delete("/api/admin/admins/{email}")
+async def remove_admin(email: str, user: str = Depends(require_admin)):
+    """Remove an admin. Refuses to remove the last DB admin (lockout guard)."""
+    target = (email or "").strip().lower()
+    try:
+        current = {(r.get("email") or "").lower() for r in admins_repo.list_admins()}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("remove_admin read failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "ADMIN_READ_FAILED",
+                              "message": "Could not read the admin list."}},
+        )
+    if target not in current:
+        # Env-only admins live in deploy config, not the DB — can't remove here.
+        if target in set(QUEST_ADMIN_ALLOWLIST):
+            raise HTTPException(
+                status_code=409,
+                detail={"error": {"code": "ENV_ADMIN",
+                                  "message": "This admin is set via deploy config (QUEST_ADMIN_ALLOWLIST); "
+                                             "remove it from the deployment's --admins instead."}},
+            )
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "NOT_FOUND", "message": "Not an admin."}},
+        )
+    if len(current) <= 1:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": {"code": "LAST_ADMIN", "message": "Cannot remove the last admin."}},
+        )
+    try:
+        admins_repo.remove(target)
+    except Exception as exc:  # noqa: BLE001 - child role has no DELETE on quest_admins
+        logger.warning("remove_admin write failed: %s", exc)
+        raise HTTPException(
+            status_code=403,
+            detail={"error": {"code": "REMOVE_NOT_PERMITTED",
+                              "message": "Removing admins isn't permitted from this app. "
+                                         "Use the master/host workspace app to remove admins."}},
+        )
+    _invalidate_admin_cache()
+    return {"email": target, "removed": True}
 
 
 # ---------------------------------------------------------------------------
