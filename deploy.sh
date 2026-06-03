@@ -238,15 +238,25 @@ else
       $CLI auth login --host "$WORKSPACE_URL"
     fi
 
-    # Retry
+    # Retry — find the profile the CLI just created and use it explicitly.
+    # The databricks.yml placeholder host blocks DATABRICKS_HOST and --host,
+    # so the only reliable method is looking up the profile by workspace URL.
     if [ -n "$PROFILE_FLAG" ]; then
       USER_JSON=$($CLI current-user me $PROFILE_FLAG -o json 2>/dev/null || true)
     else
-      USER_JSON=$($CLI current-user me -o json 2>/dev/null || true)
+      # Scan auth profiles for one matching the workspace URL we just logged into
+      for _profile in $($CLI auth profiles 2>/dev/null | grep "$WORKSPACE_URL" | awk '{print $1}'); do
+        USER_JSON=$($CLI current-user me --profile "$_profile" -o json 2>/dev/null || true)
+        if [ -n "$USER_JSON" ] && echo "$USER_JSON" | python3 -c "import sys,json; json.load(sys.stdin)" &>/dev/null 2>&1; then
+          PROFILE_NAME="$_profile"
+          PROFILE_FLAG="--profile $_profile"
+          break
+        fi
+      done
     fi
 
     if [ -z "$USER_JSON" ]; then
-      fail "Authentication failed. Please run: databricks auth login --host YOUR_WORKSPACE_URL"
+      fail "Authentication failed. Please run: databricks auth login --host $WORKSPACE_URL"
     fi
   fi
 
