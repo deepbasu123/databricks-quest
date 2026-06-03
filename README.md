@@ -17,9 +17,15 @@ No separate accounts needed. Users log in with their workspace credentials.
 
 ## Deploy
 
-Full step-by-step instructions: **[SETUP.md](SETUP.md)**
+Full instructions: **[SETUP.md](SETUP.md)** -- covers three deployment methods:
 
-Short version:
+| Method | Best For | Time |
+|--------|----------|------|
+| **Scripted** (`./deploy.sh`) | Most users | ~15 min |
+| **Manual** (step-by-step) | Full control, restricted environments | ~30 min |
+| **Quick** (`./deploy.sh --quick`) | Fast testing without DAB | ~10 min |
+
+Quick start:
 
 ```bash
 git clone https://github.com/deepbasu123/databricks-quest.git
