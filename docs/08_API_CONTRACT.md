@@ -167,15 +167,27 @@ Request:
 GET /api/events/{event_id}/team
 ```
 
-Returns:
+Implemented in PR05. Resolves the caller's team for the event and returns the
+team gameplay dashboard. If the caller is not on a team, `team` is `null`
+(`joined` still reflects participant status):
 
-- team details
-- members
-- score
-- rank
-- quest progress
-- recent validations
-- available hints
+```json
+{
+  "joined": true,
+  "team": { "team_id": "team_red", "name": "Red", "display_name": "Red Team", "color": "#FF5F1F" },
+  "members": [ { "user_id": "ada@corp.com", "display_name": "Ada", "role": "player" } ],
+  "score": 200,
+  "rank": 2,
+  "completed_task_ids": ["tsk_1"],
+  "progress": { "completed_tasks": 1, "total_tasks": 6 },
+  "recent": [ { "scoring_event_id": "se_1", "team_id": "team_red", "task_id": "tsk_1", "points_delta": 200, "reason": "task_base", "created_at": "..." } ],
+  "attempts_open": true
+}
+```
+
+`recent` is filtered to the caller's team. Score/rank derive from the
+`team_scores` / `event_leaderboard` views; `completed_task_ids` are tasks the
+team has been awarded positive base points for.
 
 ### List event quests
 
@@ -183,7 +195,23 @@ Returns:
 GET /api/events/{event_id}/quests
 ```
 
-Returns event-scoped quests with completion status.
+Implemented in PR05. Returns the event pack's quests, each annotated with the
+caller team's progress:
+
+```json
+{
+  "quests": [
+    { "quest_id": "qst_1", "slug": "ai-bi", "title": "AI/BI Challenge",
+      "category": "analytics", "difficulty": "intermediate", "base_points": 0,
+      "task_count": 3, "completed_tasks": 1, "complete": false }
+  ],
+  "team_id": "team_red",
+  "attempts_open": true
+}
+```
+
+`complete` is true only when `completed_tasks == task_count` (and there is at
+least one task). With no team, progress counts are `0`.
 
 ### Get quest detail
 
@@ -191,14 +219,31 @@ Returns event-scoped quests with completion status.
 GET /api/events/{event_id}/quests/{quest_id}
 ```
 
-Returns:
+Implemented in PR05. The quest runner payload — narrative, tasks (objective,
+instructions, success criteria), per-task hints, and the caller team's
+completion. 404s if the quest is not part of the event's pack version:
 
-- narrative
-- tasks
-- instructions
-- hints available
-- completion status
-- submission schema
+```json
+{
+  "quest": { "quest_id": "qst_1", "slug": "ai-bi", "title": "AI/BI Challenge", "narrative": "..." },
+  "tasks": [
+    {
+      "task_id": "tsk_1", "slug": "build-gold", "title": "Build the gold table",
+      "objective": "...", "instructions_md": "...", "success_criteria_md": "...",
+      "points": 200, "validation_mode": "sql_assertion", "complete": true,
+      "hints": [ { "title": "Hint 1", "body_md": "...", "penalty_points": 0, "sort_order": 1 } ]
+    }
+  ],
+  "team_id": "team_red",
+  "attempts_open": true
+}
+```
+
+There is no per-task declared submission schema in the MVP: the player submits
+a free-form JSON `submission` object (see *Submit task attempt*), which the
+task's validators interpret. The UI defaults the editor to a small template
+keyed off `validation_mode` (e.g. `catalog`/`schema` for SQL assertions,
+`evidence` for manual review).
 
 ### Submit task attempt
 

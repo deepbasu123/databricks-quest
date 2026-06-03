@@ -18,6 +18,7 @@ import AdminPanel from './components/AdminPanel'
 import BadgeVault from './components/BadgeVault'
 import Rewards from './components/Rewards'
 import Federation from './components/Federation'
+import EventPlay from './components/EventPlay'
 import { BrandLockup } from './components/brand/BrandLockup'
 import { levelInfo } from './lib/levels'
 import type { Page, UserProfile, Notification, FederationStatus } from './types'
@@ -42,7 +43,7 @@ const pageTitles: Record<NavPage, { title: string; subtitle: string }> = {
   badges: { title: 'Badge Vault', subtitle: 'Track achievements and unlock mastery milestones' },
   rewards: { title: 'Rewards', subtitle: 'Swag, recognition, and weekly prize eligibility' },
   admin: { title: 'Admin', subtitle: 'Platform adoption telemetry and scoring health' },
-  federation: { title: 'Event', subtitle: 'Live event-wide standings across all workspaces' },
+  federation: { title: 'Event', subtitle: 'Join an event, play quests, and track your team' },
 }
 
 const masterPageMeta = { title: 'Host Console', subtitle: 'Workspace health, roster, and identity reconciliation' }
@@ -245,7 +246,12 @@ export default function App() {
             {page === 'badges' && <BadgeVault profile={profile} />}
             {page === 'rewards' && <Rewards profile={profile} />}
             {page === 'admin' && profile?.is_admin && <AdminPanel />}
-            {page === 'federation' && federation && <Federation status={federation} />}
+            {page === 'federation' && federation &&
+              (federation.role === 'master' ? (
+                <Federation status={federation} />
+              ) : (
+                <EventPlay federation={federation} />
+              ))}
           </div>
         </main>
       </div>

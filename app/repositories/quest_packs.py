@@ -77,6 +77,56 @@ class QuestPacksRepository:
             logger.warning("list_quests failed: %s", exc)
             return []
 
+    def get_quest(self, quest_id: str) -> Optional[Dict[str, Any]]:
+        """Return a single quest row (including narrative), or None."""
+        try:
+            rows = db.execute_query(
+                """
+                SELECT quest_id, pack_version_id, slug, title, narrative,
+                       category, difficulty, sort_order, base_points
+                FROM quests
+                WHERE quest_id = %s
+                """,
+                (quest_id,),
+            )
+            return rows[0] if rows else None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("get_quest failed: %s", exc)
+            return None
+
+    def list_tasks_detail(self, quest_id: str) -> List[Dict[str, Any]]:
+        """Tasks for a quest with player-facing instructions/criteria."""
+        try:
+            return db.execute_query(
+                """
+                SELECT task_id, slug, title, objective, instructions_md,
+                       success_criteria_md, points, sort_order, validation_mode
+                FROM quest_tasks
+                WHERE quest_id = %s
+                ORDER BY sort_order ASC, title ASC
+                """,
+                (quest_id,),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("list_tasks_detail failed: %s", exc)
+            return []
+
+    def list_hints(self, task_id: str) -> List[Dict[str, Any]]:
+        """Hints for a task in reveal order (with any point penalty)."""
+        try:
+            return db.execute_query(
+                """
+                SELECT hint_id, task_id, sort_order, title, body_md, penalty_points
+                FROM task_hints
+                WHERE task_id = %s
+                ORDER BY sort_order ASC
+                """,
+                (task_id,),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("list_hints failed: %s", exc)
+            return []
+
     def list_tasks(self, quest_id: str) -> List[Dict[str, Any]]:
         try:
             return db.execute_query(

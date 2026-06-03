@@ -52,7 +52,7 @@ export default function Federation({ status }: { status: FederationStatus }) {
 
 // ── Child: overall leaderboard + your team's rank ────────────────────────────
 
-function ChildEventView({ status }: { status: FederationStatus }) {
+export function ChildEventView({ status }: { status: FederationStatus }) {
   const { data, loading, loaded, error, reload } = useApi<FederationLeaderboard>(
     '/api/federation/leaderboard',
   )

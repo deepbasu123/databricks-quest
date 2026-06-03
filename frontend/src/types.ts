@@ -151,3 +151,144 @@ export interface UnmappedIdentity {
   unattributed_points: number
   last_seen_at: string | null
 }
+
+// ── Player gameplay experience (PR05) ───────────────────────────────────────
+
+export type EventStatus =
+  | 'draft' | 'ready' | 'active' | 'paused' | 'frozen' | 'completed' | 'archived'
+
+export interface PlayerEvent {
+  event_id: string
+  slug: string
+  title: string
+  description?: string | null
+  status: EventStatus
+  starts_at?: string | null
+  ends_at?: string | null
+  timezone?: string | null
+  pack_title?: string | null
+  team_count?: number
+}
+
+export interface EventList {
+  events: PlayerEvent[]
+}
+
+export interface LobbyTeam {
+  team_id: string
+  name: string
+  display_name: string | null
+  color: string | null
+  members: number
+}
+
+export interface EventLobby {
+  event: PlayerEvent
+  joinable: boolean
+  attempts_open: boolean
+  is_host: boolean
+  teams: LobbyTeam[]
+  counts: { participants: number; teams: number; quests: number; tasks: number }
+  you: {
+    joined: boolean
+    participant_id: string | null
+    team_id: string | null
+    team_name: string | null
+  }
+}
+
+export interface TeamMember {
+  user_id: string
+  display_name: string | null
+  role: string | null
+}
+
+export interface ScoringEventRow {
+  scoring_event_id: string
+  team_id: string | null
+  user_id: string | null
+  task_id: string | null
+  source_type: string
+  points_delta: number
+  reason: string
+  created_at: string | null
+}
+
+export interface TeamDashboard {
+  joined: boolean
+  team: { team_id: string; name: string; display_name: string; color: string | null } | null
+  members: TeamMember[]
+  score: number
+  rank: number | null
+  completed_task_ids: string[]
+  progress: { completed_tasks: number; total_tasks: number }
+  recent: ScoringEventRow[]
+  attempts_open: boolean
+}
+
+export interface QuestSummary {
+  quest_id: string
+  slug: string
+  title: string
+  category?: string | null
+  difficulty?: string | null
+  base_points?: number
+  sort_order?: number
+  task_count: number
+  completed_tasks: number
+  complete: boolean
+}
+
+export interface QuestList {
+  quests: QuestSummary[]
+  team_id: string | null
+  attempts_open: boolean
+}
+
+export interface TaskHint {
+  title: string | null
+  body_md: string
+  penalty_points: number | null
+  sort_order: number
+}
+
+export interface QuestTask {
+  task_id: string
+  slug: string
+  title: string
+  objective: string
+  instructions_md?: string | null
+  success_criteria_md?: string | null
+  points: number
+  sort_order?: number
+  validation_mode: string
+  complete: boolean
+  hints: TaskHint[]
+}
+
+export interface QuestDetail {
+  quest: {
+    quest_id: string
+    slug: string
+    title: string
+    narrative?: string | null
+    category?: string | null
+    difficulty?: string | null
+    base_points?: number
+  }
+  tasks: QuestTask[]
+  team_id: string | null
+  attempts_open: boolean
+}
+
+export type AttemptStatus = 'passed' | 'failed' | 'manual' | 'error' | 'queued' | 'running'
+
+export interface AttemptResult {
+  attempt_id: string
+  status: AttemptStatus
+  message: string
+  points_awarded: number
+  already_awarded: boolean
+  results: { status: string; message: string }[]
+  team_id: string | null
+}

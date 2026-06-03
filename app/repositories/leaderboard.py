@@ -46,6 +46,43 @@ class LeaderboardRepository:
             logger.warning("get_team_score failed: %s", exc)
             return 0
 
+    def completed_task_ids(self, event_id: str, team_id: str) -> List[str]:
+        """Task ids a team has been awarded points for in an event.
+
+        A task counts as complete once it has a positive base-points scoring
+        event for the team (the per-scope idempotency key guarantees once-only).
+        """
+        if not team_id:
+            return []
+        try:
+            rows = db.execute_query(
+                """
+                SELECT DISTINCT task_id
+                FROM scoring_events
+                WHERE event_id = %s AND team_id = %s
+                  AND task_id IS NOT NULL AND points_delta > 0
+                """,
+                (event_id, team_id),
+            )
+            return [r["task_id"] for r in rows if r.get("task_id")]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("completed_task_ids failed: %s", exc)
+            return []
+
+    def get_team_rank(self, event_id: str, team_id: str) -> Optional[int]:
+        """A team's rank in the event leaderboard, or None if unranked."""
+        if not team_id:
+            return None
+        try:
+            rows = db.execute_query(
+                "SELECT rank FROM event_leaderboard WHERE event_id = %s AND team_id = %s",
+                (event_id, team_id),
+            )
+            return int(rows[0]["rank"]) if rows and rows[0].get("rank") is not None else None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("get_team_rank failed: %s", exc)
+            return None
+
     def list_recent_scoring_events(
         self, event_id: str, limit: int = 20
     ) -> List[Dict[str, Any]]:

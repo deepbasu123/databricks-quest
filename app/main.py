@@ -823,6 +823,117 @@ def _find_team_by_name(event_id: str, name: Optional[str]) -> Optional[Dict[str,
     return None
 
 
+def _team_public(team: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "team_id": team.get("team_id"),
+        "name": team.get("name"),
+        "display_name": team.get("display_name") or team.get("name"),
+        "color": team.get("color"),
+    }
+
+
+@app.get("/api/events/{event_id}/team")
+async def get_event_team(event_id: str, request: Request, _: None = Depends(require_event_mode)):
+    """Team gameplay dashboard: team, members, score, rank, progress, recent scoring."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    user = get_user_email(request)
+    participant = events_repo.get_participant(resolved_event_id, user)
+    team = events_repo.get_team_for_user(resolved_event_id, user)
+    if not team:
+        return {"joined": participant is not None, "team": None}
+
+    team_id = team["team_id"]
+    ev = events_repo.get_event(resolved_event_id)
+    completed = leaderboard_repo.completed_task_ids(resolved_event_id, team_id)
+    counts = events_repo.event_counts(resolved_event_id, ev.get("pack_version_id") if ev else None)
+    recent = [
+        r for r in leaderboard_repo.list_recent_scoring_events(resolved_event_id, limit=50)
+        if r.get("team_id") == team_id
+    ][:10]
+    return {
+        "joined": True,
+        "team": _team_public(team),
+        "members": [
+            {"user_id": m.get("user_id"), "display_name": m.get("display_name"), "role": m.get("role")}
+            for m in events_repo.list_team_members(team_id)
+        ],
+        "score": leaderboard_repo.get_team_score(resolved_event_id, team_id),
+        "rank": leaderboard_repo.get_team_rank(resolved_event_id, team_id),
+        "completed_task_ids": completed,
+        "progress": {"completed_tasks": len(completed), "total_tasks": counts.get("tasks", 0)},
+        "recent": recent,
+        "attempts_open": attempts_open(ev["status"]) if ev else False,
+    }
+
+
+@app.get("/api/events/{event_id}/quests")
+async def list_event_quests(event_id: str, request: Request, _: None = Depends(require_event_mode)):
+    """Event quests with per-quest task counts and the caller team's progress."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    ev = events_repo.get_event(resolved_event_id)
+    pack_version_id = ev.get("pack_version_id") if ev else None
+    user = get_user_email(request)
+    team = events_repo.get_team_for_user(resolved_event_id, user)
+    completed = set(
+        leaderboard_repo.completed_task_ids(resolved_event_id, team["team_id"]) if team else []
+    )
+
+    quests = quest_packs_repo.list_quests(pack_version_id) if pack_version_id else []
+    out = []
+    for q in quests:
+        tasks = quest_packs_repo.list_tasks(q["quest_id"])
+        total = len(tasks)
+        done = sum(1 for t in tasks if t.get("task_id") in completed)
+        out.append({
+            **q,
+            "task_count": total,
+            "completed_tasks": done,
+            "complete": total > 0 and done == total,
+        })
+    return {
+        "quests": out,
+        "team_id": team["team_id"] if team else None,
+        "attempts_open": attempts_open(ev["status"]) if ev else False,
+    }
+
+
+@app.get("/api/events/{event_id}/quests/{quest_id}")
+async def get_event_quest(event_id: str, quest_id: str, request: Request, _: None = Depends(require_event_mode)):
+    """Quest detail/runner: narrative, tasks (instructions, hints), completion."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    ev = events_repo.get_event(resolved_event_id)
+    quest = quest_packs_repo.get_quest(quest_id)
+    if not quest or (ev and quest.get("pack_version_id") != ev.get("pack_version_id")):
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "NOT_FOUND", "message": "Quest not found in this event."}},
+        )
+    user = get_user_email(request)
+    team = events_repo.get_team_for_user(resolved_event_id, user)
+    completed = set(
+        leaderboard_repo.completed_task_ids(resolved_event_id, team["team_id"]) if team else []
+    )
+
+    tasks = []
+    for t in quest_packs_repo.list_tasks_detail(quest_id):
+        tid = t.get("task_id")
+        tasks.append({
+            **t,
+            "complete": tid in completed,
+            "hints": [
+                {"title": h.get("title"), "body_md": h.get("body_md"),
+                 "penalty_points": h.get("penalty_points"), "sort_order": h.get("sort_order")}
+                for h in quest_packs_repo.list_hints(tid)
+            ],
+        })
+    return {
+        "quest": quest,
+        "tasks": tasks,
+        "team_id": team["team_id"] if team else None,
+        "attempts_open": attempts_open(ev["status"]) if ev else False,
+    }
+
+
 @app.post("/api/host/events")
 async def host_create_event(body: CreateEventPayload, user: str = Depends(require_host)):
     """Create a draft event from an imported pack version (creator becomes owner-host)."""
