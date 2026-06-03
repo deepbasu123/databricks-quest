@@ -1,39 +1,56 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
-  LayoutDashboard, Target, Trophy, Settings, Bell, ChevronRight,
-  Sparkles,
+  LayoutDashboard,
+  Target,
+  Trophy,
+  Settings,
+  Bell,
+  ChevronRight,
+  Gift,
+  Award,
+  Layers3,
 } from 'lucide-react'
-import Dashboard from './components/Dashboard'
+import DashboardV2 from './components/DashboardV2'
 import Missions from './components/Missions'
 import Leaderboard from './components/Leaderboard'
 import AdminPanel from './components/AdminPanel'
+import BadgeVault from './components/BadgeVault'
+import Rewards from './components/Rewards'
+import { BrandLockup } from './components/brand/BrandLockup'
+import { levelInfo } from './lib/levels'
 import type { Page, UserProfile, Notification } from './types'
 
-const NAV_ITEMS: { id: Page; label: string; icon: typeof LayoutDashboard }[] = [
-  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+type NavPage = Page | 'badges' | 'rewards'
+
+const NAV_ITEMS: { id: NavPage; label: string; icon: typeof LayoutDashboard }[] = [
+  { id: 'dashboard', label: 'Overview', icon: LayoutDashboard },
   { id: 'missions', label: 'Missions', icon: Target },
   { id: 'leaderboard', label: 'Leaderboard', icon: Trophy },
+  { id: 'badges', label: 'Badges', icon: Award },
+  { id: 'rewards', label: 'Rewards', icon: Gift },
   { id: 'admin', label: 'Admin', icon: Settings },
 ]
 
-const LEVEL_COLORS: Record<string, string> = {
-  Bronze: 'text-amber-700',
-  Silver: 'text-slate-400',
-  Gold: 'text-yellow-400',
-  Platinum: 'text-violet-400',
-  Elite: 'text-orange-400',
+const pageTitles: Record<NavPage, { title: string; subtitle: string }> = {
+  dashboard: { title: 'Overview', subtitle: 'Your journey to Databricks mastery' },
+  missions: { title: 'Missions', subtitle: 'Complete real platform actions and earn adoption points' },
+  leaderboard: { title: 'Leaderboard', subtitle: 'Weekly competition across Databricks platform explorers' },
+  badges: { title: 'Badge Vault', subtitle: 'Track achievements and unlock mastery milestones' },
+  rewards: { title: 'Rewards', subtitle: 'Swag, recognition, and weekly prize eligibility' },
+  admin: { title: 'Admin', subtitle: 'Platform adoption telemetry and scoring health' },
 }
 
-const LEVEL_BG: Record<string, string> = {
-  Bronze: 'from-amber-900/40 to-amber-800/20',
-  Silver: 'from-slate-600/40 to-slate-500/20',
-  Gold: 'from-yellow-600/40 to-yellow-500/20',
-  Platinum: 'from-violet-600/40 to-violet-500/20',
-  Elite: 'from-orange-600/40 to-orange-500/20',
+const levelColor: Record<string, string> = {
+  Bronze: '#CD7F32',
+  Silver: '#CBD5E1',
+  Gold: '#F5B72E',
+  Platinum: '#A78BFA',
+  Elite: '#FF5F1F',
+  Legend: '#FF5F1F',
 }
 
 export default function App() {
-  const [page, setPage] = useState<Page>('dashboard')
+  const [page, setPage] = useState<NavPage>('dashboard')
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [showNotifs, setShowNotifs] = useState(false)
@@ -42,7 +59,9 @@ export default function App() {
     try {
       const res = await fetch('/api/profile')
       if (res.ok) setProfile(await res.json())
-    } catch { /* silent */ }
+    } catch {
+      // Keep UI usable during local frontend work.
+    }
   }, [])
 
   const fetchNotifications = useCallback(async () => {
@@ -52,7 +71,9 @@ export default function App() {
         const data = await res.json()
         setNotifications(data.notifications || [])
       }
-    } catch { /* silent */ }
+    } catch {
+      // Keep UI usable during local frontend work.
+    }
   }, [])
 
   useEffect(() => {
@@ -60,131 +81,136 @@ export default function App() {
     fetchNotifications()
   }, [fetchProfile, fetchNotifications])
 
-  const level = profile?.level || 'Bronze'
+  const activeMeta = pageTitles[page]
+  const totalPoints = profile?.total_points ?? 0
+  const level = profile?.level ?? 'Bronze'
+  const info = levelInfo(totalPoints)
+  const progressPct = profile?.level_progress?.progress_pct ?? info.progressPct
+  const nextLevel = info.next?.name ?? 'Max'
+  const pointsToNext = profile?.level_progress
+    ? Math.max(profile.level_progress.level_ceiling - totalPoints, 0)
+    : info.pointsToNext
+  const nextLevelPoints = profile?.level_progress?.level_ceiling ?? info.next?.threshold ?? totalPoints
 
   return (
-    <div className="flex h-screen overflow-hidden">
-      {/* Sidebar */}
-      <aside className="w-64 bg-slate-900/90 border-r border-slate-800 flex flex-col shrink-0">
-        {/* Logo */}
-        <div className="p-5 border-b border-slate-800">
+    <div className="flex h-screen overflow-hidden bg-[#070A12] text-slate-100">
+      <aside className="relative flex w-[280px] shrink-0 flex-col overflow-hidden border-r border-white/10 bg-[#0D1320]/95">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_10%,rgba(255,95,31,0.12),transparent_32%)]" />
+        <div className="relative z-10 border-b border-white/10 p-6">
+          <BrandLockup />
+        </div>
+
+        <div className="relative z-10 mx-4 mt-5 rounded-2xl border border-white/10 bg-white/[0.045] p-4 shadow-2xl shadow-black/20">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center">
-              <Sparkles className="w-6 h-6 text-white" />
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br from-[#7A4A24] to-[#2B1B16] text-lg font-bold text-white ring-1 ring-white/10">
+              {(profile?.display_name || 'A')[0].toUpperCase()}
             </div>
-            <div>
-              <h1 className="font-bold text-lg text-white leading-tight">Databricks</h1>
-              <p className="text-amber-500 text-sm font-semibold -mt-0.5">Quest</p>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-white">{profile?.display_name || 'Explorer'}</p>
+              <p className="mt-1 text-xs font-semibold" style={{ color: levelColor[level] || '#F5B72E' }}>◆ {level}</p>
             </div>
+          </div>
+          <div className="mt-4">
+            <div className="mb-2 flex justify-between text-xs text-slate-400">
+              <span className="text-slate-200">{totalPoints.toLocaleString()} pts</span>
+              <span>{nextLevelPoints.toLocaleString()} pts</span>
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-white/10">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-[#FF5F1F] to-[#FFB21F] shadow-[0_0_18px_rgba(255,95,31,0.55)]"
+                style={{ width: `${Math.min(progressPct, 100)}%` }}
+              />
+            </div>
+            <p className="mt-2 text-xs text-slate-400">
+              {nextLevel === 'Max' ? 'Top level reached' : `${pointsToNext.toLocaleString()} pts to ${nextLevel}`}
+            </p>
           </div>
         </div>
 
-        {/* User card */}
-        {profile && (
-          <div className={`mx-3 mt-4 p-3 rounded-lg bg-gradient-to-r ${LEVEL_BG[level]} border border-slate-700/50`}>
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-full bg-slate-700 flex items-center justify-center text-sm font-bold text-amber-400">
-                {(profile.display_name || '?')[0].toUpperCase()}
-              </div>
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-white truncate">{profile.display_name}</p>
-                <p className={`text-xs font-semibold ${LEVEL_COLORS[level]}`}>{level}</p>
-              </div>
-            </div>
-            <div className="mt-2">
-              <div className="flex justify-between text-xs text-slate-400 mb-1">
-                <span>{profile.total_points} pts</span>
-                <span>{profile.level_progress?.level_ceiling} pts</span>
-              </div>
-              <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-amber-500 to-orange-500 rounded-full progress-bar-animated"
-                  style={{ width: `${profile.level_progress?.progress_pct || 0}%` }}
-                />
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Navigation */}
-        <nav className="flex-1 p-3 space-y-1 mt-2">
-          {NAV_ITEMS.map(item => {
+        <nav className="relative z-10 mt-5 flex-1 space-y-1 px-4">
+          {NAV_ITEMS.map((item) => {
             const active = page === item.id
             const Icon = item.icon
             return (
               <button
                 key={item.id}
                 onClick={() => setPage(item.id)}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all
-                  ${active
-                    ? 'bg-amber-500/15 text-amber-400 border border-amber-500/20'
-                    : 'text-slate-400 hover:bg-slate-800 hover:text-white border border-transparent'
-                  }`}
+                className={`group flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-sm font-medium transition-all ${
+                  active
+                    ? 'border-[#FF5F1F]/35 bg-[#FF5F1F]/14 text-white shadow-lg shadow-[#FF5F1F]/10'
+                    : 'border-transparent text-slate-400 hover:border-white/10 hover:bg-white/[0.045] hover:text-white'
+                }`}
               >
-                <Icon className="w-4.5 h-4.5" />
-                {item.label}
-                {active && <ChevronRight className="w-4 h-4 ml-auto" />}
+                <Icon className={`h-5 w-5 ${active ? 'text-[#FF8A3D]' : 'text-slate-500 group-hover:text-slate-300'}`} />
+                <span>{item.label}</span>
+                {active && <ChevronRight className="ml-auto h-4 w-4 text-[#FF8A3D]" />}
               </button>
             )
           })}
         </nav>
 
-        {/* Footer */}
-        <div className="p-4 border-t border-slate-800 text-xs text-slate-500">
-          Powered by Databricks System Tables
+        <div className="relative z-10 border-t border-white/10 p-5">
+          <div className="flex items-start gap-3 rounded-xl bg-white/[0.035] p-3 text-xs text-slate-400">
+            <Layers3 className="mt-0.5 h-5 w-5 shrink-0 text-slate-500" />
+            <div>
+              <p className="font-medium text-slate-300">Turn platform adoption into mastery.</p>
+              <p className="mt-3 text-slate-500">Powered by System Tables, Delta, Lakebase and Databricks Apps.</p>
+            </div>
+          </div>
         </div>
       </aside>
 
-      {/* Main area */}
-      <div className="flex-1 flex flex-col overflow-hidden">
-        {/* Top bar */}
-        <header className="h-14 border-b border-slate-800 flex items-center justify-between px-6 shrink-0 bg-slate-900/50">
-          <h2 className="text-lg font-semibold text-white capitalize">{page}</h2>
-          <div className="flex items-center gap-4">
-            {profile && (
-              <div className="flex items-center gap-2 text-sm">
-                <span className="text-amber-400 font-bold">{profile.total_points}</span>
-                <span className="text-slate-500">points</span>
-              </div>
-            )}
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="flex h-[64px] shrink-0 items-center justify-between border-b border-white/10 bg-[#0D1320]/80 px-7 backdrop-blur-xl">
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight text-white">{activeMeta.title}</h1>
+            <p className="mt-1 text-sm text-slate-400">{activeMeta.subtitle}</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <button className="rounded-xl border border-white/10 bg-white/[0.035] px-4 py-2 text-sm font-medium text-slate-200 hover:bg-white/[0.06]">
+              This week
+            </button>
             <div className="relative">
               <button
                 onClick={() => setShowNotifs(!showNotifs)}
-                className="relative p-2 rounded-lg hover:bg-slate-800 transition"
+                className="relative rounded-xl border border-white/10 bg-white/[0.035] p-2.5 hover:bg-white/[0.06]"
               >
-                <Bell className="w-5 h-5 text-slate-400" />
-                {notifications.length > 0 && (
-                  <span className="absolute top-1 right-1 w-2 h-2 bg-amber-500 rounded-full" />
-                )}
+                <Bell className="h-5 w-5 text-slate-300" />
+                {notifications.length > 0 && <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-[#FF5F1F]" />}
               </button>
               {showNotifs && (
-                <div className="absolute right-0 mt-2 w-80 card p-0 z-50 max-h-96 overflow-y-auto shadow-2xl">
-                  <div className="p-3 border-b border-slate-700 font-semibold text-sm">Notifications</div>
+                <div className="quest-card absolute right-0 z-50 mt-3 max-h-96 w-96 overflow-y-auto p-0 shadow-2xl">
+                  <div className="border-b border-white/10 p-4 text-sm font-semibold text-white">Notifications</div>
                   {notifications.length === 0 ? (
                     <div className="p-4 text-sm text-slate-500">No notifications yet</div>
                   ) : (
                     notifications.slice(0, 10).map((n, i) => (
-                      <div key={i} className="p-3 border-b border-slate-800/50 hover:bg-slate-800/50">
-                        <p className="text-sm font-medium text-white">{n.title}</p>
-                        <p className="text-xs text-slate-400 mt-0.5">{n.message}</p>
-                        {n.points > 0 && (
-                          <span className="inline-block mt-1 text-xs font-semibold text-amber-400">+{n.points} pts</span>
-                        )}
+                      <div key={i} className="border-b border-white/5 p-4 hover:bg-white/[0.035]">
+                        <p className="text-sm font-semibold text-white">{n.title}</p>
+                        <p className="mt-1 text-xs leading-5 text-slate-400">{n.message}</p>
+                        {n.points > 0 && <span className="mt-2 inline-block text-xs font-semibold text-[#F5B72E]">+{n.points} pts</span>}
                       </div>
                     ))
                   )}
                 </div>
               )}
             </div>
+            <div className="rounded-xl border border-[#FF5F1F]/25 bg-[#FF5F1F]/8 px-4 py-2 text-sm">
+              <span className="font-bold text-[#FF8A3D]">{totalPoints.toLocaleString()}</span>
+              <span className="ml-1 text-slate-400">pts</span>
+            </div>
           </div>
         </header>
 
-        {/* Page content */}
-        <main className="flex-1 overflow-y-auto p-6 bg-slate-950">
-          {page === 'dashboard' && <Dashboard profile={profile} onRefresh={fetchProfile} />}
-          {page === 'missions' && <Missions />}
-          {page === 'leaderboard' && <Leaderboard />}
-          {page === 'admin' && <AdminPanel />}
+        <main className="quest-grid-bg min-w-0 flex-1 overflow-y-auto p-4 lg:p-5">
+          <div key={page} className="quest-rise">
+            {page === 'dashboard' && <DashboardV2 profile={profile} onRefresh={fetchProfile} notifications={notifications} />}
+            {page === 'missions' && <Missions />}
+            {page === 'leaderboard' && <Leaderboard profile={profile} />}
+            {page === 'badges' && <BadgeVault profile={profile} />}
+            {page === 'rewards' && <Rewards profile={profile} />}
+            {page === 'admin' && <AdminPanel />}
+          </div>
         </main>
       </div>
     </div>
