@@ -102,6 +102,60 @@ class LeaderboardRepository:
             logger.warning("list_recent_scoring_events failed: %s", exc)
             return []
 
+    def recent_scoring_feed(
+        self, event_id: str, limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """Recent scoring events enriched with team + task names for display.
+
+        Powers the live "activity feed" next to the leaderboard. Uses LEFT JOINs
+        so a row with a null ``team_id`` (federated, pre-reconciliation) or a
+        manual adjustment with no task still renders.
+        """
+        try:
+            return db.execute_query(
+                """
+                SELECT se.scoring_event_id, se.team_id, t.display_name AS team_name,
+                       se.task_id, qt.title AS task_title, se.source_type,
+                       se.points_delta, se.reason, se.created_at
+                FROM scoring_events se
+                LEFT JOIN teams t        ON se.team_id = t.team_id
+                LEFT JOIN quest_tasks qt ON se.task_id = qt.task_id
+                WHERE se.event_id = %s
+                ORDER BY se.created_at DESC
+                LIMIT %s
+                """,
+                (event_id, limit),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("recent_scoring_feed failed: %s", exc)
+            return []
+
+    def revealed_hint_ids(self, event_id: str, team_id: str) -> List[str]:
+        """Hint ids a team has already revealed (and been charged for).
+
+        Hint penalties are recorded as ``scoring_events`` with
+        ``source_type = 'hint_penalty'`` and ``source_id`` set to the hint id.
+        The unique idempotency key guarantees a team is charged at most once per
+        hint, so this set lets the runner show an already-revealed hint without
+        re-charging.
+        """
+        if not team_id:
+            return []
+        try:
+            rows = db.execute_query(
+                """
+                SELECT DISTINCT source_id
+                FROM scoring_events
+                WHERE event_id = %s AND team_id = %s
+                  AND source_type = 'hint_penalty'
+                """,
+                (event_id, team_id),
+            )
+            return [r["source_id"] for r in rows if r.get("source_id")]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("revealed_hint_ids failed: %s", exc)
+            return []
+
     # ── Mutations (deferred to later PRs) ────────────────────────────────────
 
     def record_scoring_event(self, *args, **kwargs):

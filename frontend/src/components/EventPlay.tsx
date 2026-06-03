@@ -32,7 +32,8 @@ import { QuestCard } from './quest/QuestCard'
 import { EmptyState, ErrorState, Skeleton } from './quest/States'
 import { ChildEventView } from './Federation'
 import HostConsole from './HostConsole'
-import type { Announcement } from '../types'
+import EventLeaderboard from './EventLeaderboard'
+import type { Announcement, HintRevealResult } from '../types'
 
 type Tab = 'lobby' | 'quests' | 'team' | 'standings' | 'host'
 
@@ -182,7 +183,7 @@ function EventWorkspace({
     { id: 'lobby', label: 'Lobby' },
     { id: 'quests', label: 'Quests' },
     { id: 'team', label: 'Team' },
-    ...(isChild ? [{ id: 'standings' as Tab, label: 'Standings' }] : []),
+    { id: 'standings', label: 'Standings' },
     ...(lobby.is_host ? [{ id: 'host' as Tab, label: 'Host' }] : []),
   ]
 
@@ -243,7 +244,8 @@ function EventWorkspace({
           <QuestsPanel eventRef={eventRef} onOpen={setActiveQuest} />
         ))}
       {tab === 'team' && <TeamPanel eventRef={eventRef} />}
-      {tab === 'standings' && isChild && <ChildEventView status={federation} />}
+      {tab === 'standings' &&
+        (isChild ? <ChildEventView status={federation} /> : <EventLeaderboard eventRef={eventRef} />)}
       {tab === 'host' && lobby.is_host && <HostConsole eventRef={eventRef} />}
     </div>
   )
@@ -569,6 +571,35 @@ function TaskCard({
   const [result, setResult] = useState<AttemptResult | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [showHints, setShowHints] = useState(false)
+  const [hintBodies, setHintBodies] = useState<Record<string, string>>(() =>
+    Object.fromEntries(
+      task.hints.filter((h) => h.revealed && h.body_md).map((h) => [h.hint_id, h.body_md as string]),
+    ),
+  )
+  const [revealingHint, setRevealingHint] = useState<string | null>(null)
+
+  const revealHint = useCallback(
+    async (hintId: string) => {
+      if (hintBodies[hintId]) return
+      setRevealingHint(hintId)
+      try {
+        const res = await fetch(`/api/events/${eventRef}/tasks/${task.task_id}/hints/${hintId}/reveal`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        })
+        const data = (await res.json()) as HintRevealResult
+        if (!res.ok) throw new Error('Could not reveal hint')
+        setHintBodies((prev) => ({ ...prev, [hintId]: data.hint.body_md || '' }))
+        // A newly-applied penalty changed the team score — refresh standings/score.
+        if (data.newly_applied) onScored()
+      } catch {
+        /* surfaced inline below via missing body; keep the runner usable */
+      } finally {
+        setRevealingHint(null)
+      }
+    },
+    [eventRef, task.task_id, hintBodies, onScored],
+  )
 
   const submit = useCallback(async () => {
     setBusy(true)
@@ -642,15 +673,37 @@ function TaskCard({
               </button>
               {showHints && (
                 <div className="mt-2 space-y-2">
-                  {task.hints.map((h, i) => (
-                    <div key={i} className="rounded-xl border border-amber-500/20 bg-amber-500/[0.05] px-3 py-2 text-sm text-amber-100/90">
-                      {h.title && <p className="text-xs font-semibold text-amber-200">{h.title}</p>}
-                      <p className="whitespace-pre-wrap">{h.body_md}</p>
-                      {!!h.penalty_points && (
-                        <p className="mt-1 text-[11px] text-amber-300/70">−{h.penalty_points} pts if used</p>
-                      )}
-                    </div>
-                  ))}
+                  {task.hints.map((h) => {
+                    const body = hintBodies[h.hint_id]
+                    const revealed = !!body
+                    const penalty = Math.abs(h.penalty_points || 0)
+                    return (
+                      <div key={h.hint_id} className="rounded-xl border border-amber-500/20 bg-amber-500/[0.05] px-3 py-2 text-sm text-amber-100/90">
+                        {h.title && <p className="text-xs font-semibold text-amber-200">{h.title}</p>}
+                        {revealed ? (
+                          <p className="mt-0.5 whitespace-pre-wrap">{body}</p>
+                        ) : (
+                          <div className="mt-1 flex items-center gap-3">
+                            <button
+                              onClick={() => revealHint(h.hint_id)}
+                              disabled={revealingHint === h.hint_id}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/[0.08] px-2.5 py-1 text-xs font-medium text-amber-200 transition hover:bg-amber-500/[0.15] disabled:opacity-50"
+                            >
+                              <Lightbulb className="h-3.5 w-3.5" />
+                              {revealingHint === h.hint_id
+                                ? 'Revealing…'
+                                : penalty
+                                  ? `Reveal hint (−${penalty} pts)`
+                                  : 'Reveal hint'}
+                            </button>
+                          </div>
+                        )}
+                        {!revealed && !!penalty && (
+                          <p className="mt-1 text-[11px] text-amber-300/70">Costs {penalty} pts when revealed</p>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
               )}
             </div>

@@ -127,6 +127,24 @@ class QuestPacksRepository:
             logger.warning("list_hints failed: %s", exc)
             return []
 
+    def get_hint(self, hint_id: str) -> Optional[Dict[str, Any]]:
+        """Return a single hint row joined to its task/quest (for reveal scoring)."""
+        try:
+            rows = db.execute_query(
+                """
+                SELECT h.hint_id, h.task_id, h.title, h.body_md, h.penalty_points,
+                       h.sort_order, t.quest_id
+                FROM task_hints h
+                JOIN quest_tasks t ON t.task_id = h.task_id
+                WHERE h.hint_id = %s
+                """,
+                (hint_id,),
+            )
+            return rows[0] if rows else None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("get_hint failed: %s", exc)
+            return None
+
     def list_tasks(self, quest_id: str) -> List[Dict[str, Any]]:
         try:
             return db.execute_query(

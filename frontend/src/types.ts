@@ -246,10 +246,26 @@ export interface QuestList {
 }
 
 export interface TaskHint {
+  hint_id: string
   title: string | null
-  body_md: string
+  // Withheld (null) until the team reveals the hint via the reveal endpoint.
+  body_md: string | null
   penalty_points: number | null
   sort_order: number
+  revealed: boolean
+}
+
+export interface HintRevealResult {
+  hint: {
+    hint_id: string
+    title: string | null
+    body_md: string
+    penalty_points: number | null
+  }
+  revealed: boolean
+  penalty_applied: number
+  newly_applied: boolean
+  team_score: number | null
 }
 
 export interface QuestTask {
@@ -301,6 +317,38 @@ export interface Announcement {
   severity: string
   created_by?: string
   created_at?: string | null
+}
+
+// ── Live leaderboard (PR07) ──────────────────────────────────────────────────
+
+export interface LeaderboardRow {
+  event_id: string
+  team_id: string
+  display_name: string | null
+  total_points: number
+  rank: number | null
+  last_scored_at?: string | null
+}
+
+export interface RecentScore {
+  scoring_event_id: string
+  team_id: string | null
+  team_name: string | null
+  task_id: string | null
+  task_title: string | null
+  source_type: string
+  points_delta: number
+  reason: string
+  created_at?: string | null
+}
+
+export interface EventLeaderboard {
+  event: PlayerEvent
+  frozen: boolean
+  status: string
+  leaderboard: LeaderboardRow[]
+  recent: RecentScore[]
+  you: LeaderboardRow | null
 }
 
 // ── Host console (PR06) ──────────────────────────────────────────────────────

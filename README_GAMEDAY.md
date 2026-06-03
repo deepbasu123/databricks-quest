@@ -25,10 +25,10 @@ migrations are skipped. Enable GameDay explicitly with `--event-mode` (or set
 
 **Live status lives in one place:
 [`docs/STATUS.md`](docs/STATUS.md)** — the authoritative per-PR tracker (what's
-landed, what's deployable/testable, known gaps). In short: PR01–PR06 and the
+landed, what's deployable/testable, known gaps). In short: PR01–PR07 and the
 federation plumbing (PR13–PR16) have landed — schema, quest packs, the
-validation/scoring write path, event/team lifecycle, the player gameplay UI, and
-the host console.
+validation/scoring write path, event/team lifecycle, the player gameplay UI, the
+host console, and the live player leaderboard with hint-penalty scoring.
 
 > **What this means for testing:** the full loop is testable now — a host can
 > create an event, import a pack, run the lifecycle, players join and submit
@@ -319,10 +319,12 @@ needed by hand:
 - **Team dashboard** — score, rank, members, task progress, and recent scoring
   (`GET /api/events/{id}/team`).
 
-Role behaviour: `master` deployments show the **Host Console** instead of the
-player UI; `child` deployments get the player UI plus a **Standings** tab with
-the event-wide federated leaderboard. A `child` app is pinned to its configured
-event; a `standalone` app lets the player choose from the event list.
+Every event view now has a **Standings** tab (PR07, see below). Role behaviour:
+`master` deployments show the **Host Console** instead of the player UI; `child`
+deployments get the player UI and their Standings tab renders the event-wide
+*federated* leaderboard (own-team rank highlighted). A `child` app is pinned to
+its configured event; a `standalone` app lets the player choose from the event
+list.
 
 All players also see a **host announcement banner** at the top of the event
 view (`GET /api/events/{id}/announcements`).
@@ -361,6 +363,43 @@ dashboard):
 > Note on the manual-adjustment ledger row: it carries a unique idempotency key
 > (the adjustment id), so unlike base-points awards it is never deduplicated — a
 > manual override is intentional and always lands.
+
+---
+
+## Live leaderboard & hint penalties (works today — PR07)
+
+Every event has a **Standings** tab (all roles). For standalone/master it calls
+`GET /api/events/{id}/leaderboard` and renders:
+
+- a **podium** (top 3) and a **ranked table of all teams**, with the caller's
+  own team highlighted (and surfaced with a `null` rank when on a team but not
+  yet scored);
+- a **recent activity feed** — team + task names with signed point deltas,
+  including task passes, **hint penalties**, and host manual adjustments;
+- a **freeze / final badge** — when the event is `frozen`/`completed`/`archived`
+  or has `scoring_frozen_at` set, the board shows "Scoring frozen" / "Final
+  results" and no new player scoring lands.
+
+**Ranking is deterministic.** The `event_leaderboard` view ranks by
+`total_points DESC` then `last_scored_at ASC`, so ties go to the team that
+reached the total first — the order never flickers between refreshes.
+
+**Hint penalties now affect the score.** Hint bodies are withheld until a player
+reveals them. Revealing calls
+`POST /api/events/{id}/tasks/{task_id}/hints/{hint_id}/reveal`, which returns the
+body and charges the penalty **once per team** (idempotent — re-revealing is
+free). The penalty is normalised to a non-positive delta, so an author can write
+`-10` (canonical) or `10` and it always subtracts. While the event is paused or
+frozen the body is still shown but **no penalty is charged** (no new scoring when
+play is closed).
+
+**What updates a team's score (all land in the `scoring_events` ledger):**
+
+| Source | `source_type` | Sign |
+|---|---|---|
+| Passing a task's validators | `validation` | `+points` (once per scope) |
+| Revealing a hint | `hint_penalty` | `−penalty` (once per team) |
+| Host manual adjustment | `manual_adjustment` | `±` (always lands) |
 
 ---
 
