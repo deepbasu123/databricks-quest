@@ -322,7 +322,9 @@ Player endpoints:
   `{ event, joinable, attempts_open, is_host, teams[], counts, you }`.
 - `POST /api/events/{event_id}/join` body `{ display_name?, team_id?, team_name? }`
   → `{ joined, participant_id, team_id, team_name }`. Idempotent; `409 NOT_JOINABLE`
-  unless the event is `ready`/`active`/`paused`.
+  unless the event is `ready`/`active`/`paused`. A participant is on **exactly one
+  team per event** — naming a different team reassigns (the prior membership is
+  removed), keeping scoring unambiguous.
 
 Host endpoints:
 
@@ -335,6 +337,12 @@ Host endpoints:
   `{ participants: [{ email|user_id, display_name?, team_name? }] }` →
   `{ rows, participants_created, teams_created, assignments }`. Idempotent; teams
   named in rows are created on demand.
+- `POST /api/host/events/{event_id}/teams/{team_id}/members` body
+  `{ user_id? | participant_id?, display_name? }` →
+  `{ assigned, team_id, participant_id }`. Assigns a participant to a team
+  (single team per event; reassigns if already on another). A `user_id` that
+  isn't registered yet is registered on demand. `404 TEAM_NOT_FOUND` /
+  `PARTICIPANT_NOT_FOUND`, `400 INVALID_ASSIGN` if neither id is given.
 - Lifecycle: `POST /api/host/events/{event_id}/{start|pause|freeze|complete|ready|archive}`
   → `{ event }`. Enforces the state machine; `409 INVALID_TRANSITION` on an
   illegal move.

@@ -134,3 +134,59 @@ def test_import_rejects_empty_rows(fake_db):
     repo = EventsRepository()
     with pytest.raises(EventStateError):
         repo.import_participants("evt_1", [{"display_name": "no id"}])
+
+
+# ── set_participant_team reassign (single team per event) ────────────────────
+
+
+class _ReassignCursor:
+    """Tracks team_members membership keyed by participant for reassign tests."""
+
+    def __init__(self, store):
+        self.s = store
+
+    def execute(self, sql, params=()):
+        up = " ".join(sql.split()).upper()
+        if up.startswith("DELETE FROM TEAM_MEMBERS"):
+            participant_id, _event_id, keep_team = params
+            self.s["members"] = {
+                (t, p) for (t, p) in self.s["members"]
+                if not (p == participant_id and t != keep_team)
+            }
+        elif up.startswith("INSERT INTO TEAM_MEMBERS"):
+            team_id, participant_id = params
+            self.s["members"].add((team_id, participant_id))
+        else:  # pragma: no cover
+            raise AssertionError(f"unexpected SQL: {up[:60]}")
+
+    def fetchone(self):
+        return None
+
+
+@pytest.fixture()
+def reassign_db(monkeypatch):
+    store = {"members": set()}
+    import db
+
+    @contextmanager
+    def fake_transaction():
+        yield _ReassignCursor(store)
+
+    monkeypatch.setattr(db, "transaction", fake_transaction)
+    return store
+
+
+def test_set_participant_team_moves_to_single_team(reassign_db):
+    repo = EventsRepository()
+    repo.set_participant_team("evt_1", "part_1", "team_red")
+    assert reassign_db["members"] == {("team_red", "part_1")}
+    # Reassign to a different team — old membership is removed, not duplicated.
+    repo.set_participant_team("evt_1", "part_1", "team_blue")
+    assert reassign_db["members"] == {("team_blue", "part_1")}
+
+
+def test_set_participant_team_is_idempotent(reassign_db):
+    repo = EventsRepository()
+    repo.set_participant_team("evt_1", "part_1", "team_red")
+    repo.set_participant_team("evt_1", "part_1", "team_red")
+    assert reassign_db["members"] == {("team_red", "part_1")}

@@ -602,7 +602,9 @@ async def join_event(
                     status_code=404,
                     detail={"error": {"code": "TEAM_NOT_FOUND", "message": "That team is not part of this event."}},
                 )
-            events_repo.assign_team(team["team_id"], participant["participant_id"])
+            events_repo.set_participant_team(
+                resolved_event_id, participant["participant_id"], team["team_id"]
+            )
     except EventStateError as exc:
         raise _event_state_error(exc)
 
@@ -686,6 +688,77 @@ async def host_create_team(
         payload={"name": team["name"]},
     )
     return {"team": team}
+
+
+class TeamAssignPayload(BaseModel):
+    user_id: Optional[str] = None
+    participant_id: Optional[str] = None
+    display_name: Optional[str] = None
+
+
+@app.post("/api/host/events/{event_id}/teams/{team_id}/members")
+async def host_assign_team_member(
+    event_id: str,
+    team_id: str,
+    body: TeamAssignPayload,
+    user: str = Depends(require_host),
+):
+    """Assign a participant to a team (single team per event; reassigns if moved).
+
+    Accepts an existing ``participant_id`` or a ``user_id`` (registered on demand
+    so a host can place someone who hasn't self-joined yet).
+    """
+    resolved_event_id = _resolve_event_or_404(event_id)
+    team = events_repo.get_team(team_id)
+    if not team or team.get("event_id") != resolved_event_id:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "TEAM_NOT_FOUND", "message": "That team is not part of this event."}},
+        )
+
+    try:
+        if body.participant_id:
+            participant = db.execute_query(
+                "SELECT * FROM participants WHERE participant_id = %s AND event_id = %s",
+                (body.participant_id, resolved_event_id),
+            )
+            participant = participant[0] if participant else None
+        elif body.user_id:
+            participant = events_repo.register_participant(
+                event_id=resolved_event_id,
+                user_id=body.user_id,
+                display_name=body.display_name,
+                email=body.user_id,
+            )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"code": "INVALID_ASSIGN", "message": "Provide a user_id or participant_id."}},
+            )
+        if not participant:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": {"code": "PARTICIPANT_NOT_FOUND", "message": "That participant is not in this event."}},
+            )
+        events_repo.set_participant_team(
+            resolved_event_id, participant["participant_id"], team_id
+        )
+    except EventStateError as exc:
+        raise _event_state_error(exc)
+
+    record_audit(
+        action="team.assign",
+        actor_user_id=user,
+        event_id=resolved_event_id,
+        target_type="team",
+        target_id=team_id,
+        payload={"participant_id": participant["participant_id"]},
+    )
+    return {
+        "assigned": True,
+        "team_id": team_id,
+        "participant_id": participant["participant_id"],
+    }
 
 
 @app.post("/api/host/events/{event_id}/participants/import")

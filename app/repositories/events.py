@@ -447,7 +447,7 @@ class EventsRepository:
         return self.get_participant(event_id, user_id)
 
     def assign_team(self, team_id: str, participant_id: str) -> None:
-        """Idempotently add a participant to a team."""
+        """Idempotently add a participant to a team (additive, no reassign)."""
         try:
             db.execute(
                 """
@@ -459,6 +459,38 @@ class EventsRepository:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("assign_team failed: %s", exc)
+            raise EventStateError("Could not assign participant to team.", "ASSIGN_FAILED", 503)
+
+    def set_participant_team(
+        self, event_id: str, participant_id: str, team_id: str
+    ) -> None:
+        """Place a participant on exactly one team within an event (reassign).
+
+        Enforces the single-team-per-event invariant that scoring relies on:
+        any prior membership on another team *in this event* is removed before
+        the target membership is added. Idempotent and atomic.
+        """
+        try:
+            with db.transaction() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM team_members
+                    WHERE participant_id = %s
+                      AND team_id IN (SELECT team_id FROM teams WHERE event_id = %s)
+                      AND team_id <> %s
+                    """,
+                    (participant_id, event_id, team_id),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO team_members (team_id, participant_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT (team_id, participant_id) DO NOTHING
+                    """,
+                    (team_id, participant_id),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("set_participant_team failed: %s", exc)
             raise EventStateError("Could not assign participant to team.", "ASSIGN_FAILED", 503)
 
     def import_participants(

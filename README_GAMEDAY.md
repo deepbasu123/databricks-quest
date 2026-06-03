@@ -209,6 +209,48 @@ curl -s "$APP_URL/api/host/quest-packs"
 
 ---
 
+## Run an event (works today — PR04)
+
+Once a pack is imported, a host can run an event entirely over the API. Players
+self-join; hosts can also place people on teams directly. Event status governs
+play: **only an `active` event accepts attempts** (others return
+`409 EVENT_NOT_ACTIVE`).
+
+```bash
+# 1. Create an event from an imported pack version (creator becomes owner-host)
+curl -sX POST "$APP_URL/api/host/events" -H 'Content-Type: application/json' \
+  --data '{"title":"ANZ GameDay","pack_version_id":"<packver_id>","slug":"anz-gameday"}'
+
+# 2. Create teams
+curl -sX POST "$APP_URL/api/host/events/anz-gameday/teams" \
+  -H 'Content-Type: application/json' --data '{"name":"red","display_name":"Red Team"}'
+
+# 3a. Bulk-import participants (teams created on demand, idempotent)
+curl -sX POST "$APP_URL/api/host/events/anz-gameday/participants/import" \
+  -H 'Content-Type: application/json' \
+  --data '{"participants":[{"email":"ada@corp.com","team_name":"red"}]}'
+
+# 3b. …or assign someone to a team directly (single team per event; reassigns)
+curl -sX POST "$APP_URL/api/host/events/anz-gameday/teams/<team_id>/members" \
+  -H 'Content-Type: application/json' --data '{"user_id":"ada@corp.com"}'
+
+# 4. Open play, then players join + submit
+curl -sX POST "$APP_URL/api/host/events/anz-gameday/start"
+curl -sX POST "$APP_URL/api/events/anz-gameday/join" \
+  -H 'Content-Type: application/json' --data '{"team_name":"red"}'
+
+# 5. Lifecycle: pause | freeze | complete (and ready | archive)
+curl -sX POST "$APP_URL/api/host/events/anz-gameday/freeze"
+```
+
+Lifecycle state machine: `draft → ready → active → paused/frozen → completed →
+archived`. `start` stamps `starts_at`, `complete` stamps `ends_at`, `freeze`
+stamps `scoring_frozen_at`. Players see joinable/active events at `GET /api/events`
+and the lobby at `GET /api/events/{id}`. Every mutation writes an
+`event_audit_log` row.
+
+---
+
 ## Federation operations (master host)
 
 Once children are deployed and an event exists, the host works from the master:
@@ -266,9 +308,11 @@ pytest tests/          # federation unit tests
 - Until PR04 adds event creation, seed an `events` row (and a sample
   `scoring_events` row) directly to exercise these.
 
-**Tier 3 — full end-to-end (needs PR03 + PR04):**
-- Child completes a quest → validated → scored → appears on the master
-  leaderboard → child sees its rank.
+**Tier 3 — full end-to-end (works now — PR03 + PR04):**
+- Host creates event + teams, players join, a player completes a quest →
+  validated → scored → appears on the master leaderboard → child sees its rank.
+- Standalone: same flow in one workspace (`--event-mode`). Verified via the
+  event-run API flow above; non-active statuses block attempts.
 
 ---
 
