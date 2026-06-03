@@ -199,6 +199,17 @@ Request:
 }
 ```
 
+### Team self-service (player)
+
+When the event is joinable and `QUEST_TEAM_SELF_SERVICE` is enabled, players can
+create and rename teams from the lobby without a host. The lobby payload exposes
+`team_self_service` so the UI can show/hide the controls.
+
+```http
+POST /api/events/{event_id}/teams          # body { name, display_name? } → creates and joins a team
+POST /api/events/{event_id}/team/rename    # body { display_name } → renames the caller's current team
+```
+
 ### Get team dashboard
 
 ```http
@@ -656,16 +667,10 @@ POST /api/host/events/{event_id}/freeze
 POST /api/host/events/{event_id}/complete
 ```
 
-### Dry-run event validators
-
-```http
-POST /api/host/events/{event_id}/dry-run
-```
-
 ### Manual score adjustment
 
 ```http
-POST /api/host/events/{event_id}/score-adjustments
+POST /api/host/events/{event_id}/adjustments
 ```
 
 Request:
@@ -677,6 +682,23 @@ Request:
   "points_delta": 50,
   "reason": "Bonus for best explanation during debrief."
 }
+```
+
+> Dry-run is not a standalone endpoint — the bootstrap/reset dry-run is
+> `POST /api/host/events/{event_id}/resources/plan` (see *Resource bootstrap &
+> reset* below).
+
+### Manage event hosts
+
+Host authority is the union of `QUEST_HOST_ALLOWLIST`, admins, and per-event
+`event_hosts` rows; in Event Mode the gate is fail-closed (deny when no authority
+is configured, unless `QUEST_HOST_OPEN=1`). These endpoints manage the per-event
+host list and are audited (`admin/host` privilege changes write `record_audit`).
+
+```http
+GET    /api/host/events/{event_id}/hosts            # → { hosts: [{ user_id, added_by, added_at }] }
+POST   /api/host/events/{event_id}/hosts            # body { email } → adds an event host
+DELETE /api/host/events/{event_id}/hosts/{email}    # removes (last-owner protected)
 ```
 
 ### Review validation attempts

@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ArrowLeft,
   CalendarClock,
@@ -296,6 +296,54 @@ function LobbyPanel({
   const [teamId, setTeamId] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const [newTeam, setNewTeam] = useState('')
+  const [renameTo, setRenameTo] = useState('')
+  const [selfBusy, setSelfBusy] = useState<'create' | 'rename' | null>(null)
+  const [selfErr, setSelfErr] = useState<string | null>(null)
+
+  const selfService = lobby.team_self_service !== false && lobby.joinable
+
+  const createTeam = async () => {
+    if (!newTeam.trim()) return
+    setSelfBusy('create')
+    setSelfErr(null)
+    try {
+      const res = await fetch(`/api/events/${eventRef}/teams`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newTeam.trim() }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data?.error?.message || `Could not create team (${res.status})`)
+      setNewTeam('')
+      onJoined()
+    } catch (e) {
+      setSelfErr(e instanceof Error ? e.message : 'Could not create team')
+    } finally {
+      setSelfBusy(null)
+    }
+  }
+
+  const renameTeam = async () => {
+    if (!renameTo.trim()) return
+    setSelfBusy('rename')
+    setSelfErr(null)
+    try {
+      const res = await fetch(`/api/events/${eventRef}/team/rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ display_name: renameTo.trim() }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data?.error?.message || `Could not rename team (${res.status})`)
+      setRenameTo('')
+      onJoined()
+    } catch (e) {
+      setSelfErr(e instanceof Error ? e.message : 'Could not rename team')
+    } finally {
+      setSelfBusy(null)
+    }
+  }
 
   const join = async () => {
     setBusy(true)
@@ -406,6 +454,53 @@ function LobbyPanel({
               </li>
             ))}
           </ul>
+        )}
+        {selfService && (
+          <div className="mt-4 space-y-3 border-t border-white/5 pt-4">
+            <div>
+              <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-slate-500">
+                Create a team
+              </label>
+              <div className="flex gap-2">
+                <input
+                  value={newTeam}
+                  onChange={(e) => setNewTeam(e.target.value)}
+                  placeholder="New team name"
+                  className="min-w-0 flex-1 rounded-xl border border-white/10 bg-[#0B0F18] px-3 py-2 text-sm text-slate-200 outline-none focus:border-[#FF5F1F]/40"
+                />
+                <button
+                  onClick={createTeam}
+                  disabled={selfBusy === 'create' || !newTeam.trim()}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-[#FF5F1F]/35 bg-[#FF5F1F]/15 px-3 py-2 text-sm font-medium text-white transition hover:bg-[#FF5F1F]/25 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Flag className="h-4 w-4" /> {selfBusy === 'create' ? 'Creating…' : 'Create & join'}
+                </button>
+              </div>
+            </div>
+            {lobby.you.team_id && (
+              <div>
+                <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-slate-500">
+                  Rename your team
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    value={renameTo}
+                    onChange={(e) => setRenameTo(e.target.value)}
+                    placeholder={lobby.you.team_name || 'New display name'}
+                    className="min-w-0 flex-1 rounded-xl border border-white/10 bg-[#0B0F18] px-3 py-2 text-sm text-slate-200 outline-none focus:border-[#FF5F1F]/40"
+                  />
+                  <button
+                    onClick={renameTeam}
+                    disabled={selfBusy === 'rename' || !renameTo.trim()}
+                    className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.05] px-3 py-2 text-sm font-medium text-slate-200 transition hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {selfBusy === 'rename' ? 'Saving…' : 'Rename'}
+                  </button>
+                </div>
+              </div>
+            )}
+            {selfErr && <p className="text-sm text-[#FB7185]">{selfErr}</p>}
+          </div>
         )}
         <div className="mt-4 grid grid-cols-2 gap-2 text-center text-xs text-slate-400">
           <Stat label="Quests" value={lobby.counts.quests} />
@@ -577,28 +672,92 @@ function TaskCard({
     ),
   )
   const [revealingHint, setRevealingHint] = useState<string | null>(null)
+  const [hintErrors, setHintErrors] = useState<Record<string, string>>({})
 
   const revealHint = useCallback(
     async (hintId: string) => {
       if (hintBodies[hintId]) return
       setRevealingHint(hintId)
+      setHintErrors((prev) => {
+        if (!prev[hintId]) return prev
+        const next = { ...prev }
+        delete next[hintId]
+        return next
+      })
       try {
         const res = await fetch(`/api/events/${eventRef}/tasks/${task.task_id}/hints/${hintId}/reveal`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
         })
-        const data = (await res.json()) as HintRevealResult
-        if (!res.ok) throw new Error('Could not reveal hint')
+        const data = (await res.json().catch(() => ({}))) as HintRevealResult & {
+          error?: { message?: string }
+        }
+        if (!res.ok) throw new Error(data?.error?.message || `Could not reveal hint (${res.status})`)
         setHintBodies((prev) => ({ ...prev, [hintId]: data.hint.body_md || '' }))
         // A newly-applied penalty changed the team score — refresh standings/score.
         if (data.newly_applied) onScored()
-      } catch {
-        /* surfaced inline below via missing body; keep the runner usable */
+      } catch (e) {
+        // Surface the failure inline so the player knows to retry rather than
+        // silently leaving the hint unrevealed.
+        setHintErrors((prev) => ({
+          ...prev,
+          [hintId]: e instanceof Error ? e.message : 'Could not reveal hint — try again.',
+        }))
       } finally {
         setRevealingHint(null)
       }
     },
     [eventRef, task.task_id, hintBodies, onScored],
+  )
+
+  const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(
+    () => () => {
+      if (pollTimer.current) clearTimeout(pollTimer.current)
+    },
+    [],
+  )
+
+  const pollAttempt = useCallback(
+    (attemptId: string) => {
+      const TERMINAL = new Set(['passed', 'failed', 'manual', 'error'])
+      let tries = 0
+      const tick = async () => {
+        tries += 1
+        try {
+          const res = await fetch(`/api/events/${eventRef}/attempts/${attemptId}`)
+          const data = await res.json().catch(() => ({}))
+          const status: string | undefined = data?.attempt?.status
+          if (res.ok && status) {
+            setResult((prev) =>
+              prev && prev.attempt_id === attemptId
+                ? {
+                    ...prev,
+                    status: status as AttemptResult['status'],
+                    results: Array.isArray(data.results)
+                      ? data.results.map((r: { status: string; public_message?: string | null }) => ({
+                          status: r.status,
+                          message: r.public_message || '',
+                        }))
+                      : prev.results,
+                  }
+                : prev,
+            )
+            if (TERMINAL.has(status)) {
+              if (status === 'passed') onScored()
+              return
+            }
+          }
+        } catch {
+          // Transient; keep polling until the cap.
+        }
+        if (tries < 20) {
+          pollTimer.current = setTimeout(tick, 2000)
+        }
+      }
+      pollTimer.current = setTimeout(tick, 2000)
+    },
+    [eventRef, onScored],
   )
 
   const submit = useCallback(async () => {
@@ -622,14 +781,22 @@ function TaskCard({
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data?.error?.message || `Submit failed (${res.status})`)
-      setResult(data as AttemptResult)
-      if (data.status === 'passed') onScored()
+      const attempt = data as AttemptResult
+      setResult(attempt)
+      if (attempt.status === 'passed') onScored()
+      // Forward-looking: synchronous validators return a terminal status here,
+      // but async/SDK validators may return queued/running. Poll the attempt
+      // until it resolves so the player sees the final outcome without a manual
+      // refresh.
+      else if ((attempt.status === 'queued' || attempt.status === 'running') && attempt.attempt_id) {
+        pollAttempt(attempt.attempt_id)
+      }
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Submit failed')
     } finally {
       setBusy(false)
     }
-  }, [eventRef, task.task_id, submission, onScored])
+  }, [eventRef, task.task_id, submission, onScored, pollAttempt])
 
   return (
     <QuestCard className={task.complete ? 'border border-emerald-500/20' : ''}>
@@ -700,6 +867,9 @@ function TaskCard({
                         )}
                         {!revealed && !!penalty && (
                           <p className="mt-1 text-[11px] text-amber-300/70">Costs {penalty} pts when revealed</p>
+                        )}
+                        {hintErrors[h.hint_id] && (
+                          <p className="mt-1 text-[11px] text-[#FB7185]">{hintErrors[h.hint_id]}</p>
                         )}
                       </div>
                     )

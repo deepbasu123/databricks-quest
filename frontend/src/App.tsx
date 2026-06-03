@@ -18,10 +18,11 @@ import AdminPanel from './components/AdminPanel'
 import BadgeVault from './components/BadgeVault'
 import Rewards from './components/Rewards'
 import Federation from './components/Federation'
+import HostConsole from './components/HostConsole'
 import EventPlay from './components/EventPlay'
 import { BrandLockup } from './components/brand/BrandLockup'
 import { levelInfo } from './lib/levels'
-import type { Page, UserProfile, Notification, FederationStatus } from './types'
+import type { Page, UserProfile, Notification, FederationStatus, HealthStatus } from './types'
 
 type NavPage = Page | 'badges' | 'rewards'
 
@@ -63,6 +64,7 @@ export default function App() {
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [showNotifs, setShowNotifs] = useState(false)
   const [federation, setFederation] = useState<FederationStatus | null>(null)
+  const [health, setHealth] = useState<HealthStatus | null>(null)
 
   const fetchProfile = useCallback(async () => {
     try {
@@ -94,11 +96,21 @@ export default function App() {
     }
   }, [])
 
+  const fetchHealth = useCallback(async () => {
+    try {
+      const res = await fetch('/api/health')
+      if (res.ok) setHealth(await res.json())
+    } catch {
+      // Health is best-effort; the badge simply hides if unavailable.
+    }
+  }, [])
+
   useEffect(() => {
     fetchProfile()
     fetchNotifications()
     fetchFederation()
-  }, [fetchProfile, fetchNotifications, fetchFederation])
+    fetchHealth()
+  }, [fetchProfile, fetchNotifications, fetchFederation, fetchHealth])
 
   // Admin page is gated server-side (QUEST_ADMIN_ALLOWLIST); hide the nav item
   // unless the profile says this user is an admin. Admin is the last base item,
@@ -203,6 +215,7 @@ export default function App() {
             <p className="mt-1 text-sm text-slate-400">{activeMeta.subtitle}</p>
           </div>
           <div className="flex items-center gap-3">
+            {health && <HealthBadge health={health} isAdmin={!!profile?.is_admin} />}
             <button className="rounded-xl border border-white/10 bg-white/[0.035] px-4 py-2 text-sm font-medium text-slate-200 hover:bg-white/[0.06]">
               This week
             </button>
@@ -248,13 +261,45 @@ export default function App() {
             {page === 'admin' && profile?.is_admin && <AdminPanel />}
             {page === 'federation' && federation &&
               (federation.role === 'master' ? (
-                <Federation status={federation} />
+                federation.event_id || federation.event_slug ? (
+                  // Master gets the full host console (lifecycle, teams,
+                  // attempts, announcements, adjustments, resources, report,
+                  // pack import) with the federation-only panels folded in.
+                  <HostConsole
+                    eventRef={(federation.event_id || federation.event_slug) as string}
+                    federation={federation}
+                  />
+                ) : (
+                  // No event resolved yet — Federation renders the guidance
+                  // empty state (set QUEST_EVENT_SLUG via deploy --event).
+                  <Federation status={federation} />
+                )
               ) : (
                 <EventPlay federation={federation} />
               ))}
           </div>
         </main>
       </div>
+    </div>
+  )
+}
+
+function HealthBadge({ health, isAdmin }: { health: HealthStatus; isAdmin: boolean }) {
+  const ok = health.status === 'ok' && health.db_connected
+  const roleLabel =
+    health.role === 'master' ? 'Master' : health.role === 'child' ? 'Child' : 'Standalone'
+  return (
+    <div
+      className="hidden items-center gap-2 rounded-xl border border-white/10 bg-white/[0.035] px-3 py-2 text-xs sm:flex"
+      title={`Backend ${health.status} · DB ${health.db_connected ? 'connected' : 'unreachable'} · role ${health.role} · event mode ${health.event_mode ? 'on' : 'off'}`}
+    >
+      <span className={`h-2 w-2 rounded-full ${ok ? 'bg-emerald-400' : 'bg-[#FB7185]'}`} />
+      {health.event_mode ? (
+        <span className="font-medium text-slate-200">{roleLabel}</span>
+      ) : (
+        <span className="font-medium text-slate-200">Adoption</span>
+      )}
+      {isAdmin && <span className="rounded bg-[#FF5F1F]/15 px-1.5 py-0.5 font-semibold text-[#FF8A3D]">Admin</span>}
     </div>
   )
 }

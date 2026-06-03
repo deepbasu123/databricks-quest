@@ -99,6 +99,15 @@ export type Page = 'dashboard' | 'missions' | 'leaderboard' | 'admin' | 'federat
 
 export type QuestRole = 'standalone' | 'master' | 'child'
 
+export interface HealthStatus {
+  status: 'ok' | 'degraded'
+  db_connected: boolean
+  event_mode: boolean
+  role: QuestRole
+  validator_types: string[]
+  timestamp: string
+}
+
 export interface FederationStatus {
   event_mode?: boolean
   role: QuestRole
@@ -187,6 +196,7 @@ export interface EventLobby {
   joinable: boolean
   attempts_open: boolean
   is_host: boolean
+  team_self_service?: boolean
   teams: LobbyTeam[]
   counts: { participants: number; teams: number; quests: number; tasks: number }
   you: {
@@ -513,11 +523,22 @@ export interface ReportChampion {
   total_points: number
 }
 
+export interface ReportRosterRow {
+  user_id: string
+  display_name: string
+  role: string
+  team_id: string | null
+  team_name: string
+  tasks_passed: number
+  attempts_total: number
+}
+
 export interface EventReport {
   summary: ReportSummary
   leaderboard: ReportLeaderboardRow[]
   teams: { team_id: string; team_name: string; members: number }[]
   completion_matrix: ReportCompletionRow[]
+  roster?: ReportRosterRow[]
   task_catalog: { task_id: string; task_title: string; quest_title: string; points: number }[]
   validation_failures: { task_id: string; task_title: string | null; status: string; attempts: number }[]
   hint_usage: ReportHint[]

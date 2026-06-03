@@ -183,7 +183,7 @@ function MasterConsole({ status }: { status: FederationStatus }) {
   )
 }
 
-function RosterImport({ eventId }: { eventId: string }) {
+export function RosterImport({ eventId }: { eventId: string }) {
   const [csv, setCsv] = useState('')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<string | null>(null)
@@ -252,7 +252,7 @@ function RosterImport({ eventId }: { eventId: string }) {
   )
 }
 
-function WorkspacesHealth({ eventId }: { eventId: string }) {
+export function WorkspacesHealth({ eventId }: { eventId: string }) {
   const { data, loading, loaded, error, reload } = useApi<{ workspaces: EventWorkspace[] }>(
     `/api/host/events/${eventId}/workspaces`,
   )
@@ -328,7 +328,7 @@ function WorkspacesHealth({ eventId }: { eventId: string }) {
   )
 }
 
-function UnmappedIdentities({ eventId }: { eventId: string }) {
+export function UnmappedIdentities({ eventId }: { eventId: string }) {
   const { data, loading, loaded, error, reload } = useApi<{ unmapped: UnmappedIdentity[] }>(
     `/api/host/events/${eventId}/identities/unmapped`,
   )

@@ -47,6 +47,46 @@ LAKEBASE_PASSWORD = (
 _CONN_TTL_SECONDS = 2700  # 45 minutes
 _conn_cache: Dict[str, Any] = {"conn": None, "expiry": 0}
 
+# Bounded connection pool for the federation writer-credential path only.
+# ADR_006 flags that many `child` apps each fanning connections into the MASTER
+# workspace's shared Lakebase can exhaust connections; a small per-process pool
+# caps and reuses them. The workspace-identity path (standalone/master/adoption)
+# keeps using the single cached connection below and never touches this pool.
+_POOL_MIN = int(os.getenv("LAKEBASE_POOL_MIN", "1"))
+_POOL_MAX = int(os.getenv("LAKEBASE_POOL_MAX", "8"))
+_pool: Any = None
+
+
+def _writer_credential_path() -> bool:
+    """True when an explicit writer credential is configured (federation child)."""
+    return bool(LAKEBASE_USER and LAKEBASE_PASSWORD)
+
+
+def _get_pool():
+    """Lazily build the bounded ThreadedConnectionPool for the writer path."""
+    global _pool
+    if _pool is None:
+        if not LAKEBASE_HOST:
+            raise RuntimeError("LAKEBASE_HOST not configured")
+        from psycopg2.pool import ThreadedConnectionPool
+
+        _pool = ThreadedConnectionPool(
+            _POOL_MIN,
+            _POOL_MAX,
+            host=LAKEBASE_HOST,
+            port=LAKEBASE_PORT,
+            dbname=LAKEBASE_DB,
+            user=LAKEBASE_USER,
+            password=LAKEBASE_PASSWORD,
+            sslmode="require",
+            connect_timeout=10,
+        )
+        logger.info(
+            "Lakebase writer-credential pool created as %s (min=%d max=%d)",
+            LAKEBASE_USER, _POOL_MIN, _POOL_MAX,
+        )
+    return _pool
+
 
 def get_workspace_client():
     """Return a Databricks SDK WorkspaceClient.
@@ -164,51 +204,94 @@ def get_lakebase_connection():
     return get_connection()
 
 
+@contextmanager
+def _lease(autocommit: bool):
+    """Lease a connection for one unit of work, releasing it afterwards.
+
+    Two paths, chosen by deployment shape:
+
+    - Writer-credential (federation ``child`` → master): borrow from the bounded
+      pool and return it afterwards (closing it if the work raised, so a poisoned
+      session is never reused). This caps the connection fan-out into the shared
+      master Lakebase per ADR_006.
+    - Workspace-identity (standalone / master / adoption): reuse the single
+      cached, revalidated connection exactly as before — unchanged behaviour.
+
+    Commits/rolls back automatically when ``autocommit`` is False.
+    """
+    if _writer_credential_path():
+        pool = _get_pool()
+        conn = pool.getconn()
+        broken = False
+        try:
+            conn.autocommit = autocommit
+            yield conn
+            if not autocommit:
+                conn.commit()
+        except Exception:
+            broken = True
+            if not autocommit:
+                try:
+                    conn.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+            raise
+        finally:
+            try:
+                pool.putconn(conn, close=broken)
+            except Exception:  # noqa: BLE001
+                pass
+    else:
+        conn = get_connection()
+        prev = conn.autocommit
+        conn.autocommit = autocommit
+        try:
+            yield conn
+            if not autocommit:
+                conn.commit()
+        except Exception:
+            if not autocommit:
+                conn.rollback()
+            raise
+        finally:
+            conn.autocommit = prev
+
+
 def execute_query(query: str, params: Tuple = ()) -> List[Dict[str, Any]]:
     """Run a read query and return a list of JSON-serializable dict rows."""
     import psycopg2.extras
 
-    conn = get_connection()
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(query, params)
-        if cur.description:
-            rows = cur.fetchall()
-            return [{k: serialize(v) for k, v in dict(row).items()} for row in rows]
-        return []
+    with _lease(autocommit=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(query, params)
+            if cur.description:
+                rows = cur.fetchall()
+                return [{k: serialize(v) for k, v in dict(row).items()} for row in rows]
+            return []
 
 
 def execute(query: str, params: Tuple = ()) -> int:
     """Run a write statement and return the affected row count.
 
-    Uses the cached (autocommit) connection. Mutation callers that need
-    multi-statement atomicity should manage their own transaction.
+    Mutation callers that need multi-statement atomicity should use
+    :func:`transaction` instead.
     """
-    conn = get_connection()
-    with conn.cursor() as cur:
-        cur.execute(query, params)
-        return cur.rowcount
+    with _lease(autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            return cur.rowcount
 
 
 @contextmanager
 def transaction():
-    """Yield a cursor inside an atomic transaction on the shared connection.
+    """Yield a cursor inside an atomic transaction.
 
-    Commits on success, rolls back on any exception, and restores the
-    connection's prior autocommit setting. Use for multi-statement writes that
-    must be all-or-nothing (e.g. importing a quest pack).
+    Commits on success, rolls back on any exception. Use for multi-statement
+    writes that must be all-or-nothing (e.g. importing a quest pack).
     """
-    conn = get_connection()
-    prev = conn.autocommit
-    conn.autocommit = False
-    try:
+    with _lease(autocommit=False) as conn:
         with conn.cursor() as cur:
             yield cur
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.autocommit = prev
 
 
 def healthcheck() -> bool:

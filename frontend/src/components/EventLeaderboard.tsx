@@ -121,8 +121,12 @@ function ActivityFeed({ recent }: { recent: RecentScore[] }) {
 }
 
 export default function EventLeaderboard({ eventRef }: { eventRef: string }) {
+  // Live standings: poll every 10s (paused when the tab is hidden) on top of
+  // the manual Refresh button.
   const { data, loading, loaded, error, reload } = useApi<EventLeaderboardData>(
     `/api/events/${eventRef}/leaderboard`,
+    null,
+    { pollMs: 10000 },
   )
 
   if (loading && !loaded) {

@@ -1,5 +1,7 @@
 # Quest Pack Schema
 
+> **Start with [`docs/AUTHORING_QUEST_PACKS.md`](../docs/AUTHORING_QUEST_PACKS.md)** — the single guided scaffold→author→lint→import→version walkthrough. This file is the field-by-field schema appendix.
+
 This is the proposed YAML structure for configurable Databricks Quest GameDay content.
 
 ```yaml

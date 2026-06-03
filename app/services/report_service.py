@@ -36,9 +36,11 @@ def build_report(
     first_solves: List[Dict[str, Any]],
     status_counts: Dict[str, int],
     counts: Optional[Dict[str, int]] = None,
+    participants: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Assemble the structured event report from raw rows."""
     counts = counts or {}
+    participants = participants or []
     team_name = {t["team_id"]: (t.get("display_name") or t.get("name") or t["team_id"]) for t in teams}
 
     # ── Summary ──────────────────────────────────────────────────────────────
@@ -135,6 +137,20 @@ def build_report(
         first_blood_count[fs["team_id"]] = first_blood_count.get(fs["team_id"], 0) + 1
     fastest_team_id = max(first_blood_count, key=first_blood_count.get) if first_blood_count else None
 
+    # ── Participant roster (team, role, personally-submitted task stats) ──────
+    roster = [
+        {
+            "user_id": p.get("user_id"),
+            "display_name": p.get("display_name") or p.get("user_id"),
+            "role": p.get("role") or "player",
+            "team_id": p.get("team_id"),
+            "team_name": p.get("team_name") or team_name.get(p.get("team_id")) or "—",
+            "tasks_passed": int(p.get("tasks_passed") or 0),
+            "attempts_total": int(p.get("attempts_total") or 0),
+        }
+        for p in participants
+    ]
+
     # ── Recommended follow-ups (heuristics for account/enablement motion) ────
     follow_ups: List[str] = []
     concerns = False
@@ -190,6 +206,7 @@ def build_report(
             for t in teams
         ],
         "completion_matrix": matrix_rows,
+        "roster": roster,
         "task_catalog": [
             {
                 "task_id": tc["task_id"],
@@ -269,6 +286,22 @@ def render_csv(report: Dict[str, Any]) -> str:
         ]
         line += ["1" if t["task_id"] in done else "0" for t in tasks]
         writer.writerow(line)
+
+    # Participant roster as a clearly-delimited second block.
+    roster = report.get("roster") or []
+    if roster:
+        writer.writerow([])
+        writer.writerow(["Participant roster"])
+        writer.writerow(["user", "display_name", "role", "team", "tasks_passed", "attempts"])
+        for r in roster:
+            writer.writerow([
+                _csv_safe(r.get("user_id")),
+                _csv_safe(r.get("display_name")),
+                _csv_safe(r.get("role")),
+                _csv_safe(r.get("team_name")),
+                _csv_safe(r.get("tasks_passed")),
+                _csv_safe(r.get("attempts_total")),
+            ])
     return out.getvalue()
 
 
@@ -325,6 +358,19 @@ def render_markdown(report: Dict[str, Any]) -> str:
         lines.append("|---|---|---:|")
         for h in report["hint_usage"]:
             lines.append(f"| {h['team_name']} | {h.get('task_title') or '—'} | {h['penalty']} |")
+        lines.append("")
+
+    roster = report.get("roster") or []
+    if roster:
+        lines.append(f"## Participant roster ({len(roster)})")
+        lines.append("")
+        lines.append("| Participant | Role | Team | Tasks passed | Attempts |")
+        lines.append("|---|---|---|---:|---:|")
+        for r in roster:
+            lines.append(
+                f"| {r['display_name']} | {r['role']} | {r['team_name']} | "
+                f"{r['tasks_passed']} | {r['attempts_total']} |"
+            )
         lines.append("")
 
     lines.append("## Recommended follow-ups")
