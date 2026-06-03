@@ -23,12 +23,16 @@ import config
 from repositories import (
     QuestPacksRepository,
     EventsRepository,
+    AttemptsRepository,
     LeaderboardRepository,
     FederationRepository,
     RosterImportError,
 )
 from services import quest_pack_loader
 from services import federation as fed
+from services import record_audit
+from services.validation_engine import default_engine, aggregate_status
+from services.scoring_service import default_scoring_service
 from services.quest_pack_loader import QuestPackImportError
 
 logging.basicConfig(level=logging.INFO)
@@ -183,6 +187,7 @@ def require_master_host(request: Request) -> str:
 
 quest_packs_repo = QuestPacksRepository()
 events_repo = EventsRepository()
+attempts_repo = AttemptsRepository()
 leaderboard_repo = LeaderboardRepository()
 federation_repo = FederationRepository()
 
@@ -565,6 +570,223 @@ async def host_unmapped_identities(event_id: str, user: str = Depends(require_ma
     """Federated scoring rows not yet attributable to a team, for reconciliation."""
     resolved = _resolve_event_or_404(event_id)
     return {"unmapped": federation_repo.list_unmapped_identities(resolved)}
+
+
+# ---------------------------------------------------------------------------
+# Player gameplay — attempt submission + validation (PR03)
+# ---------------------------------------------------------------------------
+# One submission path serves every role. Standalone/master resolve the team via
+# team membership; a federation child resolves it via the identity map (and
+# leaves team_id NULL, stamping workspace_id so the master attributes it later).
+# Validators run through services.validation_engine; a passing task awards base
+# points exactly once via services.scoring_service.
+
+
+class AttemptSubmissionPayload(BaseModel):
+    submission: Optional[Dict[str, Any]] = None
+
+
+def _build_validator_variables(
+    event_id: str, team_row: Optional[Dict[str, Any]], team_id: Optional[str]
+) -> Dict[str, Any]:
+    """Server-resolved template variables. Players never supply these.
+
+    Only these names may appear in a validator's ``${...}`` slots; the safety
+    layer rejects any other slot, so a player can't redirect a check at another
+    team's resources.
+    """
+    variables: Dict[str, Any] = {"event_id": event_id}
+    if team_id:
+        variables["team_id"] = team_id
+    if team_row:
+        if team_row.get("team_catalog"):
+            variables["team_catalog"] = team_row["team_catalog"]
+        if team_row.get("team_schema"):
+            variables["team_schema"] = team_row["team_schema"]
+    return variables
+
+
+def _resolve_attempt_identity(event_id: str, user: str) -> Dict[str, Any]:
+    """Resolve (team_id, team_row, workspace_id) for the submitting user."""
+    if config.is_child():
+        workspace_id = config.QUEST_WORKSPACE_ID or None
+        team_id = None
+        team_row = None
+        if workspace_id:
+            identity = federation_repo.resolve_identity(event_id, workspace_id, user)
+            team_id = identity.get("team_id") if identity else None
+            if team_id:
+                team_row = events_repo.get_team(team_id)
+        return {"team_id": team_id, "team_row": team_row, "workspace_id": workspace_id}
+
+    team_row = events_repo.get_team_for_user(event_id, user)
+    return {
+        "team_id": team_row["team_id"] if team_row else None,
+        "team_row": team_row,
+        "workspace_id": None,
+    }
+
+
+def _attempt_message(status: str, points: int, already_awarded: bool) -> str:
+    """Player-safe summary message for an attempt's terminal status."""
+    if status == "passed":
+        if already_awarded:
+            return "Already completed — your team keeps its points."
+        if points > 0:
+            return f"Task complete! +{points} points."
+        return "Task complete!"
+    if status == "failed":
+        return "Not passed yet. Review the success criteria and try again."
+    if status == "manual":
+        return "Submitted for host review. A facilitator will confirm this task."
+    if status == "error":
+        return "We couldn't verify this task right now. Please try again shortly."
+    return "Submitted."
+
+
+@app.post("/api/events/{event_id}/tasks/{task_id}/attempts")
+async def submit_attempt(
+    event_id: str,
+    task_id: str,
+    body: AttemptSubmissionPayload,
+    request: Request,
+):
+    """Submit an attempt for a task: validate, persist, and score on pass.
+
+    Accepts an ``event_id`` or slug. Returns a player-safe result; raw validator
+    diagnostics are persisted to ``validation_results.private_message`` for the
+    host, never returned to the player.
+    """
+    user = get_user_email(request)
+    resolved_event_id = _resolve_event_or_404(event_id)
+
+    task = quest_packs_repo.get_task(task_id)
+    if not task:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "NOT_FOUND", "message": "Task not found."}},
+        )
+
+    identity = _resolve_attempt_identity(resolved_event_id, user)
+    team_id = identity["team_id"]
+    workspace_id = identity["workspace_id"]
+    variables = _build_validator_variables(resolved_event_id, identity["team_row"], team_id)
+
+    try:
+        attempt_id = attempts_repo.create_attempt(
+            event_id=resolved_event_id,
+            task_id=task_id,
+            submitted_by=user,
+            submission=body.submission,
+            team_id=team_id,
+            workspace_id=workspace_id,
+            status="running",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("create_attempt failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "ATTEMPT_FAILED", "message": "Could not record your attempt. Try again shortly."}},
+        )
+
+    submission = body.submission or {}
+    validators = quest_packs_repo.list_validators(task_id)
+
+    outcomes = []
+    public_results = []
+    for v in validators:
+        outcome = default_engine.run_validator(v, submission, variables)
+        outcomes.append(outcome)
+        try:
+            attempts_repo.record_validation_result(
+                attempt_id=attempt_id,
+                validator_id=v["validator_id"],
+                status=outcome.status,
+                score_delta=outcome.score_delta,
+                public_message=outcome.public_message,
+                private_message=outcome.private_message,
+                evidence=outcome.evidence,
+                workspace_id=workspace_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - persistence best-effort per result
+            logger.warning("record_validation_result failed: %s", exc)
+        public_results.append({"status": outcome.status, "message": outcome.public_message})
+
+    status = aggregate_status(outcomes) if validators else "error"
+
+    points_awarded = 0
+    already_awarded = False
+    if status == "passed":
+        task_points = int(task.get("points") or 0)
+        award = default_scoring_service.award_task_base_points(
+            event_id=resolved_event_id,
+            task_id=task_id,
+            points=task_points,
+            attempt_id=attempt_id,
+            quest_id=task.get("quest_id"),
+            team_id=team_id,
+            user_id=user,
+            workspace_id=workspace_id,
+            created_by=user,
+        )
+        points_awarded = award["points"]
+        already_awarded = bool(
+            (not award["awarded"]) and task_points > 0 and (team_id or workspace_id)
+        )
+
+    error_sentinel = "validation_error" if status == "error" else None
+    try:
+        attempts_repo.set_status(attempt_id, status, error_sentinel)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("set_status failed: %s", exc)
+
+    record_audit(
+        action="attempt.submit",
+        actor_user_id=user,
+        event_id=resolved_event_id,
+        target_type="task",
+        target_id=task_id,
+        payload={
+            "attempt_id": attempt_id,
+            "status": status,
+            "points_awarded": points_awarded,
+            "validators": len(validators),
+            "workspace_id": workspace_id,
+        },
+    )
+
+    return {
+        "attempt_id": attempt_id,
+        "status": status,
+        "message": _attempt_message(status, points_awarded, already_awarded),
+        "points_awarded": points_awarded,
+        "already_awarded": already_awarded,
+        "results": public_results,
+        "team_id": team_id,
+    }
+
+
+@app.get("/api/events/{event_id}/attempts/{attempt_id}")
+async def get_attempt_status(event_id: str, attempt_id: str, request: Request):
+    """Return an attempt's status + player-safe per-validator results."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    attempt = attempts_repo.get_attempt(attempt_id)
+    if not attempt or attempt.get("event_id") != resolved_event_id:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "NOT_FOUND", "message": "Attempt not found."}},
+        )
+    return {
+        "attempt": {
+            "attempt_id": attempt.get("attempt_id"),
+            "task_id": attempt.get("task_id"),
+            "team_id": attempt.get("team_id"),
+            "status": attempt.get("status"),
+            "submitted_at": attempt.get("submitted_at"),
+            "completed_at": attempt.get("completed_at"),
+        },
+        "results": attempts_repo.list_validation_results(attempt_id),
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -81,6 +81,42 @@ class EventsRepository:
             logger.warning("list_teams failed: %s", exc)
             return []
 
+    def get_team(self, team_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            rows = db.execute_query(
+                "SELECT * FROM teams WHERE team_id = %s", (team_id,)
+            )
+            return rows[0] if rows else None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("get_team failed: %s", exc)
+            return None
+
+    def get_team_for_user(
+        self, event_id: str, user_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve the team a user belongs to in an event (standalone path).
+
+        Returns the full team row (including ``team_catalog``/``team_schema`` used
+        as validator template variables), or None if the user is not on a team.
+        """
+        try:
+            rows = db.execute_query(
+                """
+                SELECT t.*
+                FROM teams t
+                JOIN team_members tm ON tm.team_id = t.team_id
+                JOIN participants p ON p.participant_id = tm.participant_id
+                WHERE p.event_id = %s AND p.user_id = %s
+                ORDER BY tm.joined_at ASC
+                LIMIT 1
+                """,
+                (event_id, user_id),
+            )
+            return rows[0] if rows else None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("get_team_for_user failed: %s", exc)
+            return None
+
     def get_participant(self, event_id: str, user_id: str) -> Optional[Dict[str, Any]]:
         try:
             rows = db.execute_query(

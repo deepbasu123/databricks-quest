@@ -152,19 +152,35 @@ Request:
 }
 ```
 
-Response for sync validation:
+Response for sync validation (implemented in PR03):
 
 ```json
 {
   "attempt_id": "att_123",
   "status": "passed",
-  "message": "Validated customer_gold table with 10,000 valid rows.",
+  "message": "Task complete! +200 points.",
   "points_awarded": 200,
-  "team_score": 1250
+  "already_awarded": false,
+  "results": [
+    { "status": "passed", "message": "Validated successfully." }
+  ],
+  "team_id": "team_red"
 }
 ```
 
-Response for async validation:
+`status` is one of `passed | failed | manual | error` (the MVP runs SQL
+synchronously). `results` carries one **player-safe** message per validator; raw
+validator diagnostics are persisted to `validation_results.private_message` for
+the host and never returned here. A repeat passing submission returns
+`status: "passed"` with `already_awarded: true` and `points_awarded: 0` — base
+points are awarded once per scope (team in standalone/master, workspace in a
+federation child), enforced by the `scoring_events.idempotency_key` UNIQUE
+constraint. `manual` validators return `status: "manual"` (pending host review,
+no points). Identity/team resolution: standalone/master resolve the team via
+team membership; a federation child resolves it via the identity map and stamps
+`workspace_id` so the master attributes the score after roster import.
+
+Response for async validation (future — async validator execution):
 
 ```json
 {
@@ -179,6 +195,28 @@ Response for async validation:
 ```http
 GET /api/events/{event_id}/attempts/{attempt_id}
 ```
+
+Response (implemented in PR03):
+
+```json
+{
+  "attempt": {
+    "attempt_id": "att_123",
+    "task_id": "tsk_1",
+    "team_id": "team_red",
+    "status": "passed",
+    "submitted_at": "2026-06-03T05:00:00",
+    "completed_at": "2026-06-03T05:00:01"
+  },
+  "results": [
+    { "validation_result_id": "vres_1", "validator_id": "val_1",
+      "status": "passed", "score_delta": 0,
+      "public_message": "Validated successfully." }
+  ]
+}
+```
+
+Results expose only player-safe fields (no `private_message`).
 
 ### Request hint
 

@@ -11,3 +11,5 @@ env:
     value: "ep-autumn-star-d2jzw5xc.database.us-east-1.cloud.databricks.com"
   - name: LAKEBASE_DB
     value: "quest_db"
+  - name: QUEST_SQL_WAREHOUSE_ID
+    value: "03aad21c886e3333"

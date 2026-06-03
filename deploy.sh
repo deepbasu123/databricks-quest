@@ -152,6 +152,9 @@ write_app_yaml() {
     echo "    value: \"$lb_host\""
     echo "  - name: LAKEBASE_DB"
     echo "    value: \"$lb_db\""
+    # SQL warehouse the sql_assertion validators execute against (PR03). Emitted
+    # for every role when known so deterministic SQL checks have a target.
+    [ -n "$WAREHOUSE_ID" ] && { echo "  - name: QUEST_SQL_WAREHOUSE_ID"; echo "    value: \"$WAREHOUSE_ID\""; }
     if [ -n "$QUEST_ROLE" ] && [ "$QUEST_ROLE" != "standalone" ]; then
       echo "  - name: QUEST_ROLE"
       echo "    value: \"$QUEST_ROLE\""

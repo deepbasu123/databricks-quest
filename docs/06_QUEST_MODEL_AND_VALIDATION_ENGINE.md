@@ -385,6 +385,34 @@ Then add:
 6. Python code validator
 7. REST/API validator
 
+### Implemented in PR03
+
+The first-class validation engine ships with **`sql_assertion`** and **`manual`**:
+
+- Code lives in `app/validators/` (`base.py`, `safety.py`, `sql_assertion.py`,
+  `manual.py`); dispatch + aggregation in `app/services/validation_engine.py`;
+  the idempotent award in `app/services/scoring_service.py`
+  (+ `app/repositories/scoring.py`).
+- Submission endpoint: `POST /api/events/{event_id}/tasks/{task_id}/attempts`
+  (see `docs/08`). It runs every enabled validator, persists one
+  `validation_results` row each, transitions the `task_attempts` row, and — on a
+  passing aggregate — writes a single `scoring_events` row.
+- **Safety (read-only SQL):** `sql_assertion` allows exactly one `SELECT`/`WITH`
+  statement; destructive/DDL/DML verbs and stacked statements are rejected.
+  `${...}` template slots resolve **only** from server-provided variables
+  (`team_catalog`, `team_schema`, `team_id`, `event_id`) — a player cannot
+  introduce a slot or inject SQL through one. Evidence is row/char truncated.
+- **Player-safe errors:** validators never raise to the player; a bad
+  config/timeout/exec failure becomes an `error` outcome with a safe
+  `public_message`, while the detailed `private_message` is kept host-side.
+- **Idempotency:** base points are awarded once per scope — team in
+  standalone/master, workspace in a federation child — enforced by the
+  `scoring_events.idempotency_key` UNIQUE constraint.
+
+`databricks_sdk`, `system_table`, `notebook`, `python_code`, and `rest_api`
+remain accepted by the authoring schema and are dispatched as `skipped` (with a
+host breadcrumb) until their executors land in later PRs.
+
 ## Authoring standard
 
 Every quest task must include:
