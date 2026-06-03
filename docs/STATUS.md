@@ -16,8 +16,8 @@ Legend: ✅ landed · 🟡 in progress · ⏳ planned (not started) · ⛔ block
 
 | Mode | Status | Notes |
 |---|---|---|
-| **Adoption Mode** | ✅ live | System-table scoring, missions, leaderboard, badges, admin. Unchanged. |
-| **Event Mode (GameDay)** | 🟡 in progress | Schema, quest packs, validation/scoring write path (PR03), and multi-workspace federation plumbing landed; events/teams APIs (PR04) still needed for end-to-end play. |
+| **Adoption Mode** | ✅ live | System-table scoring, missions, leaderboard, badges, admin. Unchanged. **The default** — Event Mode must be explicitly enabled. |
+| **Event Mode (GameDay)** | 🟡 in progress (opt-in) | Off by default; enable with `--event-mode` / `QUEST_EVENT_MODE=on` (implied by `master`/`child` roles). When off, GameDay APIs 404, Event UI is hidden, and GameDay migrations are skipped. Schema, quest packs, validation/scoring write path (PR03), and federation plumbing landed; events/teams APIs (PR04) still needed for full end-to-end play. |
 
 ---
 

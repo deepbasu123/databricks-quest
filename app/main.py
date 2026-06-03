@@ -157,8 +157,37 @@ QUEST_HOST_ALLOWLIST = [
 ]
 
 
+def _ensure_event_mode() -> None:
+    """Gate GameDay/Event Mode surfaces. 404 when Event Mode is not enabled.
+
+    Event Mode is opt-in (``QUEST_EVENT_MODE`` / ``--event-mode``; implied by the
+    master/child roles). When off, the deployment is the legacy adoption app and
+    every GameDay endpoint behaves as if it does not exist.
+    """
+    if not config.event_mode_enabled():
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": {
+                    "code": "EVENT_MODE_DISABLED",
+                    "message": "Event Mode is not enabled on this deployment.",
+                }
+            },
+        )
+
+
+def require_event_mode() -> None:
+    """FastAPI dependency form of :func:`_ensure_event_mode`."""
+    _ensure_event_mode()
+
+
 def require_host(request: Request) -> str:
-    """FastAPI dependency: resolve the user and enforce the host allowlist."""
+    """FastAPI dependency: resolve the user and enforce the host allowlist.
+
+    Also gates on Event Mode — every ``/api/host/*`` surface is GameDay-only, so
+    a legacy (Event-Mode-off) deployment 404s here.
+    """
+    _ensure_event_mode()
     user = get_user_email(request)
     if QUEST_HOST_ALLOWLIST and user.lower() not in QUEST_HOST_ALLOWLIST:
         raise HTTPException(
@@ -195,6 +224,8 @@ federation_repo = FederationRepository()
 @app.on_event("startup")
 async def _federation_startup() -> None:
     """Child role: record this workspace's presence in the shared DB once."""
+    if not config.event_mode_enabled():
+        return
     try:
         fed.startup_checkin()
     except Exception as exc:  # noqa: BLE001 - never block startup
@@ -222,6 +253,7 @@ async def health():
         "db_connected": db_ok,
         "migrations_applied": migrations,
         "migrations_count": len(migrations),
+        "event_mode": config.event_mode_enabled(),
         "role": config.QUEST_ROLE,
         "federation": config.summary(),
         "timestamp": datetime.utcnow().isoformat(),
@@ -465,7 +497,7 @@ def _resolve_event_or_404(event_id_or_slug: str) -> str:
 
 
 @app.get("/api/federation/status")
-async def federation_status(request: Request):
+async def federation_status(request: Request, _: None = Depends(require_event_mode)):
     """Role + this workspace's own team mapping (child 'your rank' context).
 
     Includes a DB-connection health flag the child UI uses for its indicator.
@@ -473,6 +505,7 @@ async def federation_status(request: Request):
     user = get_user_email(request)
     status = fed.child_status(submitted_by=user)
     status["submitted_by"] = user
+    status["event_mode"] = config.event_mode_enabled()
     try:
         status["db_connected"] = db.healthcheck()
     except Exception:  # noqa: BLE001
@@ -481,7 +514,11 @@ async def federation_status(request: Request):
 
 
 @app.get("/api/federation/leaderboard")
-async def federation_leaderboard(request: Request, event: Optional[str] = None):
+async def federation_leaderboard(
+    request: Request,
+    event: Optional[str] = None,
+    _: None = Depends(require_event_mode),
+):
     """Event-wide leaderboard from the shared view + this workspace's own team.
 
     Resolves the event from the query param, else the configured event slug.
@@ -650,6 +687,7 @@ async def submit_attempt(
     task_id: str,
     body: AttemptSubmissionPayload,
     request: Request,
+    _: None = Depends(require_event_mode),
 ):
     """Submit an attempt for a task: validate, persist, and score on pass.
 
@@ -767,7 +805,12 @@ async def submit_attempt(
 
 
 @app.get("/api/events/{event_id}/attempts/{attempt_id}")
-async def get_attempt_status(event_id: str, attempt_id: str, request: Request):
+async def get_attempt_status(
+    event_id: str,
+    attempt_id: str,
+    request: Request,
+    _: None = Depends(require_event_mode),
+):
     """Return an attempt's status + player-safe per-validator results."""
     resolved_event_id = _resolve_event_or_404(event_id)
     attempt = attempts_repo.get_attempt(attempt_id)

@@ -9,6 +9,23 @@
 - Keep host-only endpoints separated.
 - Use event and team scoping everywhere.
 
+## Event Mode gating (opt-in)
+
+GameDay is **off by default**. Every GameDay endpoint below — `/api/events/*`,
+`/api/host/*`, and `/api/federation/*` — is gated on Event Mode
+(`QUEST_EVENT_MODE` / `--event-mode`; implied by the `master`/`child` roles).
+When Event Mode is **off**, these endpoints return:
+
+```http
+404 Not Found
+{ "error": { "code": "EVENT_MODE_DISABLED",
+             "message": "Event Mode is not enabled on this deployment." } }
+```
+
+The adoption endpoints (`/api/profile`, `/api/missions`, `/api/leaderboard`,
+`/api/admin/*`, `/api/health`, `/api/notifications`) are always available.
+`GET /api/health` reports `"event_mode": true|false` so clients can gate UI.
+
 ## Existing endpoints to preserve
 
 ```http

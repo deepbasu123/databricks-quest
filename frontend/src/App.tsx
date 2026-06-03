@@ -99,8 +99,10 @@ export default function App() {
     fetchFederation()
   }, [fetchProfile, fetchNotifications, fetchFederation])
 
-  const isFederated = !!federation && federation.role !== 'standalone'
-  const navItems: NavItem[] = isFederated
+  // Event Mode is opt-in and server-driven: the Event nav only appears when the
+  // backend reports it on (federation/status 404s otherwise, leaving this null).
+  const isEventMode = !!federation && federation.event_mode !== false
+  const navItems: NavItem[] = isEventMode
     ? [
         BASE_NAV_ITEMS[0],
         ...(federation?.role === 'child' ? [BASE_NAV_ITEMS[1]] : []),
