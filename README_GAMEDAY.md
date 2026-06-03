@@ -20,19 +20,11 @@ behaves exactly as before.
 
 ## Build status
 
-| Capability | PR | Status |
-|---|---|---|
-| GameDay schema + migrations (Lakebase) | PR01 | ✅ landed |
-| Quest pack manifest + loader/linter + import APIs | PR02 | ✅ landed |
-| Federation seam (`QUEST_ROLE`, writer credential, migration 002) | PR02/PR13 | ✅ landed |
-| Roster import + workspace-health + unmapped endpoints | PR02/PR15 | ✅ landed |
-| Federation UI (child event view + master console) | PR02/PR16 | ✅ landed |
-| Validation engine + attempt submission + scoring write | PR03 | ⏳ next |
-| Event / team / participant management APIs | PR04 | ⏳ planned |
-| Player gameplay UI (lobby, quest runner) | PR05 | ⏳ planned |
-| Host console controls (start/pause/freeze) | PR06 | ⏳ planned |
-| Live scoring + leaderboard polish | PR07 | ⏳ planned |
-| Resource bootstrap/reset, sample packs, reporting | PR08–PR11 | ⏳ planned |
+**Live status lives in one place:
+[`docs/STATUS.md`](docs/STATUS.md)** — the authoritative per-PR tracker (what's
+landed, what's deployable/testable, known gaps). In short: PR01, PR02, and the
+federation plumbing (PR13–PR16) have landed; the gameplay write path (PR03) and
+event/team APIs (PR04) are still to come.
 
 > **What this means for testing:** the deploy/migration/quest-pack/federation
 > *plumbing* is testable now. **End-to-end gameplay** (play → validate → score →

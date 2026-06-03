@@ -1,5 +1,9 @@
 # 13 — PR-Aligned Sprint Plan
 
+> This is the **plan of record** (intended sequence). For **live status** — what
+> has actually landed, what's deployable/testable, and known gaps — see
+> [`STATUS.md`](STATUS.md).
+
 ## Delivery model
 
 Each sprint should be a logical PR that can be reviewed independently. The build should avoid one massive branch.
