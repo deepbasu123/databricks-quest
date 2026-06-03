@@ -1,7 +1,7 @@
-import { Crown, Download, FileText, Lightbulb, Trophy } from 'lucide-react'
+import { BarChart3, Crown, Download, FileText, Lightbulb, Trophy } from 'lucide-react'
 import { useApi } from '../lib/api'
 import { QuestCard } from './quest/QuestCard'
-import { Skeleton } from './quest/States'
+import { EmptyState, Skeleton } from './quest/States'
 import type { EventReport } from '../types'
 
 /**
@@ -33,7 +33,11 @@ export default function ReportPanel({ eventRef }: { eventRef: string }) {
       {loading && !data ? (
         <Skeleton className="h-40 w-full" />
       ) : !data ? (
-        <p className="text-sm text-slate-400">Report unavailable.</p>
+        <EmptyState
+          icon={BarChart3}
+          title="Report unavailable"
+          message="No report data yet — run the event and earn some scores, then refresh."
+        />
       ) : (
         <div className="space-y-5">
           <SummaryStrip report={data} />
