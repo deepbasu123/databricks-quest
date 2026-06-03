@@ -23,11 +23,13 @@ import config
 from repositories import (
     QuestPacksRepository,
     EventsRepository,
+    EventStateError,
     AttemptsRepository,
     LeaderboardRepository,
     FederationRepository,
     RosterImportError,
 )
+from repositories.events import attempts_open, JOINABLE_STATUSES
 from services import quest_pack_loader
 from services import federation as fed
 from services import record_audit
@@ -471,6 +473,273 @@ async def host_get_quest_pack(pack_id: str, user: str = Depends(require_host)):
 
 
 # ---------------------------------------------------------------------------
+# Events, teams, participants — lifecycle (PR04)
+# ---------------------------------------------------------------------------
+# Player endpoints (list/lobby/join) are Event-Mode-gated and open to any
+# authenticated user. Host endpoints (create event/teams, import participants,
+# lifecycle transitions) go through require_host. Every mutation writes an
+# audit row. The event status state machine lives in repositories.events.
+
+
+class CreateEventPayload(BaseModel):
+    title: str
+    pack_version_id: str
+    slug: Optional[str] = None
+    description: Optional[str] = None
+    timezone: str = "UTC"
+    mode: str = "gameday"
+
+
+class CreateTeamPayload(BaseModel):
+    name: str
+    display_name: Optional[str] = None
+    color: Optional[str] = None
+    team_catalog: Optional[str] = None
+    team_schema: Optional[str] = None
+
+
+class JoinEventPayload(BaseModel):
+    display_name: Optional[str] = None
+    team_id: Optional[str] = None
+    team_name: Optional[str] = None
+
+
+class ParticipantImportPayload(BaseModel):
+    participants: List[Dict[str, Any]]
+
+
+def _slugify(text: str) -> str:
+    import re
+
+    s = re.sub(r"[^a-z0-9]+", "-", (text or "").strip().lower()).strip("-")
+    return s or f"event-{uuid_hex8()}"
+
+
+def uuid_hex8() -> str:
+    import uuid as _uuid
+
+    return _uuid.uuid4().hex[:8]
+
+
+def _event_state_error(exc: EventStateError) -> HTTPException:
+    return HTTPException(
+        status_code=exc.status,
+        detail={"error": {"code": exc.code, "message": str(exc)}},
+    )
+
+
+def _event_public(ev: Dict[str, Any]) -> Dict[str, Any]:
+    """Trim an event row to the fields players/hosts need."""
+    keys = (
+        "event_id", "slug", "title", "description", "status", "mode",
+        "starts_at", "ends_at", "timezone", "scoring_frozen_at",
+        "pack_version_id", "created_by", "created_at",
+    )
+    return {k: ev.get(k) for k in keys}
+
+
+@app.get("/api/events")
+async def list_events(request: Request, _: None = Depends(require_event_mode)):
+    """Player-facing list of joinable/visible events with team counts."""
+    return {"events": events_repo.list_player_events()}
+
+
+@app.get("/api/events/{event_id}")
+async def get_event_lobby(event_id: str, request: Request, _: None = Depends(require_event_mode)):
+    """Event lobby: event header, teams (with counts), your participant/team, counts."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    ev = events_repo.get_event(resolved_event_id)
+    user = get_user_email(request)
+
+    participant = events_repo.get_participant(resolved_event_id, user)
+    team = events_repo.get_team_for_user(resolved_event_id, user)
+    return {
+        "event": _event_public(ev),
+        "joinable": ev["status"] in JOINABLE_STATUSES,
+        "attempts_open": attempts_open(ev["status"]),
+        "is_host": events_repo.is_host(resolved_event_id, user),
+        "teams": events_repo.list_teams_with_counts(resolved_event_id),
+        "counts": events_repo.event_counts(resolved_event_id, ev.get("pack_version_id")),
+        "you": {
+            "joined": participant is not None,
+            "participant_id": participant.get("participant_id") if participant else None,
+            "team_id": team.get("team_id") if team else None,
+            "team_name": team.get("display_name") or team.get("name") if team else None,
+        },
+    }
+
+
+@app.post("/api/events/{event_id}/join")
+async def join_event(
+    event_id: str,
+    body: JoinEventPayload,
+    request: Request,
+    _: None = Depends(require_event_mode),
+):
+    """Self-register the caller as a participant; optionally join a named team."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    ev = events_repo.get_event(resolved_event_id)
+    user = get_user_email(request)
+    if ev["status"] not in JOINABLE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": {"code": "NOT_JOINABLE", "message": "This event is not open for joining right now."}},
+        )
+
+    try:
+        participant = events_repo.register_participant(
+            event_id=resolved_event_id, user_id=user, display_name=body.display_name, email=user
+        )
+        team = None
+        if body.team_id or body.team_name:
+            team = (
+                events_repo.get_team(body.team_id)
+                if body.team_id
+                else _find_team_by_name(resolved_event_id, body.team_name)
+            )
+            if not team or team.get("event_id") != resolved_event_id:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"error": {"code": "TEAM_NOT_FOUND", "message": "That team is not part of this event."}},
+                )
+            events_repo.assign_team(team["team_id"], participant["participant_id"])
+    except EventStateError as exc:
+        raise _event_state_error(exc)
+
+    record_audit(
+        action="event.join",
+        actor_user_id=user,
+        event_id=resolved_event_id,
+        target_type="participant",
+        target_id=participant["participant_id"],
+        payload={"team_id": team["team_id"] if team else None},
+    )
+    return {
+        "joined": True,
+        "participant_id": participant["participant_id"],
+        "team_id": team["team_id"] if team else None,
+        "team_name": (team.get("display_name") or team.get("name")) if team else None,
+    }
+
+
+def _find_team_by_name(event_id: str, name: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not name:
+        return None
+    for t in events_repo.list_teams(event_id):
+        if t.get("name") == name or t.get("display_name") == name:
+            return t
+    return None
+
+
+@app.post("/api/host/events")
+async def host_create_event(body: CreateEventPayload, user: str = Depends(require_host)):
+    """Create a draft event from an imported pack version (creator becomes owner-host)."""
+    slug = (body.slug or _slugify(body.title)).strip().lower()
+    try:
+        ev = events_repo.create_event(
+            slug=slug,
+            title=body.title,
+            pack_version_id=body.pack_version_id,
+            created_by=user,
+            description=body.description,
+            mode=body.mode,
+            timezone=body.timezone,
+        )
+    except EventStateError as exc:
+        raise _event_state_error(exc)
+
+    record_audit(
+        action="event.create",
+        actor_user_id=user,
+        event_id=ev["event_id"],
+        target_type="event",
+        target_id=ev["event_id"],
+        payload={"slug": ev["slug"], "pack_version_id": body.pack_version_id},
+    )
+    return {"event": _event_public(ev)}
+
+
+@app.post("/api/host/events/{event_id}/teams")
+async def host_create_team(
+    event_id: str, body: CreateTeamPayload, user: str = Depends(require_host)
+):
+    """Create a team in an event."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    try:
+        team = events_repo.create_team(
+            event_id=resolved_event_id,
+            name=body.name,
+            display_name=body.display_name,
+            color=body.color,
+            team_catalog=body.team_catalog,
+            team_schema=body.team_schema,
+        )
+    except EventStateError as exc:
+        raise _event_state_error(exc)
+
+    record_audit(
+        action="team.create",
+        actor_user_id=user,
+        event_id=resolved_event_id,
+        target_type="team",
+        target_id=team["team_id"],
+        payload={"name": team["name"]},
+    )
+    return {"team": team}
+
+
+@app.post("/api/host/events/{event_id}/participants/import")
+async def host_import_participants(
+    event_id: str, body: ParticipantImportPayload, user: str = Depends(require_host)
+):
+    """Bulk-register participants with optional team assignment (idempotent)."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    try:
+        result = events_repo.import_participants(resolved_event_id, body.participants)
+    except EventStateError as exc:
+        raise _event_state_error(exc)
+
+    record_audit(
+        action="participants.import",
+        actor_user_id=user,
+        event_id=resolved_event_id,
+        target_type="event",
+        target_id=resolved_event_id,
+        payload=result,
+    )
+    return result
+
+
+def _transition_endpoint(target: str):
+    async def _do(event_id: str, request: Request, user: str = Depends(require_host)):
+        resolved_event_id = _resolve_event_or_404(event_id)
+        try:
+            ev = events_repo.set_status(resolved_event_id, target, user)
+        except EventStateError as exc:
+            raise _event_state_error(exc)
+        record_audit(
+            action=f"event.{target}",
+            actor_user_id=user,
+            event_id=resolved_event_id,
+            target_type="event",
+            target_id=resolved_event_id,
+            payload={"status": ev["status"]},
+        )
+        return {"event": _event_public(ev)}
+
+    return _do
+
+
+# Map the spec's verbs to target statuses. Each writes an audit row.
+app.add_api_route("/api/host/events/{event_id}/start", _transition_endpoint("active"), methods=["POST"])
+app.add_api_route("/api/host/events/{event_id}/pause", _transition_endpoint("paused"), methods=["POST"])
+app.add_api_route("/api/host/events/{event_id}/freeze", _transition_endpoint("frozen"), methods=["POST"])
+app.add_api_route("/api/host/events/{event_id}/complete", _transition_endpoint("completed"), methods=["POST"])
+app.add_api_route("/api/host/events/{event_id}/ready", _transition_endpoint("ready"), methods=["POST"])
+app.add_api_route("/api/host/events/{event_id}/archive", _transition_endpoint("archived"), methods=["POST"])
+
+
+# ---------------------------------------------------------------------------
 # Federation — multi-workspace GameDay (ADR_006)
 # ---------------------------------------------------------------------------
 # These endpoints ship in every deployment; role only changes which are
@@ -664,6 +933,18 @@ def _resolve_attempt_identity(event_id: str, user: str) -> Dict[str, Any]:
     }
 
 
+def _closed_event_message(status: str) -> str:
+    """Player-safe reason a submission is blocked for a non-active event."""
+    return {
+        "paused": "This event is paused. Your host will resume it shortly.",
+        "frozen": "Scoring is frozen for the finale — submissions are closed.",
+        "completed": "This event has ended. Thanks for playing!",
+        "archived": "This event has been archived.",
+        "draft": "This event hasn't opened yet.",
+        "ready": "This event hasn't started yet. Hang tight!",
+    }.get(status, "Submissions are closed right now.")
+
+
 def _attempt_message(status: str, points: int, already_awarded: bool) -> str:
     """Player-safe summary message for an attempt's terminal status."""
     if status == "passed":
@@ -697,6 +978,20 @@ async def submit_attempt(
     """
     user = get_user_email(request)
     resolved_event_id = _resolve_event_or_404(event_id)
+
+    # Event lifecycle gate: only an active event accepts new attempts. Paused,
+    # frozen, completed, draft/ready, and archived all block with a safe message.
+    ev = events_repo.get_event(resolved_event_id)
+    if ev and not attempts_open(ev["status"]):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "code": "EVENT_NOT_ACTIVE",
+                    "message": _closed_event_message(ev["status"]),
+                }
+            },
+        )
 
     task = quest_packs_repo.get_task(task_id)
     if not task:

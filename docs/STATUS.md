@@ -5,7 +5,7 @@ lands. Other docs (the PR plan, the GameDay README, per-doc implementation
 notes) should point here rather than restating overall status.
 
 - **Last updated:** 2026-06-03
-- **Active branch / PR:** `feature/gameday-pr03-validation-engine` (stacked on PR #6)
+- **Active branch / PR:** `feature/gameday-pr04-events-teams` (stacked on PR03)
 - **Plan of record:** [`13_PR_ALIGNED_SPRINT_PLAN.md`](13_PR_ALIGNED_SPRINT_PLAN.md)
 
 Legend: ✅ landed · 🟡 in progress · ⏳ planned (not started) · ⛔ blocked
@@ -17,7 +17,7 @@ Legend: ✅ landed · 🟡 in progress · ⏳ planned (not started) · ⛔ block
 | Mode | Status | Notes |
 |---|---|---|
 | **Adoption Mode** | ✅ live | System-table scoring, missions, leaderboard, badges, admin. Unchanged. **The default** — Event Mode must be explicitly enabled. |
-| **Event Mode (GameDay)** | 🟡 in progress (opt-in) | Off by default; enable with `--event-mode` / `QUEST_EVENT_MODE=on` (implied by `master`/`child` roles). When off, GameDay APIs 404, Event UI is hidden, and GameDay migrations are skipped. Schema, quest packs, validation/scoring write path (PR03), and federation plumbing landed; events/teams APIs (PR04) still needed for full end-to-end play. |
+| **Event Mode (GameDay)** | 🟡 in progress (opt-in) | Off by default; enable with `--event-mode` / `QUEST_EVENT_MODE=on` (implied by `master`/`child` roles). When off, GameDay APIs 404, Event UI is hidden, and GameDay migrations are skipped. Schema, quest packs, validation/scoring write path (PR03), event/team lifecycle + join + attempt gating (PR04), and federation plumbing landed. End-to-end host→play→score→leaderboard works via API; player gameplay UI (PR05) and host console UI (PR06) still to come. |
 
 ---
 
@@ -28,7 +28,7 @@ Legend: ✅ landed · 🟡 in progress · ⏳ planned (not started) · ⛔ block
 | PR01 | GameDay domain model + Lakebase migrations + DB module | ✅ landed | `e6274d2` |
 | PR02 | Configurable quest packs (manifest, loader, linter, import/list APIs, built-in pack) | ✅ landed | `2a959ab` |
 | PR03 | Validation engine core (validator abstraction, SQL + manual validators, attempt submission, scoring idempotency) | ✅ landed | `feature/gameday-pr03-validation-engine` |
-| PR04 | Event & team management (create events/teams/participants, join flow, lifecycle) | ⏳ planned | — |
+| PR04 | Event & team management (create events/teams/participants, join flow, lifecycle, attempt gating) | ✅ landed | `feature/gameday-pr04-events-teams` |
 | PR05 | Player gameplay experience (lobby, team dashboard, quest runner, submit UI) | ⏳ planned | — |
 | PR06 | Admin host console (start/pause/freeze/complete, validation monitor, announcements) | ⏳ planned | — |
 | PR07 | Live scoring & leaderboard (real-time leaderboard, freeze semantics) | ⏳ planned | — |

@@ -309,6 +309,47 @@ GET /api/host/quest-packs
 GET /api/host/quest-packs/{pack_id}
 ```
 
+### Event & team lifecycle — PR04 implementation status
+
+Implemented in PR04. All are Event-Mode-gated (404 when Event Mode is off);
+host endpoints additionally enforce `QUEST_HOST_ALLOWLIST` via `require_host`.
+
+Player endpoints:
+
+- `GET /api/events` → `{ events: [{ event_id, slug, title, status, team_count, … }] }`
+  — events visible to players (`ready`/`active`/`paused`/`frozen`).
+- `GET /api/events/{event_id}` (id or slug) → lobby:
+  `{ event, joinable, attempts_open, is_host, teams[], counts, you }`.
+- `POST /api/events/{event_id}/join` body `{ display_name?, team_id?, team_name? }`
+  → `{ joined, participant_id, team_id, team_name }`. Idempotent; `409 NOT_JOINABLE`
+  unless the event is `ready`/`active`/`paused`.
+
+Host endpoints:
+
+- `POST /api/host/events` body `{ title, pack_version_id, slug?, description?,
+  timezone? }` → `{ event }`. Creator is recorded as an `owner` host. `400` for an
+  unknown `pack_version_id`; `409 SLUG_EXISTS` for a duplicate slug.
+- `POST /api/host/events/{event_id}/teams` body `{ name, display_name?, color?,
+  team_catalog?, team_schema? }` → `{ team }`. `409 TEAM_EXISTS` on duplicate name.
+- `POST /api/host/events/{event_id}/participants/import` body
+  `{ participants: [{ email|user_id, display_name?, team_name? }] }` →
+  `{ rows, participants_created, teams_created, assignments }`. Idempotent; teams
+  named in rows are created on demand.
+- Lifecycle: `POST /api/host/events/{event_id}/{start|pause|freeze|complete|ready|archive}`
+  → `{ event }`. Enforces the state machine; `409 INVALID_TRANSITION` on an
+  illegal move.
+
+**State machine.** `draft → ready|active|archived`; `ready → active|archived`;
+`active → paused|frozen|completed`; `paused → active|frozen|completed`;
+`frozen → active|completed`; `completed → archived`. `start`→`active` stamps
+`starts_at`; `complete` stamps `ends_at`; `freeze` stamps `scoring_frozen_at`;
+unfreeze (`frozen→active`) clears it.
+
+**Attempt gating.** `POST /api/events/{event_id}/tasks/{task_id}/attempts` only
+accepts submissions while the event is `active`; any other status returns
+`409 EVENT_NOT_ACTIVE` with a player-safe message. Every mutation above writes an
+`event_audit_log` row.
+
 ### Quest pack endpoints — PR02 implementation status
 
 Implemented in PR02 (lint, import, list, get):

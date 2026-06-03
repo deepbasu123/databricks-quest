@@ -9,7 +9,7 @@ auditing, transactions, or validation are intentionally deferred to later PRs
 and raise ``NotImplementedError`` until then.
 """
 
-from .events import EventsRepository
+from .events import EventsRepository, EventStateError
 from .quest_packs import QuestPacksRepository
 from .attempts import AttemptsRepository
 from .scoring import ScoringRepository
@@ -18,6 +18,7 @@ from .federation import FederationRepository, RosterImportError
 
 __all__ = [
     "EventsRepository",
+    "EventStateError",
     "QuestPacksRepository",
     "AttemptsRepository",
     "ScoringRepository",
