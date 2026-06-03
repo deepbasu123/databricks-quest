@@ -85,6 +85,60 @@ class ScoringRepository:
         # Key already present — points were awarded by a prior submission.
         return {"awarded": False, "points": 0, "scoring_event_id": None}
 
+    def record_manual_adjustment(
+        self,
+        *,
+        event_id: str,
+        points_delta: int,
+        reason: str,
+        created_by: str,
+        team_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Record a host manual score adjustment.
+
+        Writes a ``manual_adjustments`` audit row and a matching
+        ``scoring_events`` ledger row in one transaction so the leaderboard
+        reflects the change immediately. The ledger row carries a unique
+        idempotency key (the adjustment id) so it always lands — unlike base
+        points, a manual override is intentional and never deduplicated.
+        Returns ``{"adjustment_id", "scoring_event_id", "points_delta"}``.
+        """
+        adjustment_id = _new_id("adj")
+        scoring_event_id = _new_id("score")
+        try:
+            with db.transaction() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO manual_adjustments
+                        (adjustment_id, event_id, team_id, user_id, task_id,
+                         points_delta, reason, created_by)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (adjustment_id, event_id, team_id, user_id, task_id,
+                     points_delta, reason, created_by),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO scoring_events
+                        (scoring_event_id, event_id, team_id, user_id, quest_id,
+                         task_id, source_type, source_id, points_delta, reason,
+                         created_by, workspace_id, idempotency_key)
+                    VALUES (%s, %s, %s, %s, NULL, %s, 'manual_adjustment', %s, %s, %s, %s, NULL, %s)
+                    """,
+                    (scoring_event_id, event_id, team_id, user_id, task_id,
+                     adjustment_id, points_delta, reason, created_by, adjustment_id),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("record_manual_adjustment failed: %s", exc)
+            raise
+        return {
+            "adjustment_id": adjustment_id,
+            "scoring_event_id": scoring_event_id,
+            "points_delta": points_delta,
+        }
+
     def get_team_total(self, event_id: str, team_id: str) -> int:
         try:
             rows = db.execute_query(

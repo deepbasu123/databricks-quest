@@ -292,3 +292,70 @@ export interface AttemptResult {
   results: { status: string; message: string }[]
   team_id: string | null
 }
+
+export interface Announcement {
+  announcement_id: string
+  event_id: string
+  title: string
+  body_md: string
+  severity: string
+  created_by?: string
+  created_at?: string | null
+}
+
+// ── Host console (PR06) ──────────────────────────────────────────────────────
+
+export interface HostTeamRow {
+  team_id: string
+  name: string
+  display_name: string | null
+  color: string | null
+  members: number
+  score: number
+  rank: number | null
+  members_list?: { user_id: string; display_name: string | null }[]
+}
+
+export interface HostOverview {
+  event: PlayerEvent
+  attempts_open: boolean
+  allowed_transitions: string[]
+  counts: { participants: number; teams: number; quests: number; tasks: number }
+  teams: HostTeamRow[]
+  attempt_status_counts: Record<string, number>
+  announcements: Announcement[]
+}
+
+export interface HostAttempt {
+  attempt_id: string
+  task_id: string
+  team_id: string | null
+  submitted_by: string
+  status: string
+  submitted_at: string | null
+  completed_at: string | null
+  error_message: string | null
+  task_title: string | null
+  team_name: string | null
+}
+
+export interface HostAttemptList {
+  attempts: HostAttempt[]
+  status_counts: Record<string, number>
+}
+
+export interface HostValidationResult {
+  validation_result_id: string
+  validator_id: string
+  status: string
+  score_delta: number
+  public_message: string | null
+  private_message: string | null
+  started_at?: string | null
+  completed_at?: string | null
+}
+
+export interface HostAttemptDetail {
+  attempt: Record<string, unknown> & { attempt_id: string; status: string; submitted_by: string }
+  results: HostValidationResult[]
+}
