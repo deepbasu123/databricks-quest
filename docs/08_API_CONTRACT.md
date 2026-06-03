@@ -26,6 +26,23 @@ The adoption endpoints (`/api/profile`, `/api/missions`, `/api/leaderboard`,
 `/api/admin/*`, `/api/health`, `/api/notifications`) are always available.
 `GET /api/health` reports `"event_mode": true|false` so clients can gate UI.
 
+### Admin page gating (`QUEST_ADMIN_ALLOWLIST`)
+
+`/api/admin/*` is gated by an admin allowlist independent of Event Mode. The
+allowlist is the comma-separated env var `QUEST_ADMIN_ALLOWLIST` (set by
+`deploy.sh --admins a@x.com,b@y.com`; `deploy.sh` defaults it to the deploying
+user when the flag is omitted, so the Admin page is never wide open in a real
+deployment). Behaviour:
+
+- When the allowlist is **set**, requests from users not on it return
+  `403 { "error": { "code": "FORBIDDEN", "message": "Admin access required." } }`.
+- When the allowlist is **unset** (e.g. local dev), the endpoints stay open
+  (prior behaviour).
+
+`GET /api/profile` returns `"is_admin": true|false` for the calling user so the
+frontend can hide the Admin nav for non-admins (defence-in-depth; the 403 gate
+is the real boundary).
+
 ## Existing endpoints to preserve
 
 ```http

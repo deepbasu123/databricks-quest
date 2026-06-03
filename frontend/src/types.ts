@@ -13,6 +13,7 @@ export interface UserProfile {
   distinct_products_used: number
   badges: Badge[]
   setup_required?: boolean
+  is_admin?: boolean
 }
 
 export interface LevelProgress {

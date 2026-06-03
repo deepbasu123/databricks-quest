@@ -42,6 +42,12 @@ DEPLOY_MODE=""  # "full" (DAB bundle) or "quick" (direct API, like Forge)
 # hidden) and GameDay migrations are skipped — i.e. the legacy adoption app.
 QUEST_EVENT_MODE=""         # "on" enables Event Mode; empty = off (legacy)
 
+# ── Admin allowlist ──────────────────────────────────────────────────────────
+# Comma-separated emails allowed to see the adoption Admin page (/api/admin/*).
+# If left empty, deploy.sh defaults it to the deploying user after auth so the
+# Admin page is never wide open in a deployment.
+QUEST_ADMIN_ALLOWLIST=""    # e.g. "alice@corp.com,bob@corp.com"
+
 # ── Federation (ADR_006) — one codebase, role selected by these flags ────────
 QUEST_ROLE=""               # standalone (default) | master | child
 MASTER_LAKEBASE_HOST=""     # child: the MASTER workspace's shared Lakebase host
@@ -161,6 +167,9 @@ write_app_yaml() {
     # SQL warehouse the sql_assertion validators execute against (PR03). Emitted
     # for every role when known so deterministic SQL checks have a target.
     [ -n "$WAREHOUSE_ID" ] && { echo "  - name: QUEST_SQL_WAREHOUSE_ID"; echo "    value: \"$WAREHOUSE_ID\""; }
+    # Admin allowlist for /api/admin/* (comma-separated emails). When set, the
+    # Admin page and its APIs are restricted to these users; absence = open.
+    [ -n "$QUEST_ADMIN_ALLOWLIST" ] && { echo "  - name: QUEST_ADMIN_ALLOWLIST"; echo "    value: \"$QUEST_ADMIN_ALLOWLIST\""; }
     # Event Mode master switch. Only emitted when ON; absence = legacy default,
     # so a standalone adoption deploy keeps its exact two-variable app.yaml.
     if [ "$QUEST_EVENT_MODE" = "on" ]; then
@@ -200,6 +209,7 @@ while [[ $# -gt 0 ]]; do
     --quick)          DEPLOY_MODE="quick"; shift ;;
     --full)           DEPLOY_MODE="full"; shift ;;
     --event-mode)         QUEST_EVENT_MODE="on"; shift ;;
+    --admins)             QUEST_ADMIN_ALLOWLIST="$2"; shift 2 ;;
     --role)               QUEST_ROLE="$2"; shift 2 ;;
     --master-lakebase-host)  MASTER_LAKEBASE_HOST="$2"; shift 2 ;;
     --master-lakebase-token) MASTER_LAKEBASE_TOKEN="$2"; shift 2 ;;
@@ -224,6 +234,9 @@ while [[ $# -gt 0 ]]; do
       echo "  --skip-build          Skip frontend build (use existing app/static/)"
       echo "  --skip-scoring        Skip running the scoring pipeline"
       echo "  --skip-auth-check     Skip authentication validation (use if already authenticated)"
+      echo "  --admins EMAILS       Comma-separated emails allowed on the Admin page."
+      echo "                        Defaults to the deploying user when omitted, so the"
+      echo "                        Admin page is never open to all authenticated users."
       echo ""
       echo "Event Mode (GameDay) — opt-in; legacy adoption app is the default:"
       echo "  --event-mode             Enable GameDay/Event Mode (default: OFF)."
@@ -444,6 +457,13 @@ else
 
   USER_EMAIL=$(echo "$USER_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('userName',''))")
   success "Authenticated as $USER_EMAIL"
+fi
+
+# Default the Admin allowlist to the deploying user so the Admin page is gated
+# (never wide open) even when --admins is not passed. Only do so for a real
+# email (skip the "(authentication skipped)" placeholder).
+if [ -z "$QUEST_ADMIN_ALLOWLIST" ] && [[ "$USER_EMAIL" == *"@"* ]]; then
+  QUEST_ADMIN_ALLOWLIST="$USER_EMAIL"
 fi
 
 # Get workspace host
@@ -1269,6 +1289,11 @@ if [ "$QUEST_EVENT_MODE" = "on" ]; then
   echo -e "  ${BOLD}Event Mode:${NC}    ${GREEN}ENABLED${NC} (GameDay)"
 else
   echo -e "  ${BOLD}Event Mode:${NC}    off (legacy adoption app)"
+fi
+if [ -n "$QUEST_ADMIN_ALLOWLIST" ]; then
+  echo -e "  ${BOLD}Admins:${NC}        $QUEST_ADMIN_ALLOWLIST"
+else
+  echo -e "  ${BOLD}Admins:${NC}        ${YELLOW}open${NC} (no allowlist — Admin page visible to all)"
 fi
 if [ "$QUEST_ROLE" != "standalone" ]; then
   echo -e "  ${BOLD}Role:${NC}          $QUEST_ROLE${EVENT_SLUG:+  (event: $EVENT_SLUG)}"

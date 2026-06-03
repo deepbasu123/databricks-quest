@@ -158,6 +158,32 @@ QUEST_HOST_ALLOWLIST = [
     e.strip().lower() for e in os.getenv("QUEST_HOST_ALLOWLIST", "").split(",") if e.strip()
 ]
 
+# Admin allowlist for the adoption Admin page (/api/admin/*). Set from
+# deploy.sh's --admins flag (comma-separated emails); deploy.sh defaults it to
+# the deploying user so the page is never wide open in a real deployment. When
+# unset (e.g. local dev) the endpoints stay open, matching prior behaviour.
+QUEST_ADMIN_ALLOWLIST = [
+    e.strip().lower() for e in os.getenv("QUEST_ADMIN_ALLOWLIST", "").split(",") if e.strip()
+]
+
+
+def is_admin_user(user: str) -> bool:
+    """True if the user may see the Admin page. Open when no allowlist is set."""
+    if not QUEST_ADMIN_ALLOWLIST:
+        return True
+    return (user or "").lower() in QUEST_ADMIN_ALLOWLIST
+
+
+def require_admin(request: Request) -> str:
+    """FastAPI dependency: enforce the admin allowlist on /api/admin/* endpoints."""
+    user = get_user_email(request)
+    if not is_admin_user(user):
+        raise HTTPException(
+            status_code=403,
+            detail={"error": {"code": "FORBIDDEN", "message": "Admin access required."}},
+        )
+    return user
+
 
 def _ensure_event_mode() -> None:
     """Gate GameDay/Event Mode surfaces. 404 when Event Mode is not enabled.
@@ -276,6 +302,7 @@ async def get_profile(request: Request):
                 "SELECT * FROM badges WHERE user_id = %s ORDER BY earned_at DESC", (user,)
             )
             profile["badges"] = badges
+            profile["is_admin"] = is_admin_user(user)
             return profile
         return _empty_profile(user)
     except Exception as e:
@@ -298,6 +325,7 @@ def _empty_profile(user: str) -> dict:
         "missions_completed": 0,
         "distinct_products_used": 0,
         "badges": [],
+        "is_admin": is_admin_user(user),
     }
 
 
@@ -368,7 +396,7 @@ async def get_notifications(request: Request):
 
 
 @app.get("/api/admin/stats")
-async def get_admin_stats():
+async def get_admin_stats(user: str = Depends(require_admin)):
     try:
         user_count = execute_query("SELECT COUNT(DISTINCT user_id) AS cnt FROM user_profile_snapshot")
         mission_count = execute_query("SELECT COUNT(*) AS cnt FROM mission_completions")
@@ -411,7 +439,7 @@ async def get_admin_stats():
 
 
 @app.get("/api/admin/pipeline-status")
-async def get_pipeline_status():
+async def get_pipeline_status(user: str = Depends(require_admin)):
     try:
         latest = execute_query("SELECT MAX(updated_at) AS last_run FROM user_profile_snapshot")
         last_run = latest[0]["last_run"] if latest and latest[0].get("last_run") else None

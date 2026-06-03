@@ -57,6 +57,31 @@ See [`adr/ADR_006_SHARED_LAKEBASE_MULTI_WORKSPACE_FEDERATION.md`](adr/ADR_006_SH
 for why children connect directly to the master's Lakebase over Postgres
 (instead of HTTP between apps).
 
+### Admin page access (`--admins`)
+
+The **Admin** page (`/api/admin/*`) is gated by an allowlist. This is
+independent of Event Mode and applies to **every deploy**, including the legacy
+adoption app. Pass `--admins` with a comma-separated list of emails:
+
+```bash
+./deploy.sh --admins "alice@corp.com,bob@corp.com"
+```
+
+Behaviour:
+
+- **`--admins` provided** → only those emails see the Admin page; everyone else
+  gets `403` from the admin APIs and the Admin nav item is hidden.
+- **`--admins` omitted** → `deploy.sh` defaults the allowlist to the **deploying
+  user**, so the Admin page is never open to every authenticated user. Add more
+  admins later by redeploying with `--admins`.
+
+Mechanics: the flag sets `QUEST_ADMIN_ALLOWLIST` (comma-separated emails) in
+`app.yaml`, and `/api/profile` returns `is_admin` so the frontend can hide the
+nav. The allowlist is only "open to all" when `QUEST_ADMIN_ALLOWLIST` is
+**absent** from the environment (e.g. running the app locally without
+`deploy.sh`) — `deploy.sh` always sets it to at least the deploying user, so a
+deployed Admin page is never wide open.
+
 ---
 
 ## Deploy — single workspace
