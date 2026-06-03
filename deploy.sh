@@ -116,18 +116,9 @@ check_cli() {
   if [ -x "$path" ]; then
     local ver
     ver=$("$path" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "0.0.0")
-    # Compare: prefer higher version
-    if python3 -c "
-from packaging.version import Version
-import sys
-try:
-    sys.exit(0 if Version('$ver') > Version('$BEST_VERSION') else 1)
-except:
-    # packaging not available, compare as tuples
-    a = tuple(int(x) for x in '$ver'.split('.'))
-    b = tuple(int(x) for x in '$BEST_VERSION'.split('.'))
-    sys.exit(0 if a > b else 1)
-" 2>/dev/null; then
+    # Prefer the strictly-higher version (no external deps)
+    if [ "$ver" != "$BEST_VERSION" ] && \
+       [ "$(printf '%s\n%s\n' "$BEST_VERSION" "$ver" | sort -V | tail -1)" = "$ver" ]; then
       CLI="$path"
       BEST_VERSION="$ver"
     fi
