@@ -407,3 +407,49 @@ export interface HostAttemptDetail {
   attempt: Record<string, unknown> & { attempt_id: string; status: string; submitted_by: string }
   results: HostValidationResult[]
 }
+
+// ── Resource bootstrap & reset (PR08) ────────────────────────────────────────
+
+export interface ResourceTarget {
+  team_id: string | null
+  team_name: string | null
+  catalog: string
+  schema: string
+  fqn: string
+}
+
+export interface ResourceRow {
+  resource_id: string
+  team_id: string | null
+  resource_type: string
+  fqn: string
+  status: string
+  message: string | null
+  updated_at: string | null
+}
+
+export interface ResourceHealth {
+  namespace: { catalog: string; schema_prefix: string } | null
+  namespace_error: string | null
+  targets: ResourceTarget[]
+  resources: ResourceRow[]
+  warehouse_configured: boolean
+}
+
+export interface ResourcePlanItem {
+  op: string
+  team_id: string | null
+  resource_type: string
+  target: string
+  sql: string
+  within_namespace: boolean
+  error?: string
+  status?: string
+}
+
+export interface ResourcePlan {
+  action: string
+  plan: ResourcePlanItem[]
+  blockers: ResourcePlanItem[]
+  warehouse_configured: boolean
+}

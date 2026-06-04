@@ -16,11 +16,14 @@ import {
   Upload,
   Users,
 } from 'lucide-react'
+import { Boxes, Database, Trash2 } from 'lucide-react'
 import type {
   HostAttemptDetail,
   HostAttemptList,
   HostOverview,
   HostTeamRow,
+  ResourceHealth,
+  ResourcePlan,
 } from '../types'
 import { useApi } from '../lib/api'
 import { QuestCard } from './quest/QuestCard'
@@ -63,6 +66,7 @@ export default function HostConsole({ eventRef }: { eventRef: string }) {
         <ScoreAdjuster eventRef={eventRef} teams={data.teams} onDone={reload} />
       </div>
       <AnnouncementComposer eventRef={eventRef} overview={data} onPosted={reload} />
+      <ResourcesPanel eventRef={eventRef} />
       <AttemptsInspector eventRef={eventRef} />
       <PackImporter />
     </div>
@@ -564,6 +568,173 @@ function PackImporter() {
         {out && <span className="text-sm text-emerald-300">{out}</span>}
       </div>
       {err && <p className="mt-2 text-sm text-[#FB7185]">{err}</p>}
+    </QuestCard>
+  )
+}
+
+// ── Resource bootstrap & reset (PR08) ────────────────────────────────────────
+
+const RESOURCE_STATUS: Record<string, string> = {
+  active: 'text-emerald-300',
+  pending: 'text-slate-400',
+  failed: 'text-[#FB7185]',
+  removed: 'text-slate-500',
+}
+
+function ResourcesPanel({ eventRef }: { eventRef: string }) {
+  const { data, loading, reload } = useApi<ResourceHealth>(`/api/host/events/${eventRef}/resources`)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [plan, setPlan] = useState<ResourcePlan | null>(null)
+  const [msg, setMsg] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  const act = useCallback(
+    async (kind: 'plan-bootstrap' | 'plan-reset' | 'bootstrap' | 'reset') => {
+      setBusy(kind)
+      setErr(null)
+      setMsg(null)
+      try {
+        if (kind === 'plan-bootstrap' || kind === 'plan-reset') {
+          const p = (await postJson(`/api/host/events/${eventRef}/resources/plan`, {
+            action: kind === 'plan-reset' ? 'reset' : 'bootstrap',
+          })) as ResourcePlan
+          setPlan(p)
+        } else if (kind === 'bootstrap') {
+          const r = await postJson(`/api/host/events/${eventRef}/resources/bootstrap`)
+          setMsg(r.ok ? 'Resources provisioned.' : 'Bootstrap completed with errors — see health below.')
+          setPlan(null)
+          reload()
+        } else {
+          if (!window.confirm('Drop every team schema for this event? This cannot be undone.')) {
+            setBusy(null)
+            return
+          }
+          const r = await postJson(`/api/host/events/${eventRef}/resources/reset`, { confirm: true })
+          setMsg(r.ok ? 'Team schemas dropped.' : 'Reset completed with errors — see health below.')
+          setPlan(null)
+          reload()
+        }
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : 'Request failed')
+      } finally {
+        setBusy(null)
+      }
+    },
+    [eventRef, reload],
+  )
+
+  return (
+    <QuestCard
+      eyebrow="Resources"
+      title="Team resource bootstrap & reset"
+      action={
+        <button onClick={reload} className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1.5 text-xs text-slate-300 transition hover:bg-white/[0.07]">
+          <RefreshCw className="h-3.5 w-3.5" /> Refresh
+        </button>
+      }
+    >
+      {loading && !data ? (
+        <Skeleton className="h-24 w-full" />
+      ) : data?.namespace_error ? (
+        <p className="text-sm text-[#FB7185]">Namespace error: {data.namespace_error}</p>
+      ) : (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
+            <span className="inline-flex items-center gap-1.5">
+              <Database className="h-3.5 w-3.5 text-[#FF8A3D]" />
+              Catalog <code className="text-slate-200">{data?.namespace?.catalog}</code>
+            </span>
+            <span>
+              Schema prefix <code className="text-slate-200">{data?.namespace?.schema_prefix}</code>
+            </span>
+            {!data?.warehouse_configured && (
+              <span className="inline-flex items-center gap-1 text-amber-300">
+                <AlertTriangle className="h-3.5 w-3.5" /> No SQL warehouse configured (dry-run only)
+              </span>
+            )}
+          </div>
+
+          {/* Per-team targets + live health */}
+          <div className="overflow-hidden rounded-xl border border-white/10">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-white/10 bg-white/[0.02] text-left text-[11px] uppercase tracking-wider text-slate-500">
+                  <th className="px-3 py-2 font-semibold">Team</th>
+                  <th className="px-3 py-2 font-semibold">Target schema</th>
+                  <th className="px-3 py-2 font-semibold">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(data?.targets ?? []).map((t) => {
+                  const health = (data?.resources ?? []).find((r) => r.fqn === t.fqn)
+                  const status = health?.status ?? 'not provisioned'
+                  return (
+                    <tr key={t.fqn} className="border-b border-white/5 last:border-0">
+                      <td className="px-3 py-2 text-white">{t.team_name || t.team_id}</td>
+                      <td className="px-3 py-2 font-mono text-xs text-slate-300">{t.fqn}</td>
+                      <td className={`px-3 py-2 ${RESOURCE_STATUS[status] ?? 'text-slate-500'}`}>{status}</td>
+                    </tr>
+                  )
+                })}
+                {(data?.targets ?? []).length === 0 && (
+                  <tr>
+                    <td colSpan={3} className="px-3 py-4 text-center text-sm text-slate-400">
+                      No teams yet — create teams to plan resources.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => act('plan-bootstrap')}
+              disabled={!!busy}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:bg-white/[0.08] disabled:opacity-50"
+            >
+              <Boxes className="h-3.5 w-3.5" /> Dry-run plan
+            </button>
+            <button
+              onClick={() => act('bootstrap')}
+              disabled={!!busy || !data?.warehouse_configured}
+              title={data?.warehouse_configured ? undefined : 'Set QUEST_SQL_WAREHOUSE_ID to provision'}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-500/35 bg-emerald-500/15 px-3 py-1.5 text-xs font-medium text-emerald-200 transition hover:bg-emerald-500/25 disabled:opacity-50"
+            >
+              {busy === 'bootstrap' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Database className="h-3.5 w-3.5" />}
+              Bootstrap
+            </button>
+            <button
+              onClick={() => act('reset')}
+              disabled={!!busy || !data?.warehouse_configured}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-[#F43F5E]/35 bg-[#F43F5E]/10 px-3 py-1.5 text-xs font-medium text-[#FB7185] transition hover:bg-[#F43F5E]/20 disabled:opacity-50"
+            >
+              <Trash2 className="h-3.5 w-3.5" /> Reset
+            </button>
+          </div>
+
+          {msg && <p className="text-sm text-emerald-300">{msg}</p>}
+          {err && <p className="text-sm text-[#FB7185]">{err}</p>}
+
+          {plan && (
+            <div className="rounded-xl border border-white/10 bg-[#0B0F18] p-3">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+                {plan.action} plan — {plan.plan.length} statement(s)
+                {plan.blockers.length > 0 && <span className="ml-2 text-[#FB7185]">{plan.blockers.length} blocker(s)</span>}
+              </p>
+              <ul className="space-y-1">
+                {plan.plan.map((i, idx) => (
+                  <li key={idx} className={`font-mono text-[11px] ${i.within_namespace ? 'text-slate-300' : 'text-[#FB7185]'}`}>
+                    {i.within_namespace ? '· ' : '⚠ '}
+                    {i.sql}
+                    {i.error && <span className="text-[#FB7185]"> — {i.error}</span>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
     </QuestCard>
   )
 }

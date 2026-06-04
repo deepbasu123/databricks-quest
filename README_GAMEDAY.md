@@ -25,10 +25,11 @@ migrations are skipped. Enable GameDay explicitly with `--event-mode` (or set
 
 **Live status lives in one place:
 [`docs/STATUS.md`](docs/STATUS.md)** — the authoritative per-PR tracker (what's
-landed, what's deployable/testable, known gaps). In short: PR01–PR07 and the
+landed, what's deployable/testable, known gaps). In short: PR01–PR08 and the
 federation plumbing (PR13–PR16) have landed — schema, quest packs, the
 validation/scoring write path, event/team lifecycle, the player gameplay UI, the
-host console, and the live player leaderboard with hint-penalty scoring.
+host console, the live player leaderboard with hint-penalty scoring, and
+namespace-guarded team resource bootstrap/reset.
 
 > **What this means for testing:** the full loop is testable now — a host can
 > create an event, import a pack, run the lifecycle, players join and submit
@@ -400,6 +401,44 @@ play is closed).
 | Passing a task's validators | `validation` | `+points` (once per scope) |
 | Revealing a hint | `hint_penalty` | `−penalty` (once per team) |
 | Host manual adjustment | `manual_adjustment` | `±` (always lands) |
+
+---
+
+## Team resource bootstrap & reset (works today — PR08)
+
+The host can provision and tear down each team's Databricks resources from a
+**Resources** panel in the Host console — repeatably and safely.
+
+- **Per-team namespace** — each team gets `catalog.schema` computed by
+  `services/namespace.py`: `catalog` = the team's `team_catalog`, or the event's
+  `config_json.resource_namespace.catalog`, or the default `quest_<event-slug>`;
+  `schema` = the team's `team_schema`, or `<schema_prefix><team-name>`. These are
+  the same values the validators template (`${team_catalog}`/`${team_schema}`),
+  so provisioned resources line up with what tasks check.
+- **Dry-run first** — "Dry-run plan" (`POST .../resources/plan`) shows the exact
+  `CREATE CATALOG/SCHEMA` (+ pack seed SQL) statements, flagging anything
+  out-of-namespace, without running anything. No warehouse needed.
+- **Bootstrap** — `POST .../resources/bootstrap` runs the plan on the configured
+  SQL warehouse (`QUEST_SQL_WAREHOUSE_ID`), idempotently (`IF NOT EXISTS`), and
+  seeds sample data from the pack's optional `resources.seed_sql`.
+- **Reset** — `POST .../resources/reset` drops every team schema **only within
+  the event's namespace**. It requires `confirm: true` and **refuses the whole
+  plan** if any target is outside the namespace (a reserved catalog like
+  `main`/`system`, a bare catalog, a wildcard, or another event's schema) —
+  nothing is dropped. Every action (including a refusal) lands in
+  `event_audit_log`; resource health is tracked in `event_resources`.
+
+> Safety: the namespace guard is pure and unit-tested, and is the *sole*
+> authority on what is in-namespace — an executor bug cannot widen it. A reset
+> can never touch a schema this event did not compute.
+
+Add a pack seed section like this to auto-create warm-up data per team:
+
+```yaml
+resources:
+  seed_sql:
+    - "CREATE TABLE IF NOT EXISTS ${team_catalog}.${team_schema}.warmup (id INT)"
+```
 
 ---
 

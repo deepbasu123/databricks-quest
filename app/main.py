@@ -32,13 +32,17 @@ from repositories import (
     RosterImportError,
     AdminsRepository,
     AnnouncementsRepository,
+    ResourcesRepository,
 )
 from repositories.events import attempts_open, JOINABLE_STATUSES, ALLOWED_TRANSITIONS
 from services import quest_pack_loader
 from services import federation as fed
 from services import record_audit
+from services import namespace as ns
+from services import resource_service as rsvc
 from services.validation_engine import default_engine, aggregate_status
 from services.scoring_service import default_scoring_service
+from services.resource_service import default_resource_service
 from services.quest_pack_loader import QuestPackImportError
 
 logging.basicConfig(level=logging.INFO)
@@ -295,6 +299,7 @@ leaderboard_repo = LeaderboardRepository()
 scoring_repo = ScoringRepository()
 federation_repo = FederationRepository()
 announcements_repo = AnnouncementsRepository()
+resources_repo = ResourcesRepository()
 
 
 @app.on_event("startup")
@@ -1387,6 +1392,185 @@ async def host_adjust_score(
                  "adjustment_id": result["adjustment_id"]},
     )
     return result
+
+
+# ── Resource bootstrap & reset (PR08) ────────────────────────────────────────
+
+
+class ResourcePlanPayload(BaseModel):
+    action: str = "bootstrap"  # "bootstrap" | "reset"
+
+
+class ResourceResetPayload(BaseModel):
+    confirm: bool = False
+
+
+def _event_for_resources(event_id: str) -> Dict[str, Any]:
+    ev = events_repo.get_event(event_id)
+    if not ev:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "NOT_FOUND", "message": "Event not found."}},
+        )
+    return ev
+
+
+def _pack_resources(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Read the event pack version's optional ``resources`` section."""
+    pvid = ev.get("pack_version_id")
+    if not pvid:
+        return None
+    version = quest_packs_repo.get_version(pvid)
+    manifest = (version or {}).get("manifest_json") or {}
+    if isinstance(manifest, dict):
+        return manifest.get("resources")
+    return None
+
+
+def _build_resource_plan(ev: Dict[str, Any], action: str) -> List[Dict[str, Any]]:
+    teams = events_repo.list_teams(ev["event_id"])
+    if action == "reset":
+        return rsvc.build_reset_plan(ev, teams)
+    return rsvc.build_bootstrap_plan(ev, teams, _pack_resources(ev))
+
+
+@app.get("/api/host/events/{event_id}/resources")
+async def host_list_resources(event_id: str, user: str = Depends(require_host)):
+    """Resource health for an event: computed namespace, per-team targets, registry."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    ev = _event_for_resources(resolved_event_id)
+    teams = events_repo.list_teams(resolved_event_id)
+    try:
+        namespace = ns.event_namespace(ev)
+        targets = ns.team_targets(ev, teams)
+        namespace_error = None
+    except ns.NamespaceError as exc:
+        namespace, targets, namespace_error = None, [], str(exc)
+    return {
+        "namespace": namespace,
+        "namespace_error": namespace_error,
+        "targets": targets,
+        "resources": resources_repo.list_for_event(resolved_event_id),
+        "warehouse_configured": bool(os.getenv("QUEST_SQL_WAREHOUSE_ID", "").strip()),
+    }
+
+
+@app.post("/api/host/events/{event_id}/resources/plan")
+async def host_plan_resources(
+    event_id: str, body: ResourcePlanPayload, user: str = Depends(require_host)
+):
+    """Dry-run: build the bootstrap/reset plan and surface any namespace blockers.
+
+    No SQL runs. ``blockers`` lists statements that fall outside the event's
+    namespace — execution will refuse a plan with any blocker.
+    """
+    resolved_event_id = _resolve_event_or_404(event_id)
+    ev = _event_for_resources(resolved_event_id)
+    action = body.action if body.action in ("bootstrap", "reset") else "bootstrap"
+    try:
+        plan = _build_resource_plan(ev, action)
+    except ns.NamespaceError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": exc.code, "message": str(exc)}},
+        )
+    blockers = rsvc.plan_blockers(plan)
+    record_audit(
+        action="resources.plan", actor_user_id=user, event_id=resolved_event_id,
+        target_type="event", target_id=resolved_event_id,
+        payload={"action": action, "statements": len(plan), "blockers": len(blockers)},
+    )
+    return {
+        "action": action,
+        "plan": plan,
+        "blockers": blockers,
+        "warehouse_configured": bool(os.getenv("QUEST_SQL_WAREHOUSE_ID", "").strip()),
+    }
+
+
+def _resource_executor():
+    """Build the warehouse executor, surfacing a clean 503 if unavailable."""
+    if not os.getenv("QUEST_SQL_WAREHOUSE_ID", "").strip():
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "NO_WAREHOUSE",
+                              "message": "Set QUEST_SQL_WAREHOUSE_ID to provision resources."}},
+        )
+    from services.sql_runner import build_warehouse_executor
+
+    return build_warehouse_executor()
+
+
+@app.post("/api/host/events/{event_id}/resources/bootstrap")
+async def host_bootstrap_resources(
+    event_id: str, user: str = Depends(require_host)
+):
+    """Provision all team catalogs/schemas (and pack seed data) for an event."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    ev = _event_for_resources(resolved_event_id)
+    try:
+        plan = _build_resource_plan(ev, "bootstrap")
+    except ns.NamespaceError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"code": exc.code, "message": str(exc)}})
+
+    executor = _resource_executor()
+    result = default_resource_service.execute_plan(
+        ev, plan, executor, created_by=user
+    )
+    record_audit(
+        action="resources.bootstrap", actor_user_id=user, event_id=resolved_event_id,
+        target_type="event", target_id=resolved_event_id,
+        payload={"ok": result["ok"], "statements": len(plan),
+                 "blockers": len(result.get("blockers", []))},
+    )
+    return {"action": "bootstrap", **result}
+
+
+@app.post("/api/host/events/{event_id}/resources/reset")
+async def host_reset_resources(
+    event_id: str, body: ResourceResetPayload, user: str = Depends(require_host)
+):
+    """Drop all team schemas for an event — only within the event's namespace.
+
+    Requires ``confirm: true``. Every DROP target is re-validated against the
+    namespace; a target outside it blocks the whole plan (nothing is dropped).
+    """
+    resolved_event_id = _resolve_event_or_404(event_id)
+    ev = _event_for_resources(resolved_event_id)
+    if not body.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "CONFIRM_REQUIRED",
+                              "message": "Reset is destructive — resend with confirm=true."}},
+        )
+    try:
+        plan = _build_resource_plan(ev, "reset")
+    except ns.NamespaceError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"code": exc.code, "message": str(exc)}})
+
+    blockers = rsvc.plan_blockers(plan)
+    if blockers:
+        # Refuse before touching the warehouse — out-of-namespace target present.
+        record_audit(
+            action="resources.reset.refused", actor_user_id=user, event_id=resolved_event_id,
+            target_type="event", target_id=resolved_event_id,
+            payload={"blockers": [b.get("target") for b in blockers]},
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={"error": {"code": "OUTSIDE_NAMESPACE",
+                              "message": "Reset refused: a target is outside the event namespace.",
+                              "blockers": blockers}},
+        )
+
+    executor = _resource_executor()
+    result = default_resource_service.execute_plan(ev, plan, executor, created_by=user)
+    record_audit(
+        action="resources.reset", actor_user_id=user, event_id=resolved_event_id,
+        target_type="event", target_id=resolved_event_id,
+        payload={"ok": result["ok"], "dropped": len(plan)},
+    )
+    return {"action": "reset", **result}
 
 
 # ---------------------------------------------------------------------------

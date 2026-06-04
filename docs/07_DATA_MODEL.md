@@ -308,6 +308,34 @@ CREATE TABLE event_audit_log (
 );
 ```
 
+### event_resources (migration 005, PR08)
+
+Registry of the per-team Databricks resources an event has provisioned, for the
+host resource-health view. Operational state only — the authoritative safety
+guard is `services/namespace.py`, which refuses any target outside the event's
+computed namespace regardless of what is recorded here. A row is upserted on
+bootstrap (`active`/`failed`) and flipped to `removed` on reset.
+
+```sql
+CREATE TABLE event_resources (
+  resource_id   TEXT PRIMARY KEY,
+  event_id      TEXT NOT NULL REFERENCES events(event_id),
+  team_id       TEXT REFERENCES teams(team_id),
+  resource_type TEXT NOT NULL,            -- 'catalog' | 'schema'
+  fqn           TEXT NOT NULL,            -- catalog.schema target
+  status        TEXT NOT NULL DEFAULT 'pending', -- pending|active|failed|removed
+  message       TEXT,
+  created_by    TEXT,
+  created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (event_id, fqn)
+);
+```
+
+The per-team target FQN is `team_catalog`/`team_schema` if set on the team, else
+`quest_<event-slug>.<schema_prefix><team-name>`. These are the same values that
+fill the `${team_catalog}`/`${team_schema}` validator slots.
+
 ## Derived views
 
 ### team_scores
