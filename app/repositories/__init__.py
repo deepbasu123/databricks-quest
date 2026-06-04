@@ -18,6 +18,7 @@ from .federation import FederationRepository, RosterImportError
 from .admins import AdminsRepository
 from .announcements import AnnouncementsRepository
 from .resources import ResourcesRepository
+from .reporting import ReportingRepository
 
 __all__ = [
     "EventsRepository",
@@ -31,4 +32,5 @@ __all__ = [
     "AdminsRepository",
     "AnnouncementsRepository",
     "ResourcesRepository",
+    "ReportingRepository",
 ]

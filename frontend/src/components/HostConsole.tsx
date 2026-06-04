@@ -29,6 +29,7 @@ import { useApi } from '../lib/api'
 import { QuestCard } from './quest/QuestCard'
 import { EmptyState, ErrorState, Skeleton } from './quest/States'
 import { ValidationStatus } from './EventPlay'
+import ReportPanel from './ReportPanel'
 
 // Map a target lifecycle status to the host verb + button presentation.
 const TRANSITIONS: Record<string, { verb: string; label: string; Icon: typeof Play; cls: string }> = {
@@ -67,6 +68,7 @@ export default function HostConsole({ eventRef }: { eventRef: string }) {
       </div>
       <AnnouncementComposer eventRef={eventRef} overview={data} onPosted={reload} />
       <ResourcesPanel eventRef={eventRef} />
+      <ReportPanel eventRef={eventRef} />
       <AttemptsInspector eventRef={eventRef} />
       <PackImporter />
     </div>

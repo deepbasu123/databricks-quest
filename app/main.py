@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Optional
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel
 
@@ -34,6 +34,7 @@ from repositories import (
     AdminsRepository,
     AnnouncementsRepository,
     ResourcesRepository,
+    ReportingRepository,
 )
 from repositories.events import attempts_open, JOINABLE_STATUSES, ALLOWED_TRANSITIONS
 from services import quest_pack_loader
@@ -42,6 +43,7 @@ from services import record_audit
 from services import namespace as ns
 from services import resource_service as rsvc
 from services import observability as obs
+from services import report_service as report_svc
 from services.validation_engine import default_engine, aggregate_status
 from services.scoring_service import default_scoring_service
 from services.resource_service import default_resource_service
@@ -370,6 +372,7 @@ scoring_repo = ScoringRepository()
 federation_repo = FederationRepository()
 announcements_repo = AnnouncementsRepository()
 resources_repo = ResourcesRepository()
+reporting_repo = ReportingRepository()
 
 
 @app.on_event("startup")
@@ -1486,6 +1489,84 @@ async def host_adjust_score(
                  "adjustment_id": result["adjustment_id"]},
     )
     return result
+
+
+# ── Event report / field reporting (PR11) ────────────────────────────────────
+
+
+def _assemble_event_report(event_id: str) -> Dict[str, Any]:
+    """Gather every report input from the repos and build the structured report.
+
+    All repo calls are read-only and individually degrade to empty results, so a
+    partially-available Lakebase still yields a (smaller) report rather than a 500.
+    """
+    ev = events_repo.get_event(event_id)
+    if not ev:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "NOT_FOUND", "message": "Event not found."}},
+        )
+    pack_version_id = ev.get("pack_version_id")
+    return report_svc.build_report(
+        event=ev,
+        teams=events_repo.list_teams_with_counts(event_id),
+        leaderboard=leaderboard_repo.get_team_leaderboard(event_id),
+        task_catalog=reporting_repo.task_catalog(pack_version_id) if pack_version_id else [],
+        completion_pairs=reporting_repo.team_task_completion(event_id),
+        failures=reporting_repo.failure_summary(event_id),
+        hint_usage=reporting_repo.hint_usage(event_id),
+        first_solves=reporting_repo.first_solves(event_id),
+        status_counts=attempts_repo.attempt_status_counts(event_id),
+        counts=events_repo.event_counts(event_id, pack_version_id),
+    )
+
+
+@app.get("/api/host/events/{event_id}/report")
+async def host_event_report(event_id: str, user: str = Depends(require_host)):
+    """Structured post-event report (JSON): summary, leaderboard, completion
+    matrix, blockers, hint usage, champions, and recommended follow-ups."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    return _assemble_event_report(resolved_event_id)
+
+
+@app.get("/api/host/events/{event_id}/export")
+async def host_event_report_export(
+    event_id: str, format: str = "json", user: str = Depends(require_host)
+):
+    """Export the event report as JSON, CSV, or Markdown for the field/account team."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    fmt = (format or "json").strip().lower()
+    if fmt not in ("json", "csv", "markdown", "md"):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "BAD_FORMAT", "message": "format must be json, csv, or markdown."}},
+        )
+    report = _assemble_event_report(resolved_event_id)
+    slug = report["summary"].get("slug") or resolved_event_id
+    record_audit(
+        action="report.export",
+        actor_user_id=user,
+        event_id=resolved_event_id,
+        target_type="event",
+        target_id=resolved_event_id,
+        payload={"format": fmt},
+    )
+    if fmt == "json":
+        return Response(
+            content=report_svc.render_json(report),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{slug}-report.json"'},
+        )
+    if fmt == "csv":
+        return Response(
+            content=report_svc.render_csv(report),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{slug}-report.csv"'},
+        )
+    return PlainTextResponse(
+        content=report_svc.render_markdown(report),
+        headers={"Content-Disposition": f'attachment; filename="{slug}-report.md"'},
+    )
 
 
 # ── Resource bootstrap & reset (PR08) ────────────────────────────────────────

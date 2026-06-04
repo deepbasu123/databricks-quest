@@ -5,7 +5,7 @@ lands. Other docs (the PR plan, the GameDay README, per-doc implementation
 notes) should point here rather than restating overall status.
 
 - **Last updated:** 2026-06-03
-- **Active branch / PR:** `feature/gameday-pr10-security-observability` (stacked on PR09)
+- **Active branch / PR:** `feature/gameday-pr11-reporting` (stacked on PR10)
 - **Plan of record:** [`13_PR_ALIGNED_SPRINT_PLAN.md`](13_PR_ALIGNED_SPRINT_PLAN.md)
 
 Legend: ✅ landed · 🟡 in progress · ⏳ planned (not started) · ⛔ blocked
@@ -17,7 +17,7 @@ Legend: ✅ landed · 🟡 in progress · ⏳ planned (not started) · ⛔ block
 | Mode | Status | Notes |
 |---|---|---|
 | **Adoption Mode** | ✅ live | System-table scoring, missions, leaderboard, badges, admin. Unchanged. **The default** — Event Mode must be explicitly enabled. |
-| **Event Mode (GameDay)** | 🟡 in progress (opt-in) | Off by default; enable with `--event-mode` / `QUEST_EVENT_MODE=on` (implied by `master`/`child` roles). When off, GameDay APIs 404, Event UI is hidden, and GameDay migrations are skipped. Schema, quest packs, validation/scoring write path (PR03), event/team lifecycle + join + attempt gating (PR04), and federation plumbing landed. End-to-end host→play→score→leaderboard works via API; player gameplay UI (PR05), host console UI (PR06), the live player leaderboard + hint-penalty scoring (PR07), namespace-guarded resource bootstrap/reset (PR08), two shipped sample quest packs (PR09), and security/observability hardening — request ids, structured logs, expanded health, permission-model docs (PR10) — have landed. |
+| **Event Mode (GameDay)** | 🟡 in progress (opt-in) | Off by default; enable with `--event-mode` / `QUEST_EVENT_MODE=on` (implied by `master`/`child` roles). When off, GameDay APIs 404, Event UI is hidden, and GameDay migrations are skipped. Schema, quest packs, validation/scoring write path (PR03), event/team lifecycle + join + attempt gating (PR04), and federation plumbing landed. End-to-end host→play→score→leaderboard works via API; player gameplay UI (PR05), host console UI (PR06), the live player leaderboard + hint-penalty scoring (PR07), namespace-guarded resource bootstrap/reset (PR08), two shipped sample quest packs (PR09), security/observability hardening — request ids, structured logs, expanded health, permission-model docs (PR10) — and the post-event report with JSON/CSV/Markdown export for account follow-up (PR11) — have landed. |
 
 ---
 
@@ -35,7 +35,7 @@ Legend: ✅ landed · 🟡 in progress · ⏳ planned (not started) · ⛔ block
 | PR08 | Resource bootstrap & reset (namespace guard `services/namespace.py` as the sole authority; per-team catalog/schema targets + pack seed SQL; dry-run plan endpoint; bootstrap/reset via warehouse executor; reset refuses out-of-namespace targets; `event_resources` health table + host UI panel; migration 005) | ✅ landed | `feature/gameday-pr08-resource-bootstrap` |
 | PR09 | Sample GameDay packs — `ai_bi_gameday.yml` + `lakehouse_foundations.yml` in `samples/packs/` (3 quests / 6 tasks each; SQL + databricks_sdk + manual validators; seed_sql for PR08 bootstrap; lint clean with zero warnings; run + customize guide) | ✅ landed | `feature/gameday-pr09-sample-packs` |
 | PR10 | Security, observability, audit — request-id correlation (`X-Request-ID`) + standard error envelope; structured validation/scoring logs (`services/observability.py`); expanded `/api/health` subsystem checks (lakebase latency, migrations, validators, scoring, warehouse); permission-model docs; SQL-safety & role/scope tests | ✅ landed | `feature/gameday-pr10-security-observability` |
-| PR11 | Field reporting & hunter signaling (export, sales signal) | ⏳ planned | — |
+| PR11 | Field reporting & hunter signaling — post-event report service + `report_service.py` (pure builder + JSON/CSV/Markdown renderers); host endpoints `/host/events/{id}/report` (structured) and `/export?format=json\|csv\|markdown` (downloadable, audited); report covers summary, leaderboard, team×task completion matrix, validation failures, hint usage, blockers, champions/fastest team, and heuristic account follow-ups; CSV guarded against formula injection; host Report UI panel | ✅ landed | `feature/gameday-pr11-reporting` |
 | PR12 | Hardening, release, docs | ⏳ planned | — |
 
 ### Multi-workspace federation (ADR_006)
