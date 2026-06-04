@@ -1,0 +1,22 @@
+"""Data-access repositories for GameDay Event Mode.
+
+Each repository owns reads/writes for one slice of the domain and is the only
+place that should contain SQL for that slice. Read paths degrade gracefully
+(return empty/None) when Lakebase is unavailable, mirroring adoption mode.
+
+These are foundational stubs introduced in PR01. Mutation paths that require
+auditing, transactions, or validation are intentionally deferred to later PRs
+and raise ``NotImplementedError`` until then.
+"""
+
+from .events import EventsRepository
+from .quest_packs import QuestPacksRepository
+from .attempts import AttemptsRepository
+from .leaderboard import LeaderboardRepository
+
+__all__ = [
+    "EventsRepository",
+    "QuestPacksRepository",
+    "AttemptsRepository",
+    "LeaderboardRepository",
+]
