@@ -297,6 +297,34 @@ and the lobby at `GET /api/events/{id}`. Every mutation writes an
 
 ---
 
+## Player experience (works today — PR05)
+
+When Event Mode is on, the sidebar shows an **Event** tab (the player UI). It
+sits on the read endpoints below and the PR03 attempt endpoint — no API calls
+needed by hand:
+
+- **Lobby** — pick an active event (`GET /api/events`), see its teams and
+  counts (`GET /api/events/{id}`), set a display name, and join a team
+  (`POST /api/events/{id}/join`).
+- **Quests** — the event pack's quests with your team's progress bar
+  (`GET /api/events/{id}/quests`).
+- **Quest runner** — open a quest (`GET /api/events/{id}/quests/{quest_id}`)
+  to read the narrative, work each task, reveal hints, and submit a JSON
+  `submission`. The submit button calls
+  `POST /api/events/{id}/tasks/{task_id}/attempts` and shows a live
+  pass/fail/manual/error badge plus the player-safe per-validator messages and
+  points awarded. Submissions are disabled unless the event is `active` and you
+  have joined.
+- **Team dashboard** — score, rank, members, task progress, and recent scoring
+  (`GET /api/events/{id}/team`).
+
+Role behaviour: `master` deployments show the **Host Console** instead of the
+player UI; `child` deployments get the player UI plus a **Standings** tab with
+the event-wide federated leaderboard. A `child` app is pinned to its configured
+event; a `standalone` app lets the player choose from the event list.
+
+---
+
 ## Federation operations (master host)
 
 Once children are deployed and an event exists, the host works from the master:

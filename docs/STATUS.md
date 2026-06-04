@@ -29,7 +29,7 @@ Legend: ✅ landed · 🟡 in progress · ⏳ planned (not started) · ⛔ block
 | PR02 | Configurable quest packs (manifest, loader, linter, import/list APIs, built-in pack) | ✅ landed | `2a959ab` |
 | PR03 | Validation engine core (validator abstraction, SQL + manual validators, attempt submission, scoring idempotency) | ✅ landed | `feature/gameday-pr03-validation-engine` |
 | PR04 | Event & team management (create events/teams/participants, join flow, lifecycle, attempt gating, single-team-per-event invariant, DB-backed admin allowlist shared across master/child with in-app admin management) | ✅ landed | `feature/gameday-pr04-events-teams` |
-| PR05 | Player gameplay experience (lobby, team dashboard, quest runner, submit UI) | ⏳ planned | — |
+| PR05 | Player gameplay experience (event lobby, join/team picker, quests list, quest runner with submit + validation status + hints, team dashboard; player read endpoints `/team`, `/quests`, `/quests/{id}`) | ✅ landed | `feature/gameday-pr05-player-ux` |
 | PR06 | Admin host console (start/pause/freeze/complete, validation monitor, announcements) | ⏳ planned | — |
 | PR07 | Live scoring & leaderboard (real-time leaderboard, freeze semantics) | ⏳ planned | — |
 | PR08 | Resource bootstrap & reset (team schema/data, dry-run, scoped cleanup) | ⏳ planned | — |

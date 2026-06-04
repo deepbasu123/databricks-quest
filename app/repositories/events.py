@@ -177,6 +177,24 @@ class EventsRepository:
             logger.warning("get_team_for_user failed: %s", exc)
             return None
 
+    def list_team_members(self, team_id: str) -> List[Dict[str, Any]]:
+        """Members of a team (participant + display name), join order."""
+        try:
+            return db.execute_query(
+                """
+                SELECT p.participant_id, p.user_id, p.display_name, p.role,
+                       tm.joined_at
+                FROM team_members tm
+                JOIN participants p ON p.participant_id = tm.participant_id
+                WHERE tm.team_id = %s
+                ORDER BY tm.joined_at ASC
+                """,
+                (team_id,),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("list_team_members failed: %s", exc)
+            return []
+
     def get_participant(self, event_id: str, user_id: str) -> Optional[Dict[str, Any]]:
         try:
             rows = db.execute_query(
