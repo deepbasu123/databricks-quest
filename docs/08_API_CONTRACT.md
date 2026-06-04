@@ -26,6 +26,55 @@ The adoption endpoints (`/api/profile`, `/api/missions`, `/api/leaderboard`,
 `/api/admin/*`, `/api/health`, `/api/notifications`) are always available.
 `GET /api/health` reports `"event_mode": true|false` so clients can gate UI.
 
+### Admin page gating (DB-backed, shared)
+
+`/api/admin/*` is gated by an admin allowlist independent of Event Mode. The
+durable source of truth is the Lakebase table `quest_admins`, which is **shared
+across apps** — in federation the master owns it and child apps read/write it
+through the shared event-writer role, so an admin is automatically an admin on
+the standalone GameDay app, the master, and every child workspace.
+
+The effective admin set is the **union** of:
+
+- `quest_admins` (DB, source of truth), and
+- `QUEST_ADMIN_ALLOWLIST` (env bootstrap/fallback — set by
+  `deploy.sh --admins a@x.com,b@y.com`, defaulting to the deploying user except
+  for `--role child`, which inherits admins from the master).
+
+On startup the env allowlist is seeded into `quest_admins` (standalone/master
+only). Gating behaviour:
+
+- When the effective set is **non-empty**, users not in it get
+  `403 { "error": { "code": "FORBIDDEN", "message": "Admin access required." } }`.
+- When it is **empty** (no env allowlist and an empty/unreachable table, e.g.
+  local dev), the endpoints stay open (prior behaviour).
+- If the DB read fails, gating falls back to the env allowlist so the deployer
+  keeps access.
+
+`GET /api/profile` returns `"is_admin": true|false` for the caller so the
+frontend can hide the Admin nav (defence-in-depth; the 403 gate is the real
+boundary).
+
+#### Admin management endpoints (admin-only, always available)
+
+```http
+GET    /api/admin/admins
+POST   /api/admin/admins           { "email": "new@corp.com" }
+DELETE /api/admin/admins/{email}
+```
+
+- `GET` returns `{ admins: [{ email, added_by, source, added_at }], caller,
+  caller_is_admin }`. `source` is `manual` (added in-app), `seed` (from the
+  deploy allowlist), or `env` (deploy-config-only, not in the DB).
+- `POST` adds an admin (admins can grant admin). `400 INVALID_EMAIL` on a
+  malformed address; `503 ADMIN_WRITE_FAILED` if Lakebase isn't writable from
+  this app.
+- `DELETE` removes a DB admin. Guards: `404 NOT_FOUND` if not an admin,
+  `409 LAST_ADMIN` to prevent lockout, `409 ENV_ADMIN` for deploy-config admins
+  (remove those via the deployment's `--admins`), and `403 REMOVE_NOT_PERMITTED`
+  from a child app (the writer role has no DELETE — remove from the
+  master/standalone app).
+
 ## Existing endpoints to preserve
 
 ```http
@@ -308,6 +357,55 @@ GET /api/host/quest-packs
 ```http
 GET /api/host/quest-packs/{pack_id}
 ```
+
+### Event & team lifecycle — PR04 implementation status
+
+Implemented in PR04. All are Event-Mode-gated (404 when Event Mode is off);
+host endpoints additionally enforce `QUEST_HOST_ALLOWLIST` via `require_host`.
+
+Player endpoints:
+
+- `GET /api/events` → `{ events: [{ event_id, slug, title, status, team_count, … }] }`
+  — events visible to players (`ready`/`active`/`paused`/`frozen`).
+- `GET /api/events/{event_id}` (id or slug) → lobby:
+  `{ event, joinable, attempts_open, is_host, teams[], counts, you }`.
+- `POST /api/events/{event_id}/join` body `{ display_name?, team_id?, team_name? }`
+  → `{ joined, participant_id, team_id, team_name }`. Idempotent; `409 NOT_JOINABLE`
+  unless the event is `ready`/`active`/`paused`. A participant is on **exactly one
+  team per event** — naming a different team reassigns (the prior membership is
+  removed), keeping scoring unambiguous.
+
+Host endpoints:
+
+- `POST /api/host/events` body `{ title, pack_version_id, slug?, description?,
+  timezone? }` → `{ event }`. Creator is recorded as an `owner` host. `400` for an
+  unknown `pack_version_id`; `409 SLUG_EXISTS` for a duplicate slug.
+- `POST /api/host/events/{event_id}/teams` body `{ name, display_name?, color?,
+  team_catalog?, team_schema? }` → `{ team }`. `409 TEAM_EXISTS` on duplicate name.
+- `POST /api/host/events/{event_id}/participants/import` body
+  `{ participants: [{ email|user_id, display_name?, team_name? }] }` →
+  `{ rows, participants_created, teams_created, assignments }`. Idempotent; teams
+  named in rows are created on demand.
+- `POST /api/host/events/{event_id}/teams/{team_id}/members` body
+  `{ user_id? | participant_id?, display_name? }` →
+  `{ assigned, team_id, participant_id }`. Assigns a participant to a team
+  (single team per event; reassigns if already on another). A `user_id` that
+  isn't registered yet is registered on demand. `404 TEAM_NOT_FOUND` /
+  `PARTICIPANT_NOT_FOUND`, `400 INVALID_ASSIGN` if neither id is given.
+- Lifecycle: `POST /api/host/events/{event_id}/{start|pause|freeze|complete|ready|archive}`
+  → `{ event }`. Enforces the state machine; `409 INVALID_TRANSITION` on an
+  illegal move.
+
+**State machine.** `draft → ready|active|archived`; `ready → active|archived`;
+`active → paused|frozen|completed`; `paused → active|frozen|completed`;
+`frozen → active|completed`; `completed → archived`. `start`→`active` stamps
+`starts_at`; `complete` stamps `ends_at`; `freeze` stamps `scoring_frozen_at`;
+unfreeze (`frozen→active`) clears it.
+
+**Attempt gating.** `POST /api/events/{event_id}/tasks/{task_id}/attempts` only
+accepts submissions while the event is `active`; any other status returns
+`409 EVENT_NOT_ACTIVE` with a player-safe message. Every mutation above writes an
+`event_audit_log` row.
 
 ### Quest pack endpoints — PR02 implementation status
 

@@ -99,17 +99,21 @@ export default function App() {
     fetchFederation()
   }, [fetchProfile, fetchNotifications, fetchFederation])
 
+  // Admin page is gated server-side (QUEST_ADMIN_ALLOWLIST); hide the nav item
+  // unless the profile says this user is an admin. Admin is the last base item,
+  // so dropping it keeps the dashboard/missions indices stable below.
+  const baseNav = BASE_NAV_ITEMS.filter((i) => i.id !== 'admin' || profile?.is_admin)
   // Event Mode is opt-in and server-driven: the Event nav only appears when the
   // backend reports it on (federation/status 404s otherwise, leaving this null).
   const isEventMode = !!federation && federation.event_mode !== false
   const navItems: NavItem[] = isEventMode
     ? [
-        BASE_NAV_ITEMS[0],
-        ...(federation?.role === 'child' ? [BASE_NAV_ITEMS[1]] : []),
+        baseNav[0],
+        ...(federation?.role === 'child' ? [baseNav[1]] : []),
         { id: 'federation' as NavPage, label: federation?.role === 'master' ? 'Host Console' : 'Event', icon: Network },
-        ...BASE_NAV_ITEMS.slice(2),
+        ...baseNav.slice(2),
       ]
-    : BASE_NAV_ITEMS
+    : baseNav
 
   const activeMeta =
     page === 'federation' && federation?.role === 'master' ? masterPageMeta : pageTitles[page]
@@ -240,7 +244,7 @@ export default function App() {
             {page === 'leaderboard' && <Leaderboard profile={profile} />}
             {page === 'badges' && <BadgeVault profile={profile} />}
             {page === 'rewards' && <Rewards profile={profile} />}
-            {page === 'admin' && <AdminPanel />}
+            {page === 'admin' && profile?.is_admin && <AdminPanel />}
             {page === 'federation' && federation && <Federation status={federation} />}
           </div>
         </main>

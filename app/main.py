@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 from datetime import datetime, date
 from typing import List, Dict, Any, Optional
@@ -23,11 +24,14 @@ import config
 from repositories import (
     QuestPacksRepository,
     EventsRepository,
+    EventStateError,
     AttemptsRepository,
     LeaderboardRepository,
     FederationRepository,
     RosterImportError,
+    AdminsRepository,
 )
+from repositories.events import attempts_open, JOINABLE_STATUSES
 from services import quest_pack_loader
 from services import federation as fed
 from services import record_audit
@@ -156,6 +160,74 @@ QUEST_HOST_ALLOWLIST = [
     e.strip().lower() for e in os.getenv("QUEST_HOST_ALLOWLIST", "").split(",") if e.strip()
 ]
 
+# Env admin allowlist — the *bootstrap/fallback* for the Admin page
+# (/api/admin/*). Set from deploy.sh's --admins flag (comma-separated emails),
+# defaulting to the deploying user. The durable source of truth is the
+# Lakebase `quest_admins` table (shared across master/child); this env list is
+# seeded into it on startup and is always unioned in as a fallback so the
+# deployer keeps access even if the table is empty/unreachable. When BOTH are
+# empty (e.g. local dev) the endpoints stay open, matching prior behaviour.
+QUEST_ADMIN_ALLOWLIST = [
+    e.strip().lower() for e in os.getenv("QUEST_ADMIN_ALLOWLIST", "").split(",") if e.strip()
+]
+
+admins_repo = AdminsRepository()
+
+# Small TTL cache over the DB admin set so we don't query Lakebase on every
+# request (profile + each admin call). Invalidated locally on add/remove; other
+# app instances pick up changes within the TTL.
+_ADMIN_CACHE: Dict[str, Any] = {"emails": set(), "expiry": 0.0}
+_ADMIN_CACHE_TTL = 30.0
+
+
+def _invalidate_admin_cache() -> None:
+    _ADMIN_CACHE["expiry"] = 0.0
+
+
+def _db_admin_emails() -> set:
+    """DB admin emails (cached). Returns empty set if the table is unreachable."""
+    now = time.time()
+    if _ADMIN_CACHE["expiry"] > now:
+        return _ADMIN_CACHE["emails"]
+    try:
+        emails = set(admins_repo.list_emails())
+        _ADMIN_CACHE["emails"] = emails
+        _ADMIN_CACHE["expiry"] = now + _ADMIN_CACHE_TTL
+        return emails
+    except Exception as exc:  # noqa: BLE001 - fall back to env allowlist
+        logger.warning("admin list read failed; using env allowlist only: %s", exc)
+        _ADMIN_CACHE["emails"] = set()
+        _ADMIN_CACHE["expiry"] = now + 5.0  # brief negative cache
+        return set()
+
+
+def admin_emails() -> set:
+    """Effective admin set: env allowlist ∪ DB allowlist (both lowercased)."""
+    return set(QUEST_ADMIN_ALLOWLIST) | _db_admin_emails()
+
+
+def is_admin_user(user: str) -> bool:
+    """True if the user may see the Admin page.
+
+    Open only when no admin is configured anywhere (no env allowlist and an
+    empty/unreachable DB table) — preserving local-dev/legacy parity.
+    """
+    effective = admin_emails()
+    if not effective:
+        return True
+    return (user or "").lower() in effective
+
+
+def require_admin(request: Request) -> str:
+    """FastAPI dependency: enforce the admin allowlist on /api/admin/* endpoints."""
+    user = get_user_email(request)
+    if not is_admin_user(user):
+        raise HTTPException(
+            status_code=403,
+            detail={"error": {"code": "FORBIDDEN", "message": "Admin access required."}},
+        )
+    return user
+
 
 def _ensure_event_mode() -> None:
     """Gate GameDay/Event Mode surfaces. 404 when Event Mode is not enabled.
@@ -232,6 +304,29 @@ async def _federation_startup() -> None:
         logger.warning("federation startup check-in skipped: %s", exc)
 
 
+@app.on_event("startup")
+async def _admin_seed_startup() -> None:
+    """Seed the shared quest_admins table from the env allowlist.
+
+    Runs for standalone/master (which own the table and connect with DDL
+    rights); child apps inherit the shared admin list from the master DB, so
+    they neither seed nor get a default allowlist. Best-effort — never blocks
+    startup and a read-only role simply no-ops.
+    """
+    if config.QUEST_ROLE == "child":
+        return
+    if not QUEST_ADMIN_ALLOWLIST:
+        return
+    try:
+        admins_repo.ensure_schema()
+        added = admins_repo.seed(QUEST_ADMIN_ALLOWLIST)
+        if added:
+            logger.info("seeded %d admin(s) from QUEST_ADMIN_ALLOWLIST", added)
+        _invalidate_admin_cache()
+    except Exception as exc:  # noqa: BLE001 - never block startup
+        logger.warning("admin seed skipped: %s", exc)
+
+
 # ---------------------------------------------------------------------------
 # API Endpoints
 # ---------------------------------------------------------------------------
@@ -274,6 +369,7 @@ async def get_profile(request: Request):
                 "SELECT * FROM badges WHERE user_id = %s ORDER BY earned_at DESC", (user,)
             )
             profile["badges"] = badges
+            profile["is_admin"] = is_admin_user(user)
             return profile
         return _empty_profile(user)
     except Exception as e:
@@ -296,6 +392,7 @@ def _empty_profile(user: str) -> dict:
         "missions_completed": 0,
         "distinct_products_used": 0,
         "badges": [],
+        "is_admin": is_admin_user(user),
     }
 
 
@@ -366,7 +463,7 @@ async def get_notifications(request: Request):
 
 
 @app.get("/api/admin/stats")
-async def get_admin_stats():
+async def get_admin_stats(user: str = Depends(require_admin)):
     try:
         user_count = execute_query("SELECT COUNT(DISTINCT user_id) AS cnt FROM user_profile_snapshot")
         mission_count = execute_query("SELECT COUNT(*) AS cnt FROM mission_completions")
@@ -409,7 +506,7 @@ async def get_admin_stats():
 
 
 @app.get("/api/admin/pipeline-status")
-async def get_pipeline_status():
+async def get_pipeline_status(user: str = Depends(require_admin)):
     try:
         latest = execute_query("SELECT MAX(updated_at) AS last_run FROM user_profile_snapshot")
         last_run = latest[0]["last_run"] if latest and latest[0].get("last_run") else None
@@ -421,6 +518,101 @@ async def get_pipeline_status():
         }
     except Exception:
         return {"status": "not_initialized", "last_run": None, "total_events_scored": 0}
+
+
+# ---------------------------------------------------------------------------
+# Admin allowlist management — DB-backed, shared across master/child apps.
+# Always available (not Event-Mode gated), admin-only. The env allowlist is the
+# bootstrap/fallback; quest_admins in Lakebase is the durable source of truth.
+# ---------------------------------------------------------------------------
+
+class AddAdminPayload(BaseModel):
+    email: str
+
+
+@app.get("/api/admin/admins")
+async def list_admins(user: str = Depends(require_admin)):
+    """List admins: DB rows plus any env-only (seed/fallback) entries."""
+    try:
+        rows = admins_repo.list_admins()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("list_admins failed: %s", exc)
+        rows = []
+    db_emails = {(r.get("email") or "").lower() for r in rows}
+    env_only = [
+        {"email": e, "added_by": None, "source": "env", "added_at": None}
+        for e in QUEST_ADMIN_ALLOWLIST
+        if e not in db_emails
+    ]
+    return {"admins": rows + env_only, "caller": user, "caller_is_admin": True}
+
+
+@app.post("/api/admin/admins")
+async def add_admin(payload: AddAdminPayload, user: str = Depends(require_admin)):
+    """Add an admin to the shared allowlist. Admins can grant admin."""
+    email = (payload.email or "").strip().lower()
+    if "@" not in email or email.startswith("@") or email.endswith("@"):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "INVALID_EMAIL", "message": "A valid email is required."}},
+        )
+    try:
+        admins_repo.ensure_schema()
+        created = bool(admins_repo.add(email, added_by=user))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("add_admin failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "ADMIN_WRITE_FAILED",
+                              "message": "Could not persist admin (is Lakebase writable from this app?)."}},
+        )
+    _invalidate_admin_cache()
+    return {"email": email, "added": created, "added_by": user}
+
+
+@app.delete("/api/admin/admins/{email}")
+async def remove_admin(email: str, user: str = Depends(require_admin)):
+    """Remove an admin. Refuses to remove the last DB admin (lockout guard)."""
+    target = (email or "").strip().lower()
+    try:
+        current = {(r.get("email") or "").lower() for r in admins_repo.list_admins()}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("remove_admin read failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "ADMIN_READ_FAILED",
+                              "message": "Could not read the admin list."}},
+        )
+    if target not in current:
+        # Env-only admins live in deploy config, not the DB — can't remove here.
+        if target in set(QUEST_ADMIN_ALLOWLIST):
+            raise HTTPException(
+                status_code=409,
+                detail={"error": {"code": "ENV_ADMIN",
+                                  "message": "This admin is set via deploy config (QUEST_ADMIN_ALLOWLIST); "
+                                             "remove it from the deployment's --admins instead."}},
+            )
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "NOT_FOUND", "message": "Not an admin."}},
+        )
+    if len(current) <= 1:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": {"code": "LAST_ADMIN", "message": "Cannot remove the last admin."}},
+        )
+    try:
+        admins_repo.remove(target)
+    except Exception as exc:  # noqa: BLE001 - child role has no DELETE on quest_admins
+        logger.warning("remove_admin write failed: %s", exc)
+        raise HTTPException(
+            status_code=403,
+            detail={"error": {"code": "REMOVE_NOT_PERMITTED",
+                              "message": "Removing admins isn't permitted from this app. "
+                                         "Use the master/host workspace app to remove admins."}},
+        )
+    _invalidate_admin_cache()
+    return {"email": target, "removed": True}
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +660,346 @@ async def host_get_quest_pack(pack_id: str, user: str = Depends(require_host)):
             detail={"error": {"code": "NOT_FOUND", "message": "Quest pack not found."}},
         )
     return detail
+
+
+# ---------------------------------------------------------------------------
+# Events, teams, participants — lifecycle (PR04)
+# ---------------------------------------------------------------------------
+# Player endpoints (list/lobby/join) are Event-Mode-gated and open to any
+# authenticated user. Host endpoints (create event/teams, import participants,
+# lifecycle transitions) go through require_host. Every mutation writes an
+# audit row. The event status state machine lives in repositories.events.
+
+
+class CreateEventPayload(BaseModel):
+    title: str
+    pack_version_id: str
+    slug: Optional[str] = None
+    description: Optional[str] = None
+    timezone: str = "UTC"
+    mode: str = "gameday"
+
+
+class CreateTeamPayload(BaseModel):
+    name: str
+    display_name: Optional[str] = None
+    color: Optional[str] = None
+    team_catalog: Optional[str] = None
+    team_schema: Optional[str] = None
+
+
+class JoinEventPayload(BaseModel):
+    display_name: Optional[str] = None
+    team_id: Optional[str] = None
+    team_name: Optional[str] = None
+
+
+class ParticipantImportPayload(BaseModel):
+    participants: List[Dict[str, Any]]
+
+
+def _slugify(text: str) -> str:
+    import re
+
+    s = re.sub(r"[^a-z0-9]+", "-", (text or "").strip().lower()).strip("-")
+    return s or f"event-{uuid_hex8()}"
+
+
+def uuid_hex8() -> str:
+    import uuid as _uuid
+
+    return _uuid.uuid4().hex[:8]
+
+
+def _event_state_error(exc: EventStateError) -> HTTPException:
+    return HTTPException(
+        status_code=exc.status,
+        detail={"error": {"code": exc.code, "message": str(exc)}},
+    )
+
+
+def _event_public(ev: Dict[str, Any]) -> Dict[str, Any]:
+    """Trim an event row to the fields players/hosts need."""
+    keys = (
+        "event_id", "slug", "title", "description", "status", "mode",
+        "starts_at", "ends_at", "timezone", "scoring_frozen_at",
+        "pack_version_id", "created_by", "created_at",
+    )
+    return {k: ev.get(k) for k in keys}
+
+
+@app.get("/api/events")
+async def list_events(request: Request, _: None = Depends(require_event_mode)):
+    """Player-facing list of joinable/visible events with team counts."""
+    return {"events": events_repo.list_player_events()}
+
+
+@app.get("/api/events/{event_id}")
+async def get_event_lobby(event_id: str, request: Request, _: None = Depends(require_event_mode)):
+    """Event lobby: event header, teams (with counts), your participant/team, counts."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    ev = events_repo.get_event(resolved_event_id)
+    user = get_user_email(request)
+
+    participant = events_repo.get_participant(resolved_event_id, user)
+    team = events_repo.get_team_for_user(resolved_event_id, user)
+    return {
+        "event": _event_public(ev),
+        "joinable": ev["status"] in JOINABLE_STATUSES,
+        "attempts_open": attempts_open(ev["status"]),
+        "is_host": events_repo.is_host(resolved_event_id, user),
+        "teams": events_repo.list_teams_with_counts(resolved_event_id),
+        "counts": events_repo.event_counts(resolved_event_id, ev.get("pack_version_id")),
+        "you": {
+            "joined": participant is not None,
+            "participant_id": participant.get("participant_id") if participant else None,
+            "team_id": team.get("team_id") if team else None,
+            "team_name": team.get("display_name") or team.get("name") if team else None,
+        },
+    }
+
+
+@app.post("/api/events/{event_id}/join")
+async def join_event(
+    event_id: str,
+    body: JoinEventPayload,
+    request: Request,
+    _: None = Depends(require_event_mode),
+):
+    """Self-register the caller as a participant; optionally join a named team."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    ev = events_repo.get_event(resolved_event_id)
+    user = get_user_email(request)
+    if ev["status"] not in JOINABLE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": {"code": "NOT_JOINABLE", "message": "This event is not open for joining right now."}},
+        )
+
+    try:
+        participant = events_repo.register_participant(
+            event_id=resolved_event_id, user_id=user, display_name=body.display_name, email=user
+        )
+        team = None
+        if body.team_id or body.team_name:
+            team = (
+                events_repo.get_team(body.team_id)
+                if body.team_id
+                else _find_team_by_name(resolved_event_id, body.team_name)
+            )
+            if not team or team.get("event_id") != resolved_event_id:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"error": {"code": "TEAM_NOT_FOUND", "message": "That team is not part of this event."}},
+                )
+            events_repo.set_participant_team(
+                resolved_event_id, participant["participant_id"], team["team_id"]
+            )
+    except EventStateError as exc:
+        raise _event_state_error(exc)
+
+    record_audit(
+        action="event.join",
+        actor_user_id=user,
+        event_id=resolved_event_id,
+        target_type="participant",
+        target_id=participant["participant_id"],
+        payload={"team_id": team["team_id"] if team else None},
+    )
+    return {
+        "joined": True,
+        "participant_id": participant["participant_id"],
+        "team_id": team["team_id"] if team else None,
+        "team_name": (team.get("display_name") or team.get("name")) if team else None,
+    }
+
+
+def _find_team_by_name(event_id: str, name: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not name:
+        return None
+    for t in events_repo.list_teams(event_id):
+        if t.get("name") == name or t.get("display_name") == name:
+            return t
+    return None
+
+
+@app.post("/api/host/events")
+async def host_create_event(body: CreateEventPayload, user: str = Depends(require_host)):
+    """Create a draft event from an imported pack version (creator becomes owner-host)."""
+    slug = (body.slug or _slugify(body.title)).strip().lower()
+    try:
+        ev = events_repo.create_event(
+            slug=slug,
+            title=body.title,
+            pack_version_id=body.pack_version_id,
+            created_by=user,
+            description=body.description,
+            mode=body.mode,
+            timezone=body.timezone,
+        )
+    except EventStateError as exc:
+        raise _event_state_error(exc)
+
+    record_audit(
+        action="event.create",
+        actor_user_id=user,
+        event_id=ev["event_id"],
+        target_type="event",
+        target_id=ev["event_id"],
+        payload={"slug": ev["slug"], "pack_version_id": body.pack_version_id},
+    )
+    return {"event": _event_public(ev)}
+
+
+@app.post("/api/host/events/{event_id}/teams")
+async def host_create_team(
+    event_id: str, body: CreateTeamPayload, user: str = Depends(require_host)
+):
+    """Create a team in an event."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    try:
+        team = events_repo.create_team(
+            event_id=resolved_event_id,
+            name=body.name,
+            display_name=body.display_name,
+            color=body.color,
+            team_catalog=body.team_catalog,
+            team_schema=body.team_schema,
+        )
+    except EventStateError as exc:
+        raise _event_state_error(exc)
+
+    record_audit(
+        action="team.create",
+        actor_user_id=user,
+        event_id=resolved_event_id,
+        target_type="team",
+        target_id=team["team_id"],
+        payload={"name": team["name"]},
+    )
+    return {"team": team}
+
+
+class TeamAssignPayload(BaseModel):
+    user_id: Optional[str] = None
+    participant_id: Optional[str] = None
+    display_name: Optional[str] = None
+
+
+@app.post("/api/host/events/{event_id}/teams/{team_id}/members")
+async def host_assign_team_member(
+    event_id: str,
+    team_id: str,
+    body: TeamAssignPayload,
+    user: str = Depends(require_host),
+):
+    """Assign a participant to a team (single team per event; reassigns if moved).
+
+    Accepts an existing ``participant_id`` or a ``user_id`` (registered on demand
+    so a host can place someone who hasn't self-joined yet).
+    """
+    resolved_event_id = _resolve_event_or_404(event_id)
+    team = events_repo.get_team(team_id)
+    if not team or team.get("event_id") != resolved_event_id:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "TEAM_NOT_FOUND", "message": "That team is not part of this event."}},
+        )
+
+    try:
+        if body.participant_id:
+            participant = db.execute_query(
+                "SELECT * FROM participants WHERE participant_id = %s AND event_id = %s",
+                (body.participant_id, resolved_event_id),
+            )
+            participant = participant[0] if participant else None
+        elif body.user_id:
+            participant = events_repo.register_participant(
+                event_id=resolved_event_id,
+                user_id=body.user_id,
+                display_name=body.display_name,
+                email=body.user_id,
+            )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"code": "INVALID_ASSIGN", "message": "Provide a user_id or participant_id."}},
+            )
+        if not participant:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": {"code": "PARTICIPANT_NOT_FOUND", "message": "That participant is not in this event."}},
+            )
+        events_repo.set_participant_team(
+            resolved_event_id, participant["participant_id"], team_id
+        )
+    except EventStateError as exc:
+        raise _event_state_error(exc)
+
+    record_audit(
+        action="team.assign",
+        actor_user_id=user,
+        event_id=resolved_event_id,
+        target_type="team",
+        target_id=team_id,
+        payload={"participant_id": participant["participant_id"]},
+    )
+    return {
+        "assigned": True,
+        "team_id": team_id,
+        "participant_id": participant["participant_id"],
+    }
+
+
+@app.post("/api/host/events/{event_id}/participants/import")
+async def host_import_participants(
+    event_id: str, body: ParticipantImportPayload, user: str = Depends(require_host)
+):
+    """Bulk-register participants with optional team assignment (idempotent)."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    try:
+        result = events_repo.import_participants(resolved_event_id, body.participants)
+    except EventStateError as exc:
+        raise _event_state_error(exc)
+
+    record_audit(
+        action="participants.import",
+        actor_user_id=user,
+        event_id=resolved_event_id,
+        target_type="event",
+        target_id=resolved_event_id,
+        payload=result,
+    )
+    return result
+
+
+def _transition_endpoint(target: str):
+    async def _do(event_id: str, request: Request, user: str = Depends(require_host)):
+        resolved_event_id = _resolve_event_or_404(event_id)
+        try:
+            ev = events_repo.set_status(resolved_event_id, target, user)
+        except EventStateError as exc:
+            raise _event_state_error(exc)
+        record_audit(
+            action=f"event.{target}",
+            actor_user_id=user,
+            event_id=resolved_event_id,
+            target_type="event",
+            target_id=resolved_event_id,
+            payload={"status": ev["status"]},
+        )
+        return {"event": _event_public(ev)}
+
+    return _do
+
+
+# Map the spec's verbs to target statuses. Each writes an audit row.
+app.add_api_route("/api/host/events/{event_id}/start", _transition_endpoint("active"), methods=["POST"])
+app.add_api_route("/api/host/events/{event_id}/pause", _transition_endpoint("paused"), methods=["POST"])
+app.add_api_route("/api/host/events/{event_id}/freeze", _transition_endpoint("frozen"), methods=["POST"])
+app.add_api_route("/api/host/events/{event_id}/complete", _transition_endpoint("completed"), methods=["POST"])
+app.add_api_route("/api/host/events/{event_id}/ready", _transition_endpoint("ready"), methods=["POST"])
+app.add_api_route("/api/host/events/{event_id}/archive", _transition_endpoint("archived"), methods=["POST"])
 
 
 # ---------------------------------------------------------------------------
@@ -664,6 +1196,18 @@ def _resolve_attempt_identity(event_id: str, user: str) -> Dict[str, Any]:
     }
 
 
+def _closed_event_message(status: str) -> str:
+    """Player-safe reason a submission is blocked for a non-active event."""
+    return {
+        "paused": "This event is paused. Your host will resume it shortly.",
+        "frozen": "Scoring is frozen for the finale — submissions are closed.",
+        "completed": "This event has ended. Thanks for playing!",
+        "archived": "This event has been archived.",
+        "draft": "This event hasn't opened yet.",
+        "ready": "This event hasn't started yet. Hang tight!",
+    }.get(status, "Submissions are closed right now.")
+
+
 def _attempt_message(status: str, points: int, already_awarded: bool) -> str:
     """Player-safe summary message for an attempt's terminal status."""
     if status == "passed":
@@ -697,6 +1241,20 @@ async def submit_attempt(
     """
     user = get_user_email(request)
     resolved_event_id = _resolve_event_or_404(event_id)
+
+    # Event lifecycle gate: only an active event accepts new attempts. Paused,
+    # frozen, completed, draft/ready, and archived all block with a safe message.
+    ev = events_repo.get_event(resolved_event_id)
+    if ev and not attempts_open(ev["status"]):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "code": "EVENT_NOT_ACTIVE",
+                    "message": _closed_event_message(ev["status"]),
+                }
+            },
+        )
 
     task = quest_packs_repo.get_task(task_id)
     if not task:

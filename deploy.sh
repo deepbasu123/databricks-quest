@@ -42,6 +42,12 @@ DEPLOY_MODE=""  # "full" (DAB bundle) or "quick" (direct API, like Forge)
 # hidden) and GameDay migrations are skipped — i.e. the legacy adoption app.
 QUEST_EVENT_MODE=""         # "on" enables Event Mode; empty = off (legacy)
 
+# ── Admin allowlist ──────────────────────────────────────────────────────────
+# Comma-separated emails allowed to see the adoption Admin page (/api/admin/*).
+# If left empty, deploy.sh defaults it to the deploying user after auth so the
+# Admin page is never wide open in a deployment.
+QUEST_ADMIN_ALLOWLIST=""    # e.g. "alice@corp.com,bob@corp.com"
+
 # ── Federation (ADR_006) — one codebase, role selected by these flags ────────
 QUEST_ROLE=""               # standalone (default) | master | child
 MASTER_LAKEBASE_HOST=""     # child: the MASTER workspace's shared Lakebase host
@@ -100,6 +106,9 @@ run_gameday_migrations() {
 #   SELECT  on the leaderboard read surface (so children can render the
 #           event-wide leaderboard and locate their own team's rank)
 #   INSERT/UPDATE/SELECT on event_workspaces (for the startup check-in upsert)
+#   SELECT/INSERT on quest_admins (shared admin allowlist — children read it so
+#           admins are global, and admins can ADD admins from a child; removal
+#           requires the master/standalone app — no DELETE for the writer role)
 # No UPDATE/DELETE on facts, no access to secrets. Idempotent: re-running
 # resets the role's password (rotate-per-event) and re-applies grants.
 # Args: <host> <db> <admin_user> <admin_token> <writer_user> <writer_password>
@@ -126,6 +135,14 @@ BEGIN
   EXECUTE format('GRANT INSERT, UPDATE, SELECT ON event_workspaces TO %I', '$esc_writer');
   EXECUTE format('GRANT SELECT ON event_leaderboard, team_scores, teams, participant_identity_map, events, announcements TO %I', '$esc_writer');
   EXECUTE format('GRANT SELECT ON quest_packs, quest_pack_versions, quests, quest_tasks, task_hints, task_validators TO %I', '$esc_writer');
+  -- Shared admin allowlist: children read it (so admins are global) and may
+  -- ADD admins through the app. No DELETE — removing an admin requires the
+  -- master/standalone app (full workspace identity); a leaked child credential
+  -- must never be able to delete. Guarded so a missing table (migrations not
+  -- yet applied) doesn't abort role provisioning.
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'quest_admins') THEN
+    EXECUTE format('GRANT SELECT, INSERT ON quest_admins TO %I', '$esc_writer');
+  END IF;
 END \$\$;
 "; then
     success "Event-writer role '$writer' provisioned and granted (INSERT-only on facts)"
@@ -161,6 +178,9 @@ write_app_yaml() {
     # SQL warehouse the sql_assertion validators execute against (PR03). Emitted
     # for every role when known so deterministic SQL checks have a target.
     [ -n "$WAREHOUSE_ID" ] && { echo "  - name: QUEST_SQL_WAREHOUSE_ID"; echo "    value: \"$WAREHOUSE_ID\""; }
+    # Admin allowlist for /api/admin/* (comma-separated emails). When set, the
+    # Admin page and its APIs are restricted to these users; absence = open.
+    [ -n "$QUEST_ADMIN_ALLOWLIST" ] && { echo "  - name: QUEST_ADMIN_ALLOWLIST"; echo "    value: \"$QUEST_ADMIN_ALLOWLIST\""; }
     # Event Mode master switch. Only emitted when ON; absence = legacy default,
     # so a standalone adoption deploy keeps its exact two-variable app.yaml.
     if [ "$QUEST_EVENT_MODE" = "on" ]; then
@@ -200,6 +220,7 @@ while [[ $# -gt 0 ]]; do
     --quick)          DEPLOY_MODE="quick"; shift ;;
     --full)           DEPLOY_MODE="full"; shift ;;
     --event-mode)         QUEST_EVENT_MODE="on"; shift ;;
+    --admins)             QUEST_ADMIN_ALLOWLIST="$2"; shift 2 ;;
     --role)               QUEST_ROLE="$2"; shift 2 ;;
     --master-lakebase-host)  MASTER_LAKEBASE_HOST="$2"; shift 2 ;;
     --master-lakebase-token) MASTER_LAKEBASE_TOKEN="$2"; shift 2 ;;
@@ -224,6 +245,11 @@ while [[ $# -gt 0 ]]; do
       echo "  --skip-build          Skip frontend build (use existing app/static/)"
       echo "  --skip-scoring        Skip running the scoring pipeline"
       echo "  --skip-auth-check     Skip authentication validation (use if already authenticated)"
+      echo "  --admins EMAILS       Comma-separated emails seeded as Admin-page admins."
+      echo "                        Defaults to the deploying user when omitted (except"
+      echo "                        --role child, which inherits admins from the master)."
+      echo "                        Stored in Lakebase (quest_admins) and shared across"
+      echo "                        master/child; admins can add more admins in-app."
       echo ""
       echo "Event Mode (GameDay) — opt-in; legacy adoption app is the default:"
       echo "  --event-mode             Enable GameDay/Event Mode (default: OFF)."
@@ -444,6 +470,15 @@ else
 
   USER_EMAIL=$(echo "$USER_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('userName',''))")
   success "Authenticated as $USER_EMAIL"
+fi
+
+# Default the Admin allowlist to the deploying user so the Admin page is gated
+# (never wide open) even when --admins is not passed. Only for a real email
+# (skip the "(authentication skipped)" placeholder). Skipped for child apps:
+# children inherit the shared admin list from the master's quest_admins table,
+# so they must NOT seed their own deployer as a global admin.
+if [ -z "$QUEST_ADMIN_ALLOWLIST" ] && [[ "$USER_EMAIL" == *"@"* ]] && [ "$QUEST_ROLE" != "child" ]; then
+  QUEST_ADMIN_ALLOWLIST="$USER_EMAIL"
 fi
 
 # Get workspace host
@@ -1269,6 +1304,13 @@ if [ "$QUEST_EVENT_MODE" = "on" ]; then
   echo -e "  ${BOLD}Event Mode:${NC}    ${GREEN}ENABLED${NC} (GameDay)"
 else
   echo -e "  ${BOLD}Event Mode:${NC}    off (legacy adoption app)"
+fi
+if [ -n "$QUEST_ADMIN_ALLOWLIST" ]; then
+  echo -e "  ${BOLD}Admins:${NC}        $QUEST_ADMIN_ALLOWLIST ${DIM}(seeded to quest_admins; manage more in-app)${NC}"
+elif [ "$QUEST_ROLE" = "child" ]; then
+  echo -e "  ${BOLD}Admins:${NC}        inherited from master (shared quest_admins)"
+else
+  echo -e "  ${BOLD}Admins:${NC}        ${YELLOW}open${NC} (no allowlist — Admin page visible to all)"
 fi
 if [ "$QUEST_ROLE" != "standalone" ]; then
   echo -e "  ${BOLD}Role:${NC}          $QUEST_ROLE${EVENT_SLUG:+  (event: $EVENT_SLUG)}"

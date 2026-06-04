@@ -13,6 +13,7 @@ export interface UserProfile {
   distinct_products_used: number
   badges: Badge[]
   setup_required?: boolean
+  is_admin?: boolean
 }
 
 export interface LevelProgress {
@@ -77,6 +78,19 @@ export interface PipelineStatus {
   status: string
   last_run: string | null
   total_events_scored: number
+}
+
+export interface AdminEntry {
+  email: string
+  added_by: string | null
+  source: string
+  added_at: string | null
+}
+
+export interface AdminListResponse {
+  admins: AdminEntry[]
+  caller: string
+  caller_is_admin: boolean
 }
 
 export type Page = 'dashboard' | 'missions' | 'leaderboard' | 'admin' | 'federation'
