@@ -8,7 +8,8 @@ __pycache__/
 *.egg-info/
 build/
 .DS_Store
-app/static/
+# app/static/ is intentionally COMMITTED (prebuilt frontend) so deploy works
+# with --skip-build and zero npm registry access (restricted customer networks).
 frontend/node_modules/
 frontend/dist/
 
