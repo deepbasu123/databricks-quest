@@ -4,6 +4,34 @@ A gamification app that turns Databricks platform adoption into a game. Users ea
 
 Built entirely on Databricks: system tables for usage tracking, Delta Lake for scoring, Lakebase for fast reads, and Databricks Apps for hosting. Users log in with their existing workspace credentials.
 
+---
+
+## Two modes
+
+Databricks Quest runs in two complementary modes from a **single codebase**, selected at deploy time:
+
+| Mode | What it is | When to use | Enable |
+|------|-----------|-------------|--------|
+| **Adoption Mode** (default) | The passive, system-table-driven platform-adoption game described below — 30+ missions, weekly leaderboard, swag. Always on. | Ongoing internal adoption, always-on workspace engagement. | On by default. No flag needed. |
+| **Event Mode (GameDay)** | Configurable, facilitator-run GameDay events: quest packs, teams, deterministic validators, live scoring/leaderboard, host console, per-team resource bootstrap, and post-event reporting. | Hands-on events, SE/SA enablement, customer workshops, competitive team challenges, hunter-account motions. | Opt-in: `./deploy.sh --event-mode` (or `QUEST_EVENT_MODE=on`). Implied by the `master`/`child` federation roles. |
+
+Event Mode is **purely additive** — when it's off, the GameDay APIs return 404, the Event UI is hidden, and the GameDay migrations are skipped, so Adoption Mode behaves exactly as it always has. Event Mode can also span **multiple workspaces** (a master workspace aggregating child lab workspaces) via a shared Lakebase.
+
+**Event Mode docs:**
+
+- **[README_GAMEDAY.md](README_GAMEDAY.md)** — GameDay deployment & operations guide (what works today, per feature).
+- **[docs/STATUS.md](docs/STATUS.md)** — authoritative per-PR status tracker.
+- **[samples/packs/README.md](samples/packs/README.md)** — run & customize the shipped sample quest packs.
+- **[samples/QUEST_PACK_SCHEMA.md](samples/QUEST_PACK_SCHEMA.md)** — quest pack authoring reference.
+- **[samples/SAMPLE_EVENT_RUNBOOK.md](samples/SAMPLE_EVENT_RUNBOOK.md)** — facilitator event runbook.
+- **[docs/17_TROUBLESHOOTING.md](docs/17_TROUBLESHOOTING.md)** — troubleshooting both modes.
+- **[docs/18_RELEASE_CHECKLIST.md](docs/18_RELEASE_CHECKLIST.md)** — pre-release checklist.
+- **[docs/19_MANUAL_E2E_TEST.md](docs/19_MANUAL_E2E_TEST.md)** — manual end-to-end test script + load-test guidance.
+
+The rest of this README describes **Adoption Mode**.
+
+---
+
 ## How It Works
 
 1. A **scoring pipeline** runs every 4 hours, reading Databricks system tables to detect what each user has done on the platform
