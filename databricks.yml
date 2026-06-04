@@ -57,19 +57,34 @@ resources:
               warehouse_id: ${var.warehouse_id}
             source: WORKSPACE
           environment_key: default
+        # Copy the freshly-scored Delta tables into Lakebase so the app refreshes
+        # every cycle (not just at deploy). No-ops when lakebase_host is unset.
+        - task_key: sync_to_lakebase
+          depends_on:
+            - task_key: run_scoring
+          notebook_task:
+            notebook_path: ./notebooks/lakebase_sync.py
+            base_parameters:
+              quest_catalog: ${var.quest_catalog}
+              quest_schema: ${var.quest_schema}
+              lakebase_host: ${var.lakebase_host}
+              lakebase_db: ${var.lakebase_db}
+              app_name: databricks-quest
+            source: WORKSPACE
+          environment_key: default
       environments:
         - environment_key: default
           spec:
             client: "1"
+            dependencies:
+              - psycopg2-binary
 
+# Host comes from the active CLI profile / DATABRICKS_HOST at deploy time, so the
+# bundle is cloud-agnostic (works on AWS or Azure). deploy.sh exports it.
 targets:
   dev:
     mode: development
     default: true
-    workspace:
-      host: https://fevm-anzgt-us-01.cloud.databricks.com
 
   prod:
     mode: production
-    workspace:
-      host: https://fevm-anzgt-us-01.cloud.databricks.com

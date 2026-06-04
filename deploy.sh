@@ -435,60 +435,89 @@ fi
 # ══════════════════════════════════════════════════════════════════════════════
 step "Step 2/8: Authenticating"
 
+# A current-user blob is valid only if it carries a userName.
+_valid_user_json() { echo "$1" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('userName') else 1)" 2>/dev/null; }
+
+# current-user me with the current PROFILE_FLAG (empty = default/env auth).
+_try_me() {
+  if [ -n "$PROFILE_FLAG" ]; then $CLI current-user me $PROFILE_FLAG -o json 2>/dev/null || true
+  else $CLI current-user me -o json 2>/dev/null || true; fi
+}
+
+# Auto-select a profile when --profile wasn't passed. With a target host, prefer
+# the profile whose host matches; otherwise use the sole valid profile. Sets
+# PROFILE_NAME/PROFILE_FLAG/USER_JSON on success. Never guesses among several.
+_autopick_profile() {
+  local want_host="${1:-}" decision name
+  decision=$($CLI auth profiles -o json 2>/dev/null | python3 -c "
+import sys, json
+def norm(h): return (h or '').strip().rstrip('/').replace('https://','').replace('http://','')
+try:
+    raw = json.load(sys.stdin)
+    profs = raw.get('profiles', raw) if isinstance(raw, dict) else raw
+except Exception:
+    profs = []
+want = norm('''$want_host''')
+valid = [p for p in (profs or []) if p.get('valid') and p.get('name')]
+if want:
+    m = [p for p in valid if norm(p.get('host')) == want]
+    print('PICK ' + m[0]['name'] if m else 'NONE')
+elif len(valid) == 1:
+    print('PICK ' + valid[0]['name'])
+elif len(valid) > 1:
+    print('MANY ' + ','.join(p['name'] for p in valid))
+else:
+    print('NONE')
+" 2>/dev/null)
+  case "$decision" in
+    PICK\ *)
+      name="${decision#PICK }"
+      local j; j=$($CLI current-user me --profile "$name" -o json 2>/dev/null || true)
+      if _valid_user_json "$j"; then PROFILE_NAME="$name"; PROFILE_FLAG="--profile $name"; USER_JSON="$j"; return 0; fi
+      return 1 ;;
+    MANY\ *)
+      warn "Multiple authenticated profiles found: ${decision#MANY }"
+      info "Re-run with one, e.g.:  ./deploy.sh --profile ${decision#MANY }" ; info "(comma-separated above — pick the workspace you're deploying to)"
+      return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+# 1) Try as-is (explicit --profile, or default/env).
+USER_JSON="$(_try_me)"
+
+# 2) No --profile and that failed → auto-pick a valid profile (handles the common
+#    "databricks auth login --host X" then a bare ./deploy.sh).
+if ! _valid_user_json "$USER_JSON" && [ -z "$PROFILE_FLAG" ]; then
+  _autopick_profile "" || true
+fi
+
 if [ -n "$SKIP_AUTH_CHECK" ]; then
-  warn "Skipping authentication check (--skip-auth-check flag set)"
-  info "Make sure you've already run: databricks auth login --host YOUR_WORKSPACE_URL"
-  USER_EMAIL="(authentication skipped)"
-else
-  # Try to get current user — this validates authentication
-  USER_JSON=""
-  if [ -n "$PROFILE_FLAG" ]; then
-    USER_JSON=$($CLI current-user me $PROFILE_FLAG -o json 2>/dev/null || true)
+  if _valid_user_json "$USER_JSON"; then
+    USER_EMAIL=$(echo "$USER_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('userName',''))")
+    warn "Auth check skipped; using profile '${PROFILE_NAME:-(default/env)}' ($USER_EMAIL)."
   else
-    USER_JSON=$($CLI current-user me -o json 2>/dev/null || true)
+    warn "Skipping authentication check (--skip-auth-check); no usable profile auto-detected."
+    info "If later steps fail on auth, re-run with: ./deploy.sh --profile <name>"
+    USER_EMAIL="(authentication skipped)"
   fi
+elif ! _valid_user_json "$USER_JSON"; then
+  # 3) Interactive login fallback, then re-resolve by matching the host.
+  warn "Not authenticated. Let's log in now."
+  echo ""
+  read -rp "Enter your workspace URL (e.g. https://my-workspace.cloud.databricks.com): " WORKSPACE_URL
+  WORKSPACE_URL="${WORKSPACE_URL%/}"
+  [ -z "$WORKSPACE_URL" ] && fail "Workspace URL cannot be empty."
+  info "Opening browser for authentication..."
+  if [ -n "$PROFILE_NAME" ]; then $CLI auth login --host "$WORKSPACE_URL" --profile "$PROFILE_NAME"; else $CLI auth login --host "$WORKSPACE_URL"; fi
+  USER_JSON="$(_try_me)"
+  if ! _valid_user_json "$USER_JSON"; then _autopick_profile "$WORKSPACE_URL" || true; fi
+  _valid_user_json "$USER_JSON" || fail "Authentication failed. Try:  ./deploy.sh --profile <name>   (list profiles: databricks auth profiles)"
+fi
 
-  if [ -z "$USER_JSON" ] || ! echo "$USER_JSON" | python3 -c "import sys,json; json.load(sys.stdin)" &>/dev/null; then
-    warn "Not authenticated. Let's log in now."
-    echo ""
-    read -rp "Enter your workspace URL (e.g. https://my-workspace.cloud.databricks.com): " WORKSPACE_URL
-    WORKSPACE_URL="${WORKSPACE_URL%/}"
-
-    if [ -z "$WORKSPACE_URL" ]; then
-      fail "Workspace URL cannot be empty."
-    fi
-
-    info "Opening browser for authentication..."
-    if [ -n "$PROFILE_NAME" ]; then
-      $CLI auth login --host "$WORKSPACE_URL" --profile "$PROFILE_NAME"
-    else
-      $CLI auth login --host "$WORKSPACE_URL"
-    fi
-
-    # Retry — find the profile the CLI just created and use it explicitly.
-    # The databricks.yml placeholder host blocks DATABRICKS_HOST and --host,
-    # so the only reliable method is looking up the profile by workspace URL.
-    if [ -n "$PROFILE_FLAG" ]; then
-      USER_JSON=$($CLI current-user me $PROFILE_FLAG -o json 2>/dev/null || true)
-    else
-      # Scan auth profiles for one matching the workspace URL we just logged into
-      for _profile in $($CLI auth profiles 2>/dev/null | grep "$WORKSPACE_URL" | awk '{print $1}'); do
-        USER_JSON=$($CLI current-user me --profile "$_profile" -o json 2>/dev/null || true)
-        if [ -n "$USER_JSON" ] && echo "$USER_JSON" | python3 -c "import sys,json; json.load(sys.stdin)" &>/dev/null 2>&1; then
-          PROFILE_NAME="$_profile"
-          PROFILE_FLAG="--profile $_profile"
-          break
-        fi
-      done
-    fi
-
-    if [ -z "$USER_JSON" ]; then
-      fail "Authentication failed. Please run: databricks auth login --host $WORKSPACE_URL"
-    fi
-  fi
-
+if [ "${USER_EMAIL:-}" != "(authentication skipped)" ]; then
   USER_EMAIL=$(echo "$USER_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('userName',''))")
-  success "Authenticated as $USER_EMAIL"
+  success "Authenticated as $USER_EMAIL${PROFILE_NAME:+ (profile: $PROFILE_NAME)}"
 fi
 
 # Default the Admin allowlist to the deploying user so the Admin page is gated
@@ -697,47 +726,36 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FRONTEND_DIR="$SCRIPT_DIR/frontend"
 STATIC_DIR="$SCRIPT_DIR/app/static"
 
+# The repo ships a COMMITTED prebuilt frontend (app/static/), so deploy works on
+# restricted networks with zero npm access. We refresh it from source only when
+# npm is available and can reach a registry; otherwise we keep the committed
+# build. No Databricks-internal proxy (unreachable from customer networks).
 if [ -f "$STATIC_DIR/index.html" ] && [ -z "$SKIP_BUILD" ]; then
-  # Pre-built static files exist in the repo — only rebuild if Node.js is available
   if command -v node &>/dev/null && command -v npm &>/dev/null; then
-    info "Rebuilding frontend (pre-built files exist, but refreshing)..."
-    (cd "$FRONTEND_DIR" && \
-      (npm install --registry https://registry.npmjs.org/ --silent 2>/dev/null || \
-       npm install --registry https://npm-proxy.dev.databricks.com/ --silent 2>/dev/null || \
-       npm install --silent 2>/dev/null) && \
-      npm run build 2>&1 | tail -3) || true
-    success "Frontend built to app/static/"
+    info "Refreshing frontend from source (committed build is the fallback)..."
+    if (cd "$FRONTEND_DIR" && \
+        (npm install --silent 2>/dev/null || npm install --registry https://registry.npmjs.org/ --silent 2>/dev/null) && \
+        npm run build 2>&1 | tail -3); then
+      success "Frontend rebuilt to app/static/"
+    else
+      warn "npm unavailable/blocked — using the committed prebuilt frontend (this is fine)."
+    fi
   else
-    success "Using pre-built frontend from repo (Node.js not required)"
+    success "Using committed prebuilt frontend (Node.js not required)."
   fi
 elif [ -f "$STATIC_DIR/index.html" ]; then
-  success "Skipping build (--skip-build). Using existing app/static/."
+  success "Skipping build (--skip-build). Using committed app/static/."
 else
-  # No pre-built files — Node.js is required
-  if ! command -v node &>/dev/null; then
-    fail "No pre-built frontend found and Node.js is not installed.
-    Install Node.js 18+: brew install node (macOS) or https://nodejs.org/"
+  # Prebuilt static is committed, so this is unexpected. Build from source.
+  command -v npm &>/dev/null || fail "No prebuilt frontend and npm not found. Install Node.js 18+ (https://nodejs.org/)."
+  info "Installing dependencies + building React app..."
+  if ! (cd "$FRONTEND_DIR" && \
+        (npm install --silent || npm install --registry https://registry.npmjs.org/ --silent) && \
+        npm run build 2>&1 | tail -3); then
+    fail "npm install/build failed and no prebuilt frontend is present.
+    On a restricted network, build the frontend on a machine with npm access and commit app/static/."
   fi
-  if ! command -v npm &>/dev/null; then
-    fail "npm not found. It should come with Node.js."
-  fi
-
-  info "Installing dependencies..."
-  # Try public npm registry first, fall back to Databricks internal proxy
-  if (cd "$FRONTEND_DIR" && npm install --registry https://registry.npmjs.org/ --silent 2>&1 | tail -1); then
-    success "Dependencies installed (public registry)"
-  elif (cd "$FRONTEND_DIR" && npm install --registry https://npm-proxy.dev.databricks.com/ --silent 2>&1 | tail -1); then
-    success "Dependencies installed (internal registry)"
-  else
-    fail "npm install failed. Check your network connection and npm configuration."
-  fi
-
-  info "Building React app..."
-  (cd "$FRONTEND_DIR" && npm run build 2>&1 | tail -3)
-
-  if [ ! -f "$STATIC_DIR/index.html" ]; then
-    fail "Build failed — app/static/index.html not found."
-  fi
+  [ -f "$STATIC_DIR/index.html" ] || fail "Build did not produce app/static/index.html."
   success "Frontend built to app/static/"
 fi
 
