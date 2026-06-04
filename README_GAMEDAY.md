@@ -25,11 +25,12 @@ migrations are skipped. Enable GameDay explicitly with `--event-mode` (or set
 
 **Live status lives in one place:
 [`docs/STATUS.md`](docs/STATUS.md)** — the authoritative per-PR tracker (what's
-landed, what's deployable/testable, known gaps). In short: PR01–PR08 and the
+landed, what's deployable/testable, known gaps). In short: PR01–PR09 and the
 federation plumbing (PR13–PR16) have landed — schema, quest packs, the
 validation/scoring write path, event/team lifecycle, the player gameplay UI, the
-host console, the live player leaderboard with hint-penalty scoring, and
-namespace-guarded team resource bootstrap/reset.
+host console, the live player leaderboard with hint-penalty scoring,
+namespace-guarded team resource bootstrap/reset, and two shipped sample quest
+packs.
 
 > **What this means for testing:** the full loop is testable now — a host can
 > create an event, import a pack, run the lifecycle, players join and submit
@@ -401,6 +402,29 @@ play is closed).
 | Passing a task's validators | `validation` | `+points` (once per scope) |
 | Revealing a hint | `hint_penalty` | `−penalty` (once per team) |
 | Host manual adjustment | `manual_adjustment` | `±` (always lands) |
+
+---
+
+## Sample quest packs (works today — PR09)
+
+Two built-in, ready-to-run packs live in [`samples/packs/`](samples/packs/) and
+prove the platform end-to-end:
+
+- **AI/BI GameDay** (`ai_bi_gameday.yml`) — govern a schema, build a trusted
+  revenue model, ship an AI/BI dashboard + Genie space. 3 quests / 6 tasks.
+- **Lakehouse Foundations** (`lakehouse_foundations.yml`) — the bronze→silver
+  medallion loop with a provable quality gate. 3 quests / 6 tasks.
+
+Each ships learning objectives, `resources.seed_sql` (per-team seed data that the
+PR08 bootstrap runs), `quest_completed` unlock gating, `sql_assertion` +
+`databricks_sdk` + `manual` validators, hints, and facilitator notes. Both lint
+and import cleanly and are covered by `tests/test_sample_packs.py`.
+
+Run flow and customization guide:
+[`samples/packs/README.md`](samples/packs/README.md). In short: import the pack →
+create an event + teams → bootstrap resources → start → play. The first quest
+opens with a warehouse-independent `SELECT 1` check so teams can confirm their
+warehouse binding before the timed quests.
 
 ---
 
