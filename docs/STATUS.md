@@ -17,7 +17,7 @@ Legend: ✅ landed · 🟡 in progress · ⏳ planned (not started) · ⛔ block
 | Mode | Status | Notes |
 |---|---|---|
 | **Adoption Mode** | ✅ live | System-table scoring, missions, leaderboard, badges, admin. Unchanged. **The default** — Event Mode must be explicitly enabled. |
-| **Event Mode (GameDay)** | 🟡 in progress (opt-in) | Off by default; enable with `--event-mode` / `QUEST_EVENT_MODE=on` (implied by `master`/`child` roles). When off, GameDay APIs 404, Event UI is hidden, and GameDay migrations are skipped. Schema, quest packs, validation/scoring write path (PR03), event/team lifecycle + join + attempt gating (PR04), and federation plumbing landed. End-to-end host→play→score→leaderboard works via API; player gameplay UI (PR05) and host console UI (PR06) still to come. |
+| **Event Mode (GameDay)** | 🟡 in progress (opt-in) | Off by default; enable with `--event-mode` / `QUEST_EVENT_MODE=on` (implied by `master`/`child` roles). When off, GameDay APIs 404, Event UI is hidden, and GameDay migrations are skipped. Schema, quest packs, validation/scoring write path (PR03), event/team lifecycle + join + attempt gating (PR04), and federation plumbing landed. End-to-end host→play→score→leaderboard works via API; player gameplay UI (PR05) and host console UI (PR06) have landed. |
 
 ---
 
@@ -30,7 +30,7 @@ Legend: ✅ landed · 🟡 in progress · ⏳ planned (not started) · ⛔ block
 | PR03 | Validation engine core (validator abstraction, SQL + manual validators, attempt submission, scoring idempotency) | ✅ landed | `feature/gameday-pr03-validation-engine` |
 | PR04 | Event & team management (create events/teams/participants, join flow, lifecycle, attempt gating, single-team-per-event invariant, DB-backed admin allowlist shared across master/child with in-app admin management) | ✅ landed | `feature/gameday-pr04-events-teams` |
 | PR05 | Player gameplay experience (event lobby, join/team picker, quests list, quest runner with submit + validation status + hints, team dashboard; player read endpoints `/team`, `/quests`, `/quests/{id}`) | ✅ landed | `feature/gameday-pr05-player-ux` |
-| PR06 | Admin host console (start/pause/freeze/complete, validation monitor, announcements) | ⏳ planned | — |
+| PR06 | Admin host console (lifecycle controls, teams/progress table, validation attempts inspector with private diagnostics, announcement composer + player banner, manual score adjustment, quest pack import/lint UI; host endpoints `/host/events/{id}` overview, `/teams`, `/attempts`, `/announcements`, `/adjustments`) | ✅ landed | `feature/gameday-pr06-host-console` |
 | PR07 | Live scoring & leaderboard (real-time leaderboard, freeze semantics) | ⏳ planned | — |
 | PR08 | Resource bootstrap & reset (team schema/data, dry-run, scoped cleanup) | ⏳ planned | — |
 | PR09 | Sample GameDay packs (AI/BI + Lakehouse Foundations) | ⏳ planned | — |

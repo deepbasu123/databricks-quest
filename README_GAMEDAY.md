@@ -25,14 +25,15 @@ migrations are skipped. Enable GameDay explicitly with `--event-mode` (or set
 
 **Live status lives in one place:
 [`docs/STATUS.md`](docs/STATUS.md)** — the authoritative per-PR tracker (what's
-landed, what's deployable/testable, known gaps). In short: PR01, PR02, and the
-federation plumbing (PR13–PR16) have landed; the gameplay write path (PR03) and
-event/team APIs (PR04) are still to come.
+landed, what's deployable/testable, known gaps). In short: PR01–PR06 and the
+federation plumbing (PR13–PR16) have landed — schema, quest packs, the
+validation/scoring write path, event/team lifecycle, the player gameplay UI, and
+the host console.
 
-> **What this means for testing:** the deploy/migration/quest-pack/federation
-> *plumbing* is testable now. **End-to-end gameplay** (play → validate → score →
-> leaderboard) needs **PR03 + PR04**, because the attempt-submission and
-> event-creation endpoints don't exist yet. See [Testing](#testing).
+> **What this means for testing:** the full loop is testable now — a host can
+> create an event, import a pack, run the lifecycle, players join and submit
+> attempts, validators score them, and the host monitors attempts, posts
+> announcements, and adjusts scores from the console. See [Testing](#testing).
 
 ---
 
@@ -322,6 +323,44 @@ Role behaviour: `master` deployments show the **Host Console** instead of the
 player UI; `child` deployments get the player UI plus a **Standings** tab with
 the event-wide federated leaderboard. A `child` app is pinned to its configured
 event; a `standalone` app lets the player choose from the event list.
+
+All players also see a **host announcement banner** at the top of the event
+view (`GET /api/events/{id}/announcements`).
+
+---
+
+## Host console (works today — PR06)
+
+Facilitators run the event from a **Host** tab that appears inside the Event
+view only for hosts (`is_host` on the lobby; backed by `QUEST_HOST_ALLOWLIST`).
+Players never see it. It's gated by `require_host`, so a non-host gets a 403 on
+the underlying endpoints even if they craft the URL.
+
+What the host can do from the console (`GET /api/host/events/{id}` drives the
+dashboard):
+
+- **Lifecycle controls** — start / pause / freeze / complete / mark-ready /
+  archive. Only the legal next transitions render (`allowed_transitions`),
+  enforcing the PR04 state machine. Submissions are open only while `active`.
+- **Teams & scores** — ranked table of teams with points and member counts
+  (`GET /api/host/events/{id}/teams`).
+- **Validation attempts inspector** — filter by `all/passed/failed/error/manual/
+  running` (`GET /api/host/events/{id}/attempts?status=`) and expand any attempt
+  to see per-validator results **including the private diagnostics**
+  (`GET /api/host/events/{id}/attempts/{attempt_id}`) that players never see.
+- **Announcement composer** — post `info/warning/critical` broadcasts
+  (`POST /api/host/events/{id}/announcements`); players see them in the banner.
+- **Manual score adjustment** — add or subtract points for a team with a
+  **required reason** (`POST /api/host/events/{id}/adjustments`). This writes a
+  `manual_adjustments` audit row and a matching `scoring_events` ledger row in
+  one transaction, so the leaderboard updates immediately. Every action is
+  written to `event_audit_log`.
+- **Quest pack import / lint** — paste a manifest, lint it, then import a new
+  immutable version (`POST /api/host/quest-packs/lint` and `/import`, PR02).
+
+> Note on the manual-adjustment ledger row: it carries a unique idempotency key
+> (the adjustment id), so unlike base-points awards it is never deduplicated — a
+> manual override is intentional and always lands.
 
 ---
 

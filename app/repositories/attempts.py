@@ -67,6 +67,74 @@ class AttemptsRepository:
             logger.warning("list_validation_results failed: %s", exc)
             return []
 
+    def list_event_attempts(
+        self, event_id: str, status: Optional[str] = None, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Host view: recent attempts across an event, newest first.
+
+        Joins task title and team name so the console can render a readable
+        queue/results/failed view. Optional ``status`` filters to one terminal
+        state (e.g. ``failed``, ``passed``, ``manual``, ``error``, ``running``).
+        """
+        params: List[Any] = [event_id]
+        status_clause = ""
+        if status:
+            status_clause = "AND a.status = %s"
+            params.append(status)
+        params.append(limit)
+        try:
+            return db.execute_query(
+                f"""
+                SELECT a.attempt_id, a.task_id, a.team_id, a.submitted_by,
+                       a.status, a.submitted_at, a.completed_at, a.error_message,
+                       t.title AS task_title, tm.display_name AS team_name
+                FROM task_attempts a
+                LEFT JOIN quest_tasks t ON t.task_id = a.task_id
+                LEFT JOIN teams tm ON tm.team_id = a.team_id
+                WHERE a.event_id = %s {status_clause}
+                ORDER BY a.submitted_at DESC
+                LIMIT %s
+                """,
+                tuple(params),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("list_event_attempts failed: %s", exc)
+            return []
+
+    def attempt_status_counts(self, event_id: str) -> Dict[str, int]:
+        """Counts of attempts per status for an event (host dashboard tiles)."""
+        try:
+            rows = db.execute_query(
+                """
+                SELECT status, COUNT(*) AS c
+                FROM task_attempts
+                WHERE event_id = %s
+                GROUP BY status
+                """,
+                (event_id,),
+            )
+            return {r["status"]: int(r["c"]) for r in rows}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("attempt_status_counts failed: %s", exc)
+            return {}
+
+    def list_validation_results_admin(self, attempt_id: str) -> List[Dict[str, Any]]:
+        """Host view of validator results — includes the private diagnostics."""
+        try:
+            return db.execute_query(
+                """
+                SELECT validation_result_id, validator_id, status, score_delta,
+                       public_message, private_message, started_at, completed_at
+                FROM validation_results
+                WHERE attempt_id = %s
+                ORDER BY completed_at ASC NULLS LAST
+                """,
+                (attempt_id,),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("list_validation_results_admin failed: %s", exc)
+            return []
+
     # ── Mutations (PR03) ─────────────────────────────────────────────────────
 
     def create_attempt(

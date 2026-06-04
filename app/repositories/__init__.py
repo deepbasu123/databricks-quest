@@ -16,6 +16,7 @@ from .scoring import ScoringRepository
 from .leaderboard import LeaderboardRepository
 from .federation import FederationRepository, RosterImportError
 from .admins import AdminsRepository
+from .announcements import AnnouncementsRepository
 
 __all__ = [
     "EventsRepository",
@@ -27,4 +28,5 @@ __all__ = [
     "FederationRepository",
     "RosterImportError",
     "AdminsRepository",
+    "AnnouncementsRepository",
 ]

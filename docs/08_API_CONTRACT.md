@@ -452,6 +452,41 @@ accepts submissions while the event is `active`; any other status returns
 `409 EVENT_NOT_ACTIVE` with a player-safe message. Every mutation above writes an
 `event_audit_log` row.
 
+### Host console — PR06 implementation status
+
+Implemented in PR06. All host-console endpoints are Event-Mode-gated and enforce
+`require_host` (the `QUEST_HOST_ALLOWLIST`). The console reuses the PR04 lifecycle
+transitions for start/pause/freeze/complete and adds read/composition endpoints.
+
+- `GET /api/host/events/{event_id}` → host dashboard:
+  `{ event, attempts_open, allowed_transitions[], counts, teams[], attempt_status_counts, announcements[] }`.
+  `teams[]` are `{ team_id, name, display_name, color, members, score, rank }`
+  sorted by rank (unranked last). `allowed_transitions` lists the next legal
+  lifecycle verbs for the current status.
+- `GET /api/host/events/{event_id}/teams` → `{ teams: [{ …, members_list:[{user_id, display_name}] }] }`.
+- `GET /api/host/events/{event_id}/attempts?status=&limit=` → validation queue /
+  results / failed view: `{ attempts: [{ attempt_id, task_id, task_title, team_id,
+  team_name, submitted_by, status, submitted_at, completed_at, error_message }], status_counts }`.
+  `limit` is clamped to 1..500. `status` optionally filters to one terminal state.
+- `GET /api/host/events/{event_id}/attempts/{attempt_id}` → full detail incl.
+  **private** validator diagnostics (host-only): `{ attempt, results:[{ validator_id,
+  status, score_delta, public_message, private_message }] }`.
+- `GET /api/host/events/{event_id}/announcements` → `{ announcements[] }` (host view, 50).
+- `POST /api/host/events/{event_id}/announcements` body `{ title, body_md, severity? }`
+  → the created announcement. `400 INVALID_ANNOUNCEMENT` if title/body blank;
+  `severity` ∈ `info|warning|critical` (anything else coerced to `info`). Audited.
+- `POST /api/host/events/{event_id}/adjustments` body
+  `{ team_id, points_delta, reason, task_id?, user_id? }` →
+  `{ adjustment_id, scoring_event_id, points_delta }`. Writes a `manual_adjustments`
+  audit row **and** a `scoring_events` ledger row (`source_type=manual_adjustment`)
+  atomically, so the leaderboard reflects the change immediately. `400 REASON_REQUIRED`
+  (blank reason), `400 ZERO_DELTA`, `404 TEAM_NOT_FOUND` (team not in this event).
+  Audited (`score.adjust`).
+
+Player-facing announcement feed (Event-Mode-gated, any authenticated player):
+
+- `GET /api/events/{event_id}/announcements` → `{ announcements[] }` (latest 20).
+
 ### Quest pack endpoints — PR02 implementation status
 
 Implemented in PR02 (lint, import, list, get):

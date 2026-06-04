@@ -27,11 +27,13 @@ from repositories import (
     EventStateError,
     AttemptsRepository,
     LeaderboardRepository,
+    ScoringRepository,
     FederationRepository,
     RosterImportError,
     AdminsRepository,
+    AnnouncementsRepository,
 )
-from repositories.events import attempts_open, JOINABLE_STATUSES
+from repositories.events import attempts_open, JOINABLE_STATUSES, ALLOWED_TRANSITIONS
 from services import quest_pack_loader
 from services import federation as fed
 from services import record_audit
@@ -290,7 +292,9 @@ quest_packs_repo = QuestPacksRepository()
 events_repo = EventsRepository()
 attempts_repo = AttemptsRepository()
 leaderboard_repo = LeaderboardRepository()
+scoring_repo = ScoringRepository()
 federation_repo = FederationRepository()
+announcements_repo = AnnouncementsRepository()
 
 
 @app.on_event("startup")
@@ -934,6 +938,13 @@ async def get_event_quest(event_id: str, quest_id: str, request: Request, _: Non
     }
 
 
+@app.get("/api/events/{event_id}/announcements")
+async def list_event_announcements(event_id: str, request: Request, _: None = Depends(require_event_mode)):
+    """Player-facing announcement feed for an event (host broadcasts)."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    return {"announcements": announcements_repo.list_for_event(resolved_event_id, limit=20)}
+
+
 @app.post("/api/host/events")
 async def host_create_event(body: CreateEventPayload, user: str = Depends(require_host)):
     """Create a draft event from an imported pack version (creator becomes owner-host)."""
@@ -1111,6 +1122,204 @@ app.add_api_route("/api/host/events/{event_id}/freeze", _transition_endpoint("fr
 app.add_api_route("/api/host/events/{event_id}/complete", _transition_endpoint("completed"), methods=["POST"])
 app.add_api_route("/api/host/events/{event_id}/ready", _transition_endpoint("ready"), methods=["POST"])
 app.add_api_route("/api/host/events/{event_id}/archive", _transition_endpoint("archived"), methods=["POST"])
+
+
+# ---------------------------------------------------------------------------
+# Host console — dashboard, teams, attempts, announcements, adjustments (PR06)
+# ---------------------------------------------------------------------------
+
+
+class AnnouncementPayload(BaseModel):
+    title: str
+    body_md: str
+    severity: str = "info"
+
+
+class AdjustmentPayload(BaseModel):
+    team_id: str
+    points_delta: int
+    reason: str
+    task_id: Optional[str] = None
+    user_id: Optional[str] = None
+
+
+def _host_team_rows(event_id: str) -> List[Dict[str, Any]]:
+    """Teams in an event annotated with score + rank for the host table."""
+    rank_by_team = {
+        r["team_id"]: r.get("rank")
+        for r in leaderboard_repo.get_team_leaderboard(event_id)
+    }
+    rows = []
+    for t in events_repo.list_teams_with_counts(event_id):
+        tid = t["team_id"]
+        rows.append({
+            **t,
+            "score": leaderboard_repo.get_team_score(event_id, tid),
+            "rank": rank_by_team.get(tid),
+        })
+    rows.sort(key=lambda r: (r["rank"] is None, r["rank"] or 0, -r["score"]))
+    return rows
+
+
+@app.get("/api/host/events/{event_id}")
+async def host_event_overview(event_id: str, user: str = Depends(require_host)):
+    """Host dashboard: event header, lifecycle, counts, teams, attempt stats."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    ev = events_repo.get_event(resolved_event_id)
+    if not ev:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "NOT_FOUND", "message": "Event not found."}},
+        )
+    transitions = sorted(ALLOWED_TRANSITIONS.get(ev["status"], set()))
+    return {
+        "event": _event_public(ev),
+        "attempts_open": attempts_open(ev["status"]),
+        "allowed_transitions": transitions,
+        "counts": events_repo.event_counts(resolved_event_id, ev.get("pack_version_id")),
+        "teams": _host_team_rows(resolved_event_id),
+        "attempt_status_counts": attempts_repo.attempt_status_counts(resolved_event_id),
+        "announcements": announcements_repo.list_for_event(resolved_event_id, limit=10),
+    }
+
+
+@app.get("/api/host/events/{event_id}/teams")
+async def host_list_teams(event_id: str, user: str = Depends(require_host)):
+    """Teams with scores, ranks, and members for the host team table."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    teams = []
+    for t in _host_team_rows(resolved_event_id):
+        teams.append({
+            **t,
+            "members_list": [
+                {"user_id": m.get("user_id"), "display_name": m.get("display_name")}
+                for m in events_repo.list_team_members(t["team_id"])
+            ],
+        })
+    return {"teams": teams}
+
+
+@app.get("/api/host/events/{event_id}/attempts")
+async def host_list_attempts(
+    event_id: str,
+    status: Optional[str] = None,
+    limit: int = 100,
+    user: str = Depends(require_host),
+):
+    """Validation queue / results / failed view for the host."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    limit = max(1, min(int(limit or 100), 500))
+    return {
+        "attempts": attempts_repo.list_event_attempts(resolved_event_id, status=status, limit=limit),
+        "status_counts": attempts_repo.attempt_status_counts(resolved_event_id),
+    }
+
+
+@app.get("/api/host/events/{event_id}/attempts/{attempt_id}")
+async def host_get_attempt(event_id: str, attempt_id: str, user: str = Depends(require_host)):
+    """Full attempt detail incl. private validator diagnostics (host only)."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    attempt = attempts_repo.get_attempt(attempt_id)
+    if not attempt or attempt.get("event_id") != resolved_event_id:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "NOT_FOUND", "message": "Attempt not found."}},
+        )
+    return {
+        "attempt": attempt,
+        "results": attempts_repo.list_validation_results_admin(attempt_id),
+    }
+
+
+@app.get("/api/host/events/{event_id}/announcements")
+async def host_list_announcements(event_id: str, user: str = Depends(require_host)):
+    resolved_event_id = _resolve_event_or_404(event_id)
+    return {"announcements": announcements_repo.list_for_event(resolved_event_id, limit=50)}
+
+
+@app.post("/api/host/events/{event_id}/announcements")
+async def host_create_announcement(
+    event_id: str, body: AnnouncementPayload, user: str = Depends(require_host)
+):
+    resolved_event_id = _resolve_event_or_404(event_id)
+    if not body.title.strip() or not body.body_md.strip():
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "INVALID_ANNOUNCEMENT", "message": "Title and body are required."}},
+        )
+    try:
+        ann = announcements_repo.create(
+            event_id=resolved_event_id,
+            title=body.title.strip(),
+            body_md=body.body_md.strip(),
+            severity=body.severity,
+            created_by=user,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("create_announcement failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "ANNOUNCE_FAILED", "message": "Could not post the announcement."}},
+        )
+    record_audit(
+        action="announcement.create",
+        actor_user_id=user,
+        event_id=resolved_event_id,
+        target_type="announcement",
+        target_id=ann["announcement_id"],
+        payload={"severity": ann["severity"], "title": ann["title"]},
+    )
+    return ann
+
+
+@app.post("/api/host/events/{event_id}/adjustments")
+async def host_adjust_score(
+    event_id: str, body: AdjustmentPayload, user: str = Depends(require_host)
+):
+    """Manually adjust a team's score with a required reason (audited + ledgered)."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    if not body.reason or not body.reason.strip():
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "REASON_REQUIRED", "message": "A reason is required for manual adjustments."}},
+        )
+    if body.points_delta == 0:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "ZERO_DELTA", "message": "Point adjustment cannot be zero."}},
+        )
+    team = events_repo.get_team(body.team_id)
+    if not team or team.get("event_id") != resolved_event_id:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "TEAM_NOT_FOUND", "message": "That team is not part of this event."}},
+        )
+    try:
+        result = scoring_repo.record_manual_adjustment(
+            event_id=resolved_event_id,
+            points_delta=int(body.points_delta),
+            reason=body.reason.strip(),
+            created_by=user,
+            team_id=body.team_id,
+            user_id=body.user_id,
+            task_id=body.task_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("record_manual_adjustment failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "ADJUST_FAILED", "message": "Could not record the adjustment."}},
+        )
+    record_audit(
+        action="score.adjust",
+        actor_user_id=user,
+        event_id=resolved_event_id,
+        target_type="team",
+        target_id=body.team_id,
+        payload={"points_delta": body.points_delta, "reason": body.reason.strip(),
+                 "adjustment_id": result["adjustment_id"]},
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@ import {
   Lightbulb,
   Loader2,
   Lock,
+  Megaphone,
   Send,
   Sparkles,
   Trophy,
@@ -30,8 +31,10 @@ import { useApi } from '../lib/api'
 import { QuestCard } from './quest/QuestCard'
 import { EmptyState, ErrorState, Skeleton } from './quest/States'
 import { ChildEventView } from './Federation'
+import HostConsole from './HostConsole'
+import type { Announcement } from '../types'
 
-type Tab = 'lobby' | 'quests' | 'team' | 'standings'
+type Tab = 'lobby' | 'quests' | 'team' | 'standings' | 'host'
 
 // ── Status badges ────────────────────────────────────────────────────────────
 
@@ -180,6 +183,7 @@ function EventWorkspace({
     { id: 'quests', label: 'Quests' },
     { id: 'team', label: 'Team' },
     ...(isChild ? [{ id: 'standings' as Tab, label: 'Standings' }] : []),
+    ...(lobby.is_host ? [{ id: 'host' as Tab, label: 'Host' }] : []),
   ]
 
   return (
@@ -203,6 +207,8 @@ function EventWorkspace({
           </span>
         )}
       </div>
+
+      <AnnouncementsBanner eventRef={eventRef} />
 
       <div className="flex gap-1.5 border-b border-white/10">
         {tabs.map((t) => (
@@ -238,6 +244,37 @@ function EventWorkspace({
         ))}
       {tab === 'team' && <TeamPanel eventRef={eventRef} />}
       {tab === 'standings' && isChild && <ChildEventView status={federation} />}
+      {tab === 'host' && lobby.is_host && <HostConsole eventRef={eventRef} />}
+    </div>
+  )
+}
+
+// ── Player announcements banner ────────────────────────────────────────────
+
+const ANN_STYLE: Record<string, string> = {
+  info: 'border-sky-500/25 bg-sky-500/[0.06] text-sky-200',
+  warning: 'border-amber-500/25 bg-amber-500/[0.06] text-amber-200',
+  critical: 'border-[#F43F5E]/25 bg-[#F43F5E]/[0.06] text-[#FB7185]',
+}
+
+function AnnouncementsBanner({ eventRef }: { eventRef: string }) {
+  const { data } = useApi<{ announcements: Announcement[] }>(`/api/events/${eventRef}/announcements`)
+  const items = (data?.announcements ?? []).slice(0, 3)
+  if (items.length === 0) return null
+  return (
+    <div className="space-y-2">
+      {items.map((a) => (
+        <div
+          key={a.announcement_id}
+          className={`flex items-start gap-2 rounded-xl border px-3 py-2 text-sm ${ANN_STYLE[a.severity] ?? ANN_STYLE.info}`}
+        >
+          <Megaphone className="mt-0.5 h-4 w-4 shrink-0" />
+          <div>
+            <p className="font-semibold">{a.title}</p>
+            <p className="mt-0.5 whitespace-pre-wrap opacity-90">{a.body_md}</p>
+          </div>
+        </div>
+      ))}
     </div>
   )
 }
