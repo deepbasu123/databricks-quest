@@ -36,6 +36,12 @@ SKIP_SCORING=""
 SKIP_AUTH_CHECK=""
 DEPLOY_MODE=""  # "full" (DAB bundle) or "quick" (direct API, like Forge)
 
+# ── Event Mode (GameDay) — opt-in master switch (legacy adoption is default) ──
+# Off unless --event-mode is passed or a master/child role is selected. When
+# off, the deployed app exposes ZERO GameDay surface (Event APIs 404, Event UI
+# hidden) and GameDay migrations are skipped — i.e. the legacy adoption app.
+QUEST_EVENT_MODE=""         # "on" enables Event Mode; empty = off (legacy)
+
 # ── Federation (ADR_006) — one codebase, role selected by these flags ────────
 QUEST_ROLE=""               # standalone (default) | master | child
 MASTER_LAKEBASE_HOST=""     # child: the MASTER workspace's shared Lakebase host
@@ -152,6 +158,15 @@ write_app_yaml() {
     echo "    value: \"$lb_host\""
     echo "  - name: LAKEBASE_DB"
     echo "    value: \"$lb_db\""
+    # SQL warehouse the sql_assertion validators execute against (PR03). Emitted
+    # for every role when known so deterministic SQL checks have a target.
+    [ -n "$WAREHOUSE_ID" ] && { echo "  - name: QUEST_SQL_WAREHOUSE_ID"; echo "    value: \"$WAREHOUSE_ID\""; }
+    # Event Mode master switch. Only emitted when ON; absence = legacy default,
+    # so a standalone adoption deploy keeps its exact two-variable app.yaml.
+    if [ "$QUEST_EVENT_MODE" = "on" ]; then
+      echo "  - name: QUEST_EVENT_MODE"
+      echo "    value: \"on\""
+    fi
     if [ -n "$QUEST_ROLE" ] && [ "$QUEST_ROLE" != "standalone" ]; then
       echo "  - name: QUEST_ROLE"
       echo "    value: \"$QUEST_ROLE\""
@@ -184,6 +199,7 @@ while [[ $# -gt 0 ]]; do
     --skip-auth-check) SKIP_AUTH_CHECK=1; shift ;;
     --quick)          DEPLOY_MODE="quick"; shift ;;
     --full)           DEPLOY_MODE="full"; shift ;;
+    --event-mode)         QUEST_EVENT_MODE="on"; shift ;;
     --role)               QUEST_ROLE="$2"; shift 2 ;;
     --master-lakebase-host)  MASTER_LAKEBASE_HOST="$2"; shift 2 ;;
     --master-lakebase-token) MASTER_LAKEBASE_TOKEN="$2"; shift 2 ;;
@@ -208,6 +224,12 @@ while [[ $# -gt 0 ]]; do
       echo "  --skip-build          Skip frontend build (use existing app/static/)"
       echo "  --skip-scoring        Skip running the scoring pipeline"
       echo "  --skip-auth-check     Skip authentication validation (use if already authenticated)"
+      echo ""
+      echo "Event Mode (GameDay) — opt-in; legacy adoption app is the default:"
+      echo "  --event-mode             Enable GameDay/Event Mode (default: OFF)."
+      echo "                           When OFF, Event APIs 404, Event UI is hidden,"
+      echo "                           and GameDay migrations are skipped."
+      echo "                           Implied by --role master|child."
       echo ""
       echo "Multi-workspace federation (ADR_006 — one codebase, role-driven):"
       echo "  --role ROLE              standalone (default) | master | child"
@@ -244,6 +266,13 @@ case "$QUEST_ROLE" in
   standalone|master|child) ;;
   *) fail "Invalid --role '$QUEST_ROLE'. Use standalone, master, or child." ;;
 esac
+
+# ── Resolve Event Mode (GameDay) ─────────────────────────────────────────────
+# Opt-in: master/child roles imply it; otherwise it is off unless --event-mode
+# was passed. Off = legacy adoption app (no GameDay surface, no GameDay schema).
+if [ "$QUEST_ROLE" = "master" ] || [ "$QUEST_ROLE" = "child" ]; then
+  QUEST_EVENT_MODE="on"
+fi
 
 if [ "$QUEST_ROLE" = "child" ]; then
   [ -n "$MASTER_LAKEBASE_HOST" ] || fail "child role requires --master-lakebase-host."
@@ -918,7 +947,12 @@ CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id);
 
   # Apply GameDay (Event Mode) schema migrations before granting access, so the
   # service principal GRANT below also covers the newly-created GameDay tables.
-  run_gameday_migrations "$LAKEBASE_HOST" "$LAKEBASE_DB" "$USER_EMAIL" "$LB_TOKEN"
+  # Skipped entirely for a legacy (Event-Mode-off) deploy so its DB is untouched.
+  if [ "$QUEST_EVENT_MODE" = "on" ]; then
+    run_gameday_migrations "$LAKEBASE_HOST" "$LAKEBASE_DB" "$USER_EMAIL" "$LB_TOKEN"
+  else
+    info "Event Mode off — skipping GameDay schema migrations (legacy adoption app)."
+  fi
 
   # master: provision the shared event-writer role children will use.
   if [ "$QUEST_ROLE" = "master" ]; then
@@ -985,8 +1019,9 @@ else
   step "Step 6/8: Lakebase"
   success "Using provided Lakebase: $LAKEBASE_HOST/$LAKEBASE_DB"
 
-  # Apply GameDay migrations against the provided Lakebase endpoint. Mint a
-  # database credential if we can; otherwise fall back to the workspace token.
+  # Apply GameDay migrations against the provided Lakebase endpoint (Event Mode
+  # only). Mint a database credential if we can; otherwise fall back to the
+  # workspace token. A legacy deploy skips this and leaves the DB untouched.
   LB_PROJECT_ID=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
   LB_TOKEN=$($CLI postgres generate-database-credential \
     "projects/$LB_PROJECT_ID/branches/production/endpoints/primary" \
@@ -994,7 +1029,11 @@ else
   if [ -z "$LB_TOKEN" ]; then
     LB_TOKEN="${DATABRICKS_TOKEN:-}"
   fi
-  run_gameday_migrations "$LAKEBASE_HOST" "$LAKEBASE_DB" "$USER_EMAIL" "$LB_TOKEN"
+  if [ "$QUEST_EVENT_MODE" = "on" ]; then
+    run_gameday_migrations "$LAKEBASE_HOST" "$LAKEBASE_DB" "$USER_EMAIL" "$LB_TOKEN"
+  else
+    info "Event Mode off — skipping GameDay schema migrations (legacy adoption app)."
+  fi
 
   # master with a pre-provided Lakebase: provision the shared event-writer role
   # and refresh app.yaml with master federation env.
@@ -1226,6 +1265,11 @@ if [ -n "$APP_STATE" ]; then
   echo -e "  ${BOLD}App State:${NC}     $APP_STATE"
 fi
 echo -e "  ${BOLD}Lakebase:${NC}      $LAKEBASE_HOST/$LAKEBASE_DB"
+if [ "$QUEST_EVENT_MODE" = "on" ]; then
+  echo -e "  ${BOLD}Event Mode:${NC}    ${GREEN}ENABLED${NC} (GameDay)"
+else
+  echo -e "  ${BOLD}Event Mode:${NC}    off (legacy adoption app)"
+fi
 if [ "$QUEST_ROLE" != "standalone" ]; then
   echo -e "  ${BOLD}Role:${NC}          $QUEST_ROLE${EVENT_SLUG:+  (event: $EVENT_SLUG)}"
   [ -n "$WORKSPACE_ID" ] && echo -e "  ${BOLD}Workspace ID:${NC}  $WORKSPACE_ID"

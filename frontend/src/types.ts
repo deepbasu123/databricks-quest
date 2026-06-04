@@ -86,6 +86,7 @@ export type Page = 'dashboard' | 'missions' | 'leaderboard' | 'admin' | 'federat
 export type QuestRole = 'standalone' | 'master' | 'child'
 
 export interface FederationStatus {
+  event_mode?: boolean
   role: QuestRole
   workspace_id: string | null
   event_slug: string | null

@@ -13,8 +13,11 @@ Databricks Quest runs in two modes from **one codebase and one build**:
   with validation, scoring, leaderboards, host controls, and (optionally)
   many workspaces federating into one.
 
-Nothing here breaks Adoption Mode. A standalone deploy with no GameDay flags
-behaves exactly as before.
+Nothing here breaks Adoption Mode. **Event Mode is opt-in and off by default** —
+a deploy with no GameDay flags is the legacy adoption app, byte-for-byte: the
+GameDay APIs return `404`, the Event UI is hidden, and the GameDay schema
+migrations are skipped. Enable GameDay explicitly with `--event-mode` (or set
+`QUEST_EVENT_MODE=on`); the `master`/`child` roles imply it.
 
 ---
 
@@ -33,16 +36,22 @@ event/team APIs (PR04) are still to come.
 
 ---
 
-## Deployment roles
+## Deployment switches
 
 Everything is selected by runtime parameters (env vars set from `deploy.sh`
-flags). `QUEST_ROLE` is the only mode switch:
+flags). There are **two orthogonal switches**:
 
-| Role | What it is | Lakebase | Migrations | Scoring pipeline |
+1. **`QUEST_EVENT_MODE`** (`--event-mode`) — the GameDay master switch, **off by
+   default**. Off = legacy adoption app (GameDay APIs `404`, Event UI hidden,
+   GameDay migrations skipped). On = GameDay surfaces activate. Implied by the
+   `master`/`child` roles.
+2. **`QUEST_ROLE`** — federation topology, only meaningful once Event Mode is on:
+
+| Role | What it is | Lakebase | GameDay migrations | Scoring pipeline |
 |---|---|---|---|---|
-| `standalone` (default) | Single-workspace app | provisions its own local | runs | runs (adoption) |
-| `master` | Owns the shared event DB + host console | provisions its own | runs (incl. `002`) | runs (adoption) |
-| `child` | One per attendee; writes to the master's DB | **points at master** | **skipped** | **skipped** |
+| `standalone` (default) | Single-workspace app | provisions its own local | only if `--event-mode` | runs (adoption) |
+| `master` | Owns the shared event DB + host console (implies Event Mode) | provisions its own | runs (incl. `002`) | runs (adoption) |
+| `child` | One per attendee; writes to the master's DB (implies Event Mode) | **points at master** | **skipped** | **skipped** |
 
 See [`adr/ADR_006_SHARED_LAKEBASE_MULTI_WORKSPACE_FEDERATION.md`](adr/ADR_006_SHARED_LAKEBASE_MULTI_WORKSPACE_FEDERATION.md)
 for why children connect directly to the master's Lakebase over Postgres
@@ -50,17 +59,26 @@ for why children connect directly to the master's Lakebase over Postgres
 
 ---
 
-## Deploy — single workspace (standalone / one-workspace event)
+## Deploy — single workspace
 
-For a small event run entirely in one workspace, deploy standalone (this is also
-the adoption-mode default) and use Event Mode features in-app:
+**Legacy adoption app (default).** No GameDay surface at all:
 
 ```bash
 ./deploy.sh
 ```
 
-`/api/health` will report migrations `001_gameday_core` and `002_federation`
-applied. You can then import a quest pack (below).
+`/api/health` reports `"event_mode": false`; `/api/events/*`, `/api/host/*`, and
+`/api/federation/*` return `404`.
+
+**Single-workspace GameDay.** For a small event run entirely in one workspace,
+add `--event-mode`:
+
+```bash
+./deploy.sh --event-mode
+```
+
+`/api/health` then reports `"event_mode": true` and migrations `001_gameday_core`
++ `002_federation` applied. You can then import a quest pack (below).
 
 ---
 

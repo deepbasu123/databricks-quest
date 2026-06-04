@@ -93,6 +93,41 @@ class QuestPacksRepository:
             logger.warning("list_tasks failed: %s", exc)
             return []
 
+    def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Return a single task row joined to its quest (for the attempt path)."""
+        try:
+            rows = db.execute_query(
+                """
+                SELECT t.task_id, t.quest_id, t.slug, t.title, t.objective,
+                       t.points, t.validation_mode, q.pack_version_id
+                FROM quest_tasks t
+                JOIN quests q ON q.quest_id = t.quest_id
+                WHERE t.task_id = %s
+                """,
+                (task_id,),
+            )
+            return rows[0] if rows else None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("get_task failed: %s", exc)
+            return None
+
+    def list_validators(self, task_id: str) -> List[Dict[str, Any]]:
+        """Return enabled validators for a task, in authoring order."""
+        try:
+            return db.execute_query(
+                """
+                SELECT validator_id, task_id, type, mode, config_json,
+                       expected_json, timeout_seconds, sort_order, enabled
+                FROM task_validators
+                WHERE task_id = %s AND enabled = TRUE
+                ORDER BY sort_order ASC
+                """,
+                (task_id,),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("list_validators failed: %s", exc)
+            return []
+
     def find_pack_by_slug(self, slug: str) -> Optional[Dict[str, Any]]:
         try:
             rows = db.execute_query(

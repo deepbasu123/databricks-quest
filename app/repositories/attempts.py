@@ -1,16 +1,23 @@
 """Repository for task attempts and their validation results.
 
-PR01 scope: read helpers for attempt/validation history. Submitting an attempt
-runs through the validation engine and scoring path introduced in later PRs, so
-the write path is a documented stub here.
+Reads cover attempt/validation history; writes (PR03) persist a submitted
+attempt, record one normalized row per validator result, and transition the
+attempt's terminal status. Federated rows carry ``workspace_id`` (and a NULL
+``team_id`` resolved later via the identity map); standalone rows carry
+``team_id`` and leave ``workspace_id`` NULL.
 """
 
 import logging
+import uuid
 from typing import Any, Dict, List, Optional
 
 import db
 
 logger = logging.getLogger("databricks-quest.repositories.attempts")
+
+
+def _new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
 class AttemptsRepository:
@@ -60,12 +67,100 @@ class AttemptsRepository:
             logger.warning("list_validation_results failed: %s", exc)
             return []
 
-    # ── Mutations (deferred to later PRs) ────────────────────────────────────
+    # ── Mutations (PR03) ─────────────────────────────────────────────────────
 
-    def create_attempt(self, *args, **kwargs):
-        raise NotImplementedError("create_attempt is implemented in a later PR")
+    def create_attempt(
+        self,
+        *,
+        event_id: str,
+        task_id: str,
+        submitted_by: str,
+        submission: Optional[Dict[str, Any]] = None,
+        team_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        status: str = "running",
+    ) -> str:
+        """Insert a new attempt row and return its id.
 
-    def record_validation_result(self, *args, **kwargs):
-        raise NotImplementedError(
-            "record_validation_result is implemented in a later PR"
+        Raises on failure so the request handler can surface a host-safe error
+        (the attempt is the anchor for everything that follows).
+        """
+        from psycopg2.extras import Json
+
+        attempt_id = _new_id("att")
+        db.execute(
+            """
+            INSERT INTO task_attempts
+                (attempt_id, event_id, team_id, task_id, submitted_by,
+                 submission_json, status, started_at, workspace_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, %s)
+            """,
+            (
+                attempt_id,
+                event_id,
+                team_id,
+                task_id,
+                submitted_by,
+                Json(submission) if submission is not None else None,
+                status,
+                workspace_id,
+            ),
+        )
+        return attempt_id
+
+    def record_validation_result(
+        self,
+        *,
+        attempt_id: str,
+        validator_id: str,
+        status: str,
+        score_delta: int = 0,
+        public_message: Optional[str] = None,
+        private_message: Optional[str] = None,
+        evidence: Optional[Dict[str, Any]] = None,
+        workspace_id: Optional[str] = None,
+    ) -> str:
+        """Persist one validator's normalized outcome; return its row id."""
+        from psycopg2.extras import Json
+
+        result_id = _new_id("vres")
+        db.execute(
+            """
+            INSERT INTO validation_results
+                (validation_result_id, attempt_id, validator_id, status,
+                 score_delta, public_message, private_message, evidence_json,
+                 started_at, completed_at, workspace_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, %s)
+            """,
+            (
+                result_id,
+                attempt_id,
+                validator_id,
+                status,
+                score_delta,
+                public_message,
+                private_message,
+                Json(evidence) if evidence is not None else None,
+                workspace_id,
+            ),
+        )
+        return result_id
+
+    def set_status(
+        self,
+        attempt_id: str,
+        status: str,
+        error_message: Optional[str] = None,
+    ) -> None:
+        """Transition an attempt to a terminal status and stamp completion."""
+        db.execute(
+            """
+            UPDATE task_attempts
+            SET status = %s,
+                error_message = %s,
+                completed_at = CURRENT_TIMESTAMP
+            WHERE attempt_id = %s
+            """,
+            (status, error_message, attempt_id),
         )
