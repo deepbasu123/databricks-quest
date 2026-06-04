@@ -79,4 +79,60 @@ export interface PipelineStatus {
   total_events_scored: number
 }
 
-export type Page = 'dashboard' | 'missions' | 'leaderboard' | 'admin'
+export type Page = 'dashboard' | 'missions' | 'leaderboard' | 'admin' | 'federation'
+
+// ── Multi-workspace federation (ADR_006) ────────────────────────────────────
+
+export type QuestRole = 'standalone' | 'master' | 'child'
+
+export interface FederationStatus {
+  role: QuestRole
+  workspace_id: string | null
+  event_slug: string | null
+  event_id: string | null
+  submitted_by?: string
+  mapped: boolean
+  db_connected?: boolean
+  team: { team_id: string; team_name?: string; display_name?: string } | null
+}
+
+export interface TeamLeaderboardEntry {
+  event_id: string
+  team_id: string
+  display_name: string | null
+  total_points: number
+  rank: number | null
+  last_scored_at?: string | null
+}
+
+export interface FederationLeaderboard {
+  leaderboard: TeamLeaderboardEntry[]
+  you: TeamLeaderboardEntry | null
+  mapped: boolean
+  event_id: string | null
+  workspace_id?: string | null
+}
+
+export interface EventWorkspace {
+  workspace_id: string
+  event_slug: string | null
+  workspace_host: string | null
+  app_url: string | null
+  app_version: string | null
+  status: string
+  registered_at: string | null
+  last_seen_at: string | null
+  scoring_events: number
+  points: number
+  validations: number
+  validation_passes: number
+}
+
+export interface UnmappedIdentity {
+  event_id: string
+  workspace_id: string
+  lab_user_email: string
+  scoring_events: number
+  unattributed_points: number
+  last_seen_at: string | null
+}

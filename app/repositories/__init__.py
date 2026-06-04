@@ -13,10 +13,13 @@ from .events import EventsRepository
 from .quest_packs import QuestPacksRepository
 from .attempts import AttemptsRepository
 from .leaderboard import LeaderboardRepository
+from .federation import FederationRepository, RosterImportError
 
 __all__ = [
     "EventsRepository",
     "QuestPacksRepository",
     "AttemptsRepository",
     "LeaderboardRepository",
+    "FederationRepository",
+    "RosterImportError",
 ]

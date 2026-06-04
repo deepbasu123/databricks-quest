@@ -9,6 +9,7 @@ import {
   Gift,
   Award,
   Layers3,
+  Network,
 } from 'lucide-react'
 import DashboardV2 from './components/DashboardV2'
 import Missions from './components/Missions'
@@ -16,13 +17,16 @@ import Leaderboard from './components/Leaderboard'
 import AdminPanel from './components/AdminPanel'
 import BadgeVault from './components/BadgeVault'
 import Rewards from './components/Rewards'
+import Federation from './components/Federation'
 import { BrandLockup } from './components/brand/BrandLockup'
 import { levelInfo } from './lib/levels'
-import type { Page, UserProfile, Notification } from './types'
+import type { Page, UserProfile, Notification, FederationStatus } from './types'
 
 type NavPage = Page | 'badges' | 'rewards'
 
-const NAV_ITEMS: { id: NavPage; label: string; icon: typeof LayoutDashboard }[] = [
+type NavItem = { id: NavPage; label: string; icon: typeof LayoutDashboard }
+
+const BASE_NAV_ITEMS: NavItem[] = [
   { id: 'dashboard', label: 'Overview', icon: LayoutDashboard },
   { id: 'missions', label: 'Missions', icon: Target },
   { id: 'leaderboard', label: 'Leaderboard', icon: Trophy },
@@ -38,7 +42,10 @@ const pageTitles: Record<NavPage, { title: string; subtitle: string }> = {
   badges: { title: 'Badge Vault', subtitle: 'Track achievements and unlock mastery milestones' },
   rewards: { title: 'Rewards', subtitle: 'Swag, recognition, and weekly prize eligibility' },
   admin: { title: 'Admin', subtitle: 'Platform adoption telemetry and scoring health' },
+  federation: { title: 'Event', subtitle: 'Live event-wide standings across all workspaces' },
 }
+
+const masterPageMeta = { title: 'Host Console', subtitle: 'Workspace health, roster, and identity reconciliation' }
 
 const levelColor: Record<string, string> = {
   Bronze: '#CD7F32',
@@ -54,6 +61,7 @@ export default function App() {
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [showNotifs, setShowNotifs] = useState(false)
+  const [federation, setFederation] = useState<FederationStatus | null>(null)
 
   const fetchProfile = useCallback(async () => {
     try {
@@ -76,12 +84,33 @@ export default function App() {
     }
   }, [])
 
+  const fetchFederation = useCallback(async () => {
+    try {
+      const res = await fetch('/api/federation/status')
+      if (res.ok) setFederation(await res.json())
+    } catch {
+      // Standalone deployments may not expose this; ignore.
+    }
+  }, [])
+
   useEffect(() => {
     fetchProfile()
     fetchNotifications()
-  }, [fetchProfile, fetchNotifications])
+    fetchFederation()
+  }, [fetchProfile, fetchNotifications, fetchFederation])
 
-  const activeMeta = pageTitles[page]
+  const isFederated = !!federation && federation.role !== 'standalone'
+  const navItems: NavItem[] = isFederated
+    ? [
+        BASE_NAV_ITEMS[0],
+        ...(federation?.role === 'child' ? [BASE_NAV_ITEMS[1]] : []),
+        { id: 'federation' as NavPage, label: federation?.role === 'master' ? 'Host Console' : 'Event', icon: Network },
+        ...BASE_NAV_ITEMS.slice(2),
+      ]
+    : BASE_NAV_ITEMS
+
+  const activeMeta =
+    page === 'federation' && federation?.role === 'master' ? masterPageMeta : pageTitles[page]
   const totalPoints = profile?.total_points ?? 0
   const level = profile?.level ?? 'Bronze'
   const info = levelInfo(totalPoints)
@@ -128,7 +157,7 @@ export default function App() {
         </div>
 
         <nav className="relative z-10 mt-5 flex-1 space-y-1 px-4">
-          {NAV_ITEMS.map((item) => {
+          {navItems.map((item) => {
             const active = page === item.id
             const Icon = item.icon
             return (
@@ -210,6 +239,7 @@ export default function App() {
             {page === 'badges' && <BadgeVault profile={profile} />}
             {page === 'rewards' && <Rewards profile={profile} />}
             {page === 'admin' && <AdminPanel />}
+            {page === 'federation' && federation && <Federation status={federation} />}
           </div>
         </main>
       </div>

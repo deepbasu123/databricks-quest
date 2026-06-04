@@ -269,13 +269,33 @@ Single workspace:
 - scheduled adoption scoring job
 - validation worker job
 
-### Future deployment
+### Multi-workspace federation (ADR_006)
 
-- multi-workspace event federation
-- account-level provisioning
+Large GameDay events provision one workspace per attendee. Federation is
+delivered by the **shared-Lakebase** model (see
+`adr/ADR_006_SHARED_LAKEBASE_MULTI_WORKSPACE_FEDERATION.md`), selected by a
+single `QUEST_ROLE` parameter on the same codebase/build:
+
+- `standalone` (default) — single workspace, local Lakebase. Unchanged.
+- `master` — owns the one shared Lakebase, host console, reporting, roster /
+  identity map, and provisions the shared event-writer credential.
+- `child` — runs gameplay + validation locally but points its DB layer at the
+  master's Lakebase (over Postgres `:5432`, not the Apps auth proxy) using the
+  shared INSERT-only event-writer credential, stamping writes with
+  `QUEST_WORKSPACE_ID`. Aggregation is automatic in the shared DB; the child UI
+  shows the event-wide leaderboard and highlights its own team's rank.
+
+Identity (`labuser+{n}@awsbricks.com` → real person/team) is reconciled
+centrally via a host-uploaded roster in `participant_identity_map`; the
+leaderboard view resolves federated rows through it while preserving the
+standalone `team_id` path.
+
+### Still future
+
+- account-level provisioning of the child workspaces themselves
 - central quest pack registry
 - partner-authored quest packs
-- central analytics/reporting workspace
+- per-child OAuth writer roles (stronger isolation than the shared credential)
 
 ## Compatibility with existing repo
 

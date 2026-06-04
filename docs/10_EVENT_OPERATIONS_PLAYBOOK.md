@@ -170,6 +170,69 @@ After event:
 - clean generated endpoints/resources
 - preserve audit tables
 
+## Multi-workspace federation (large lab events)
+
+For large lab events where every attendee gets their own provisioned Databricks
+workspace, deploy in **federated mode**: one **master** app on the admin
+workspace owns the shared Lakebase, and each attendee workspace runs a **child**
+app that writes to it directly over Postgres. Players play in their own child
+app; the master is the host console. See
+`adr/ADR_006_SHARED_LAKEBASE_MULTI_WORKSPACE_FEDERATION.md`.
+
+### Setup sequence
+
+1. **Deploy the master** on the admin workspace and create the event:
+
+   ```bash
+   ./deploy.sh --role master --event anz-gameday
+   ```
+
+   The master provisions the shared INSERT-only event-writer credential and
+   prints it (plus an example child deploy command) in the success banner.
+   Distribute the credential and master Lakebase host to the child deploys.
+
+2. **Deploy a child** into each attendee workspace, pointing at the master:
+
+   ```bash
+   ./deploy.sh --role child \
+     --master-lakebase-host <master-host> \
+     --master-lakebase-token <event-writer-credential> \
+     --event anz-gameday \
+     --workspace-id ws-anzgt-01
+   ```
+
+   Children skip local Lakebase provisioning and migrations; they connect to the
+   already-migrated shared DB and check themselves in on startup. (If workspace
+   provisioning templates the deploy, pass a unique `--workspace-id` per
+   attendee.)
+
+3. **Import the roster** on the master host console (or via
+   `POST /api/host/events/{event_id}/roster/import`). The CSV maps each
+   `workspace_id` + `labuser+{n}@awsbricks.com` to a real name and team. Lab
+   environments create generic `labuser+{n}@awsbricks.com` users, so this map is
+   what turns anonymous lab users into named teams on the leaderboard.
+
+### During the event
+
+- Watch the **Workspaces** health panel for children that have stopped checking
+  in or stopped writing scores.
+- Watch the **Unmapped identities** panel for attendees writing scores who are
+  not on the roster yet. Nothing is lost — add them to the roster CSV and
+  **re-import** (idempotent) to attribute their points retroactively.
+- The event-wide leaderboard is identical on the master and on every child, so
+  attendees see global standings and their own team's rank from inside their own
+  workspace.
+
+### Federation pre-event checklist
+
+- Master deployed and event created; event-writer credential captured.
+- A child app deployed in each attendee workspace, all pointing at the master.
+- Child apps appear in the master Workspaces panel (startup check-in succeeded).
+- Roster CSV imported; **Unmapped identities** is empty after a sample write.
+- A sample child submission appears on the master leaderboard under the right
+  team.
+- Writer credential verified as INSERT-only (`python scripts/federation_spike.py`).
+
 ## Event staffing model
 
 ### Small event: 10–25 people

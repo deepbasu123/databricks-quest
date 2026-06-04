@@ -50,6 +50,17 @@ class EventsRepository:
             logger.warning("get_event failed: %s", exc)
             return None
 
+    def get_event_by_slug(self, slug: str) -> Optional[Dict[str, Any]]:
+        """Return a single event row by slug, or None if absent/unavailable."""
+        try:
+            rows = db.execute_query(
+                "SELECT * FROM events WHERE slug = %s", (slug,)
+            )
+            return rows[0] if rows else None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("get_event_by_slug failed: %s", exc)
+            return None
+
     def list_event_hosts(self, event_id: str) -> List[Dict[str, Any]]:
         try:
             return db.execute_query(

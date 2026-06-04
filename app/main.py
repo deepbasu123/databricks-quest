@@ -3,9 +3,10 @@ import logging
 from datetime import datetime, date
 from typing import List, Dict, Any, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel
 
 # Lakebase connection handling is centralized in db.py so the app and the
 # migration runner share one implementation.
@@ -18,6 +19,17 @@ from db import (
     get_lakebase_connection,
     execute_query,
 )
+import config
+from repositories import (
+    QuestPacksRepository,
+    EventsRepository,
+    LeaderboardRepository,
+    FederationRepository,
+    RosterImportError,
+)
+from services import quest_pack_loader
+from services import federation as fed
+from services.quest_pack_loader import QuestPackImportError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("databricks-quest")
@@ -28,6 +40,14 @@ if not LAKEBASE_HOST:
     logger.warning("LAKEBASE_HOST not set — database queries will fail until configured")
 else:
     logger.info(f"Data source: Lakebase ({LAKEBASE_HOST}/{LAKEBASE_DB})")
+
+logger.info("Quest role: %s", config.QUEST_ROLE)
+if config.is_child():
+    logger.info(
+        "Federation child: workspace_id=%s event=%s → shared master Lakebase",
+        config.QUEST_WORKSPACE_ID or "(unset)",
+        config.QUEST_EVENT_SLUG or "(unset)",
+    )
 
 MISSION_DEFINITIONS = [
     # --- Getting Started ---
@@ -124,6 +144,58 @@ def get_user_email(request: Request) -> str:
     return email
 
 
+# Optional host allowlist for GameDay host endpoints. When QUEST_HOST_ALLOWLIST
+# is set (comma-separated emails) only those users may call /api/host/*; when
+# unset the endpoints are open, matching today's /api/admin behaviour. This is
+# the single chokepoint to replace with the full event role model in a later PR.
+QUEST_HOST_ALLOWLIST = [
+    e.strip().lower() for e in os.getenv("QUEST_HOST_ALLOWLIST", "").split(",") if e.strip()
+]
+
+
+def require_host(request: Request) -> str:
+    """FastAPI dependency: resolve the user and enforce the host allowlist."""
+    user = get_user_email(request)
+    if QUEST_HOST_ALLOWLIST and user.lower() not in QUEST_HOST_ALLOWLIST:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": {"code": "FORBIDDEN", "message": "Host role required."}},
+        )
+    return user
+
+
+def require_master_host(request: Request) -> str:
+    """Host dependency that additionally forbids the child role.
+
+    Roster / workspace-health endpoints are master-side concerns (children have
+    only INSERT on the shared facts and cannot create teams/participants). They
+    are available on ``master`` and ``standalone`` (for local testing) but
+    return 404 on a ``child`` deployment, so the same binary exposes the right
+    surface per role.
+    """
+    if config.is_child():
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "NOT_FOUND", "message": "Endpoint not available in child role."}},
+        )
+    return require_host(request)
+
+
+quest_packs_repo = QuestPacksRepository()
+events_repo = EventsRepository()
+leaderboard_repo = LeaderboardRepository()
+federation_repo = FederationRepository()
+
+
+@app.on_event("startup")
+async def _federation_startup() -> None:
+    """Child role: record this workspace's presence in the shared DB once."""
+    try:
+        fed.startup_checkin()
+    except Exception as exc:  # noqa: BLE001 - never block startup
+        logger.warning("federation startup check-in skipped: %s", exc)
+
+
 # ---------------------------------------------------------------------------
 # API Endpoints
 # ---------------------------------------------------------------------------
@@ -145,6 +217,8 @@ async def health():
         "db_connected": db_ok,
         "migrations_applied": migrations,
         "migrations_count": len(migrations),
+        "role": config.QUEST_ROLE,
+        "federation": config.summary(),
         "timestamp": datetime.utcnow().isoformat(),
     }
 
@@ -310,6 +384,187 @@ async def get_pipeline_status():
         }
     except Exception:
         return {"status": "not_initialized", "last_run": None, "total_events_scored": 0}
+
+
+# ---------------------------------------------------------------------------
+# Host / admin — Quest Packs (PR02)
+# ---------------------------------------------------------------------------
+
+class QuestPackPayload(BaseModel):
+    manifest_yaml: str
+
+
+@app.post("/api/host/quest-packs/lint")
+async def host_lint_quest_pack(body: QuestPackPayload, user: str = Depends(require_host)):
+    """Lint a quest pack manifest without persisting anything."""
+    return quest_pack_loader.lint_text(body.manifest_yaml)
+
+
+@app.post("/api/host/quest-packs/import")
+async def host_import_quest_pack(body: QuestPackPayload, user: str = Depends(require_host)):
+    """Lint and import a quest pack manifest as a new immutable version."""
+    try:
+        return quest_pack_loader.import_text(body.manifest_yaml, actor=user)
+    except QuestPackImportError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {"code": "QUEST_PACK_INVALID", "message": exc.message},
+                "lint": exc.lint,
+            },
+        )
+
+
+@app.get("/api/host/quest-packs")
+async def host_list_quest_packs(user: str = Depends(require_host)):
+    """List imported quest packs."""
+    return {"quest_packs": quest_packs_repo.list_packs()}
+
+
+@app.get("/api/host/quest-packs/{pack_id}")
+async def host_get_quest_pack(pack_id: str, user: str = Depends(require_host)):
+    """Get a quest pack with its versions and per-version content counts."""
+    detail = quest_packs_repo.get_pack_detail(pack_id)
+    if not detail:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "NOT_FOUND", "message": "Quest pack not found."}},
+        )
+    return detail
+
+
+# ---------------------------------------------------------------------------
+# Federation — multi-workspace GameDay (ADR_006)
+# ---------------------------------------------------------------------------
+# These endpoints ship in every deployment; role only changes which are
+# meaningfully active. The child read endpoints work everywhere (standalone
+# returns an empty/standalone shape); the host roster/health endpoints 404 on
+# a child deployment via require_master_host.
+
+
+class RosterImportPayload(BaseModel):
+    csv: str
+
+
+def _resolve_event_or_404(event_id_or_slug: str) -> str:
+    """Accept either an event_id or a slug and return the canonical event_id."""
+    ev = events_repo.get_event(event_id_or_slug) or events_repo.get_event_by_slug(
+        event_id_or_slug
+    )
+    if not ev:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "NOT_FOUND", "message": "Event not found."}},
+        )
+    return ev["event_id"]
+
+
+@app.get("/api/federation/status")
+async def federation_status(request: Request):
+    """Role + this workspace's own team mapping (child 'your rank' context).
+
+    Includes a DB-connection health flag the child UI uses for its indicator.
+    """
+    user = get_user_email(request)
+    status = fed.child_status(submitted_by=user)
+    status["submitted_by"] = user
+    try:
+        status["db_connected"] = db.healthcheck()
+    except Exception:  # noqa: BLE001
+        status["db_connected"] = False
+    return status
+
+
+@app.get("/api/federation/leaderboard")
+async def federation_leaderboard(request: Request, event: Optional[str] = None):
+    """Event-wide leaderboard from the shared view + this workspace's own team.
+
+    Resolves the event from the query param, else the configured event slug.
+    Returns ``{ leaderboard: [...], you: {...}|null, mapped: bool }`` so the
+    child UI can render the overall standings and highlight its team's rank.
+    """
+    user = get_user_email(request)
+    event_id = fed.resolve_event_id(event) if event else fed.resolve_event_id()
+    if event and not event_id:
+        # Caller passed an explicit id/slug — try it directly as an id.
+        ev = events_repo.get_event(event)
+        event_id = ev["event_id"] if ev else None
+    if not event_id:
+        return {"leaderboard": [], "you": None, "mapped": False, "event_id": None}
+
+    rows = leaderboard_repo.get_team_leaderboard(event_id)
+    you = None
+    mapped = False
+    if config.QUEST_WORKSPACE_ID:
+        identity = federation_repo.resolve_identity(
+            event_id, config.QUEST_WORKSPACE_ID, user
+        )
+        if identity and identity.get("team_id"):
+            mapped = True
+            team_id = identity["team_id"]
+            you = next((r for r in rows if r.get("team_id") == team_id), None)
+            if you is None:
+                # Mapped but no points yet — surface the team with a null rank.
+                you = {
+                    "event_id": event_id,
+                    "team_id": team_id,
+                    "display_name": identity.get("team_display_name"),
+                    "total_points": 0,
+                    "rank": None,
+                }
+    return {
+        "leaderboard": rows,
+        "you": you,
+        "mapped": mapped,
+        "event_id": event_id,
+        "workspace_id": config.QUEST_WORKSPACE_ID or None,
+    }
+
+
+@app.post("/api/host/events/{event_id}/roster/import")
+async def host_import_roster(
+    event_id: str,
+    body: RosterImportPayload,
+    user: str = Depends(require_master_host),
+):
+    """Import a roster CSV: pre-create teams/participants + identity map.
+
+    CSV columns (aliases accepted): workspace_id|workspace_host, lab_user_email,
+    team_name, optional display_name, real_email. Re-import is idempotent.
+    """
+    resolved = _resolve_event_or_404(event_id)
+    try:
+        result = federation_repo.import_roster(resolved, body.csv)
+    except RosterImportError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "ROSTER_INVALID", "message": str(exc)}},
+        )
+    from services import record_audit
+
+    record_audit(
+        action="roster.import",
+        actor_user_id=user,
+        event_id=resolved,
+        target_type="event",
+        target_id=resolved,
+        payload={k: result[k] for k in ("rows", "teams_created", "participants_created", "identities_mapped")},
+    )
+    return result
+
+
+@app.get("/api/host/events/{event_id}/workspaces")
+async def host_event_workspaces(event_id: str, user: str = Depends(require_master_host)):
+    """Per-workspace health: check-ins, write counts, validation pass rate."""
+    resolved = _resolve_event_or_404(event_id)
+    return {"workspaces": federation_repo.list_event_workspaces(resolved)}
+
+
+@app.get("/api/host/events/{event_id}/identities/unmapped")
+async def host_unmapped_identities(event_id: str, user: str = Depends(require_master_host)):
+    """Federated scoring rows not yet attributable to a team, for reconciliation."""
+    resolved = _resolve_event_or_404(event_id)
+    return {"unmapped": federation_repo.list_unmapped_identities(resolved)}
 
 
 # ---------------------------------------------------------------------------

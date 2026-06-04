@@ -6,5 +6,6 @@ use to satisfy the "all mutations must be auditable" requirement.
 """
 
 from .audit import record_audit
+from . import federation
 
-__all__ = ["record_audit"]
+__all__ = ["record_audit", "federation"]

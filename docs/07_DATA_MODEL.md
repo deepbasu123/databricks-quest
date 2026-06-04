@@ -354,6 +354,100 @@ FROM task_attempts a
 GROUP BY a.event_id, a.team_id, a.task_id;
 ```
 
+## Multi-workspace federation (ADR_006)
+
+For large events we run **one app per attendee workspace**, all writing to a
+single shared Lakebase attached to the master workspace. The schema is the same
+for standalone, master, and child roles — federation adds nullable columns and
+two tables, so standalone behaviour is unchanged. See
+`adr/ADR_006_SHARED_LAKEBASE_MULTI_WORKSPACE_FEDERATION.md` and
+`app/migrations/002_federation.sql`.
+
+### Federation columns (migration 002)
+
+`workspace_id TEXT` (nullable) is added to `scoring_events`, `task_attempts`,
+`validation_results`, `hints_taken`, and `participants`. Federated rows stamp it
+(and write `user_id = labuser+{n}@awsbricks.com`); standalone rows leave it
+`NULL`. The unique `scoring_events.idempotency_key` is made deterministic per
+`(workspace_id, source)` so a child retry never double-awards.
+
+### event_workspaces
+
+Child presence registry. Each child app upserts one row on startup (no outbox,
+no ingest API). The master host console reads it for the workspace-health panel.
+
+```sql
+CREATE TABLE event_workspaces (
+  workspace_id   TEXT PRIMARY KEY,
+  event_id       TEXT,
+  event_slug     TEXT,
+  workspace_host TEXT,
+  app_url        TEXT,
+  app_version    TEXT,
+  status         TEXT NOT NULL DEFAULT 'active',
+  registered_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  last_seen_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### participant_identity_map
+
+Central mapping of `(event_id, workspace_id, lab_user_email)` → real person and
+team. The host roster import populates it; the leaderboard view resolves
+federated `scoring_events` through it. `source` records provenance (`roster`,
+`self_claim`, `pending`).
+
+```sql
+CREATE TABLE participant_identity_map (
+  event_id       TEXT NOT NULL,
+  workspace_id   TEXT NOT NULL,
+  lab_user_email TEXT NOT NULL,
+  participant_id TEXT,
+  team_id        TEXT,
+  real_email     TEXT,
+  display_name   TEXT,
+  source         TEXT NOT NULL DEFAULT 'roster',
+  created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (event_id, workspace_id, lab_user_email)
+);
+```
+
+### Identity-resolving views (migration 002)
+
+`team_scores` is redefined to resolve a team via
+`COALESCE(scoring_events.team_id, participant_identity_map.team_id)` — standalone
+rows keep their direct `team_id`, federated rows resolve through the identity
+map, and rows that resolve to no team are excluded. `event_leaderboard` keeps the
+same shape (so it works identically in every role) but now transitively spans
+every workspace. A new `unmapped_identities` view surfaces federated
+`scoring_events` not yet on the roster for host reconciliation — nothing is lost;
+points attribute the moment the roster is (re-)imported.
+
+```sql
+CREATE OR REPLACE VIEW team_scores AS
+SELECT se.event_id,
+       COALESCE(se.team_id, pim.team_id) AS team_id,
+       SUM(se.points_delta) AS total_points,
+       COUNT(*)             AS scoring_events,
+       MAX(se.created_at)   AS last_scored_at
+FROM scoring_events se
+LEFT JOIN participant_identity_map pim
+       ON pim.event_id = se.event_id
+      AND pim.workspace_id = se.workspace_id
+      AND pim.lab_user_email = se.user_id
+WHERE COALESCE(se.team_id, pim.team_id) IS NOT NULL
+GROUP BY se.event_id, COALESCE(se.team_id, pim.team_id);
+```
+
+### Shared writer credential
+
+Children authenticate to the master Lakebase with a single shared, INSERT-only
+event-writer Postgres role (provisioned by `deploy.sh --role master`). It holds
+`INSERT` on the four fact tables + `SELECT` on the read tables/views and nothing
+else, so a leaked child credential cannot mutate or delete scores. Standalone and
+master apps continue to use workspace-identity OAuth.
+
 ## Delta analytics tables
 
 Sync these Lakebase tables to Delta as append-only facts or snapshots:

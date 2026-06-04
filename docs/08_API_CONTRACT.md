@@ -248,6 +248,53 @@ POST /api/host/quest-packs/lint
 GET /api/host/quest-packs
 ```
 
+### Get quest pack
+
+```http
+GET /api/host/quest-packs/{pack_id}
+```
+
+### Quest pack endpoints — PR02 implementation status
+
+Implemented in PR02 (lint, import, list, get):
+
+- Request body for lint/import is `{ "manifest_yaml": "<yaml string>" }`.
+- **Lint** always returns `200` with `{ ok, errors[], warnings[], summary }`.
+  `summary` has `quests`/`tasks`/`validators`/`hints` counts. `errors` and
+  `warnings` are `{ loc, message }`.
+- **Import** lints first and refuses on errors (`400` with the error model plus
+  a `lint` block). On success returns
+  `{ pack_id, pack_version_id, status, counts, content_hash, warnings }`.
+  `status` is `imported` for a new version or `duplicate` when identical content
+  for the same `(slug, version)` was already imported (idempotent).
+- **Immutability:** re-importing an existing `(slug, version)` with *different*
+  content returns `400` (`QUEST_PACK_INVALID`) — bump `pack.version` instead.
+- **Auth:** `/api/host/*` resolve the user from forwarded headers. An optional
+  `QUEST_HOST_ALLOWLIST` env (comma-separated emails) restricts access; when
+  unset the endpoints are open (parity with `/api/admin`). Full event-role
+  enforcement is a later PR.
+
+Example (against the running app, in an authenticated browser session or with
+forwarded-identity headers):
+
+```bash
+# Lint the built-in sample pack
+curl -sX POST "$APP_URL/api/host/quest-packs/lint" \
+  -H 'Content-Type: application/json' \
+  --data "$(python3 -c 'import json,sys; print(json.dumps({"manifest_yaml": open("quest_packs/built_in/ai_bi_gameday.yml").read()}))')"
+
+# Import it
+curl -sX POST "$APP_URL/api/host/quest-packs/import" \
+  -H 'Content-Type: application/json' \
+  --data "$(python3 -c 'import json,sys; print(json.dumps({"manifest_yaml": open("quest_packs/built_in/ai_bi_gameday.yml").read()}))')"
+
+# List, then fetch detail
+curl -s "$APP_URL/api/host/quest-packs"
+curl -s "$APP_URL/api/host/quest-packs/<pack_id>"
+```
+
+Local linting without a server: `python scripts/lint_quest_pack.py [path]`.
+
 ### Create event
 
 ```http
@@ -354,6 +401,112 @@ Return formats:
 - JSON
 - CSV
 - Markdown
+
+## Multi-workspace federation endpoints (ADR_006)
+
+These endpoints support the shared-Lakebase multi-workspace mode. They are
+additive — a standalone deploy still exposes them, but `/api/federation/status`
+reports `role: "standalone"` and the host endpoints are unused. See
+`adr/ADR_006_SHARED_LAKEBASE_MULTI_WORKSPACE_FEDERATION.md`.
+
+`/api/health` additionally returns a `federation` block (`role`, `workspace_id`,
+`event_slug`) so operators can confirm a deploy's role at a glance. The fields
+are additive and safe for existing clients to ignore.
+
+### Federation status (any role)
+
+```http
+GET /api/federation/status
+```
+
+Returns this deploy's role and — for a child — whether the current lab user is
+mapped to a team yet, plus a DB-connection health flag for the UI indicator:
+
+```json
+{
+  "role": "child",
+  "workspace_id": "ws-anzgt-01",
+  "event_slug": "anz-gameday",
+  "event_id": "evt_123",
+  "submitted_by": "labuser+1@awsbricks.com",
+  "mapped": true,
+  "db_connected": true,
+  "team": { "team_id": "team_1", "display_name": "Red Team" }
+}
+```
+
+### Event-wide leaderboard (child read)
+
+```http
+GET /api/federation/leaderboard?event={optional slug or id}
+```
+
+Reads the shared `event_leaderboard` view (spans every workspace) and highlights
+this workspace's own team:
+
+```json
+{
+  "leaderboard": [
+    { "event_id": "evt_123", "team_id": "team_1", "display_name": "Red Team",
+      "total_points": 1250, "rank": 1, "last_scored_at": "2026-06-10T10:05:00Z" }
+  ],
+  "you": { "team_id": "team_1", "display_name": "Red Team", "total_points": 1250, "rank": 1 },
+  "mapped": true,
+  "event_id": "evt_123",
+  "workspace_id": "ws-anzgt-01"
+}
+```
+
+When this workspace's lab user is not yet on the roster, `mapped` is `false` and
+`you` is `null` — the child UI shows a graceful "not yet mapped" state while the
+player keeps earning (unattributed) points.
+
+### Import roster (master host)
+
+```http
+POST /api/host/events/{event_id}/roster/import
+```
+
+Request — a CSV mapping each lab workspace/user to a real person and team.
+Columns: `workspace_id` (or `workspace_host`), `lab_user_email`, `team_name`,
+optional `display_name`, `real_email`:
+
+```json
+{ "csv": "workspace_id,lab_user_email,display_name,real_email,team_name\nws-anzgt-01,labuser+1@awsbricks.com,Ada Lovelace,ada@corp.com,Red Team" }
+```
+
+Response (idempotent — re-import is safe and re-attributes previously unmapped
+scores):
+
+```json
+{
+  "event_id": "evt_123",
+  "rows": 24,
+  "teams_created": 6,
+  "participants_created": 24,
+  "identities_mapped": 24,
+  "status": "imported"
+}
+```
+
+### Workspace health (master host)
+
+```http
+GET /api/host/events/{event_id}/workspaces
+```
+
+Returns one row per checked-in child with write counts and last-seen time for
+the host console health panel.
+
+### Unmapped identities (master host)
+
+```http
+GET /api/host/events/{event_id}/identities/unmapped
+```
+
+Returns federated `(workspace_id, lab_user_email)` pairs writing scores that are
+not on the roster yet, with their unattributed point totals — the host
+reconciliation worklist.
 
 ## Error model
 

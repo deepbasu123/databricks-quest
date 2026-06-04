@@ -1,5 +1,9 @@
 # 13 — PR-Aligned Sprint Plan
 
+> This is the **plan of record** (intended sequence). For **live status** — what
+> has actually landed, what's deployable/testable, and known gaps — see
+> [`STATUS.md`](STATUS.md).
+
 ## Delivery model
 
 Each sprint should be a logical PR that can be reviewed independently. The build should avoid one massive branch.
@@ -27,6 +31,16 @@ Recommended cadence:
 | PR10 | Security, observability, audit | role checks, audit log, metrics, validation safety controls |
 | PR11 | Field reporting and hunter signaling | post-event report, CSV/Markdown export, sales signal summary |
 | PR12 | Hardening, release, docs | test coverage, load testing, release guide, content authoring guide |
+| PR13 | Federation foundation | `QUEST_ROLE` seam, writer-credential branch, migration 002, deploy role flags |
+| PR14 | Child wiring + writer credential | federated write stamping, deterministic idempotency, startup check-in, master event-writer role |
+| PR15 | Roster + identity reconciliation | roster CSV import, unmapped-identities + workspace-health host endpoints |
+| PR16 | Federation UX | child event leaderboard + own-team rank, master host console panels |
+
+PR13–PR16 deliver the shared-Lakebase multi-workspace federation
+(`adr/ADR_006_SHARED_LAKEBASE_MULTI_WORKSPACE_FEDERATION.md`). They are strictly
+additive: standalone mode is the unchanged default at every step, and one
+codebase/build serves the `standalone`, `master`, and `child` roles purely via
+runtime parameters.
 
 ---
 
@@ -309,3 +323,103 @@ Make it field-ready.
 - Existing adoption mode works.
 - GameDay MVP works.
 - Docs are sufficient for a field team to run an event.
+
+---
+
+## PR13 — Federation foundation
+
+### Goal
+
+Add the single-codebase seam for multi-workspace mode without changing
+standalone behaviour.
+
+### Scope
+
+- `QUEST_ROLE` (standalone|master|child) runtime switch read once at startup
+  (`app/config.py`), plus the federation env (`QUEST_WORKSPACE_ID`,
+  `QUEST_EVENT_SLUG`).
+- `app/db.py` explicit writer-credential branch used when `role=child`.
+- `app/migrations/002_federation.sql`: nullable `workspace_id` on the fact
+  tables, `event_workspaces`, `participant_identity_map`, and identity-resolving
+  `team_scores` / `event_leaderboard` / `unmapped_identities` views.
+- `deploy.sh` role flags (`--role`, `--master-lakebase-host/-token`, `--event`,
+  `--workspace-id`); child skips local Lakebase + migrations.
+- ADR_006 + docs/05, docs/07 updates.
+
+### Acceptance criteria
+
+- Standalone deploy and adoption mode are byte-for-byte unchanged in behaviour.
+- Migration 002 is idempotent and backward compatible (re-runs cleanly).
+- `event_leaderboard` keeps the standalone `team_id` path via `COALESCE`.
+
+---
+
+## PR14 — Child wiring and writer credential
+
+### Goal
+
+Let a child workspace write to the master Lakebase safely.
+
+### Scope
+
+- Child stamps federated writes with `workspace_id` + `submitted_by` and a
+  deterministic `scoring_events.idempotency_key` (per workspace + source).
+- One-shot `event_workspaces` check-in (DB upsert) on child startup — no outbox,
+  no ingest API.
+- Master provisions the shared INSERT-only event-writer Postgres role (grants on
+  the four fact tables + `SELECT` on read tables/views) and surfaces the
+  credential for distribution.
+- Connectivity spike (`scripts/federation_spike.py`) verifying reachability,
+  auth, and grant scope.
+
+### Acceptance criteria
+
+- A child write appears once in the shared DB; a retry never double-awards.
+- The event-writer role can `INSERT`/`SELECT` only — `UPDATE`/`DELETE`/DDL fail.
+- A child checks itself into `event_workspaces` on startup.
+
+---
+
+## PR15 — Roster and identity reconciliation
+
+### Goal
+
+Turn generic `labuser+{n}@awsbricks.com` lab users into named teams.
+
+### Scope
+
+- `POST /api/host/events/{event_id}/roster/import` (CSV) pre-creates
+  teams/participants and populates `participant_identity_map`; re-import is
+  idempotent.
+- `GET /api/host/events/{event_id}/identities/unmapped` reconciliation worklist.
+- `GET /api/host/events/{event_id}/workspaces` per-workspace health.
+
+### Acceptance criteria
+
+- Roster import maps identities; re-import re-attributes previously unmapped
+  scores without duplicating teams/participants.
+- Unmapped identities are surfaced with their unattributed point totals.
+
+---
+
+## PR16 — Federation UX
+
+### Goal
+
+Give children event-wide visibility and hosts a federation console.
+
+### Scope
+
+- Child UI: event-wide leaderboard from `event_leaderboard` with this
+  workspace's own team + rank highlighted; graceful "not yet mapped" state;
+  DB-connection health indicator.
+- Master UI: workspace-health panel, roster import, and unmapped-identities
+  screen.
+- Role-aware navigation (one build; nav adapts to `role`).
+
+### Acceptance criteria
+
+- A child shows global standings and its own team's rank from inside its
+  workspace.
+- An unmapped child shows the "not yet mapped" state and keeps playing.
+- The master console shows workspace health and reconciliation.

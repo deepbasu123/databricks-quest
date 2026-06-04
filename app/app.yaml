@@ -8,6 +8,6 @@ command:
 
 env:
   - name: LAKEBASE_HOST
-    valueFrom: LAKEBASE_HOST
+    value: "ep-autumn-star-d2jzw5xc.database.us-east-1.cloud.databricks.com"
   - name: LAKEBASE_DB
-    valueFrom: LAKEBASE_DB
+    value: "quest_db"
