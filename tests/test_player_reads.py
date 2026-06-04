@@ -139,14 +139,24 @@ def test_get_event_quest_includes_hints_and_completion(main_module, monkeypatch)
     )
     monkeypatch.setattr(
         m.quest_packs_repo, "list_hints",
-        lambda tid: [{"title": "h", "body_md": "look here", "penalty_points": 5, "sort_order": 1}] if tid == "t2" else [],
+        lambda tid: [
+            {"hint_id": "h_shown", "title": "h", "body_md": "look here", "penalty_points": -5, "sort_order": 1},
+            {"hint_id": "h_hidden", "title": "h2", "body_md": "still secret", "penalty_points": -5, "sort_order": 2},
+        ] if tid == "t2" else [],
     )
+    # team has revealed only the first hint → its body is included, the other withheld.
+    monkeypatch.setattr(m.leaderboard_repo, "revealed_hint_ids", lambda e, t: ["h_shown"])
 
     out = _run(m.get_event_quest("evt_1", "q1", request=None, _=None))
     tasks = {t["task_id"]: t for t in out["tasks"]}
     assert tasks["t1"]["complete"] is True
     assert tasks["t2"]["complete"] is False
-    assert tasks["t2"]["hints"][0]["body_md"] == "look here"
+    hints = {h["hint_id"]: h for h in tasks["t2"]["hints"]}
+    assert hints["h_shown"]["revealed"] is True
+    assert hints["h_shown"]["body_md"] == "look here"
+    # Unrevealed hint body is withheld so the penalty can't be dodged.
+    assert hints["h_hidden"]["revealed"] is False
+    assert hints["h_hidden"]["body_md"] is None
 
 
 # ── Repo helper unit tests (stubbed db.execute_query) ────────────────────────

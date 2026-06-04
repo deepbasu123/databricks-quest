@@ -918,6 +918,10 @@ async def get_event_quest(event_id: str, quest_id: str, request: Request, _: Non
         leaderboard_repo.completed_task_ids(resolved_event_id, team["team_id"]) if team else []
     )
 
+    revealed = set(
+        leaderboard_repo.revealed_hint_ids(resolved_event_id, team["team_id"]) if team else []
+    )
+
     tasks = []
     for t in quest_packs_repo.list_tasks_detail(quest_id):
         tid = t.get("task_id")
@@ -925,8 +929,13 @@ async def get_event_quest(event_id: str, quest_id: str, request: Request, _: Non
             **t,
             "complete": tid in completed,
             "hints": [
-                {"title": h.get("title"), "body_md": h.get("body_md"),
-                 "penalty_points": h.get("penalty_points"), "sort_order": h.get("sort_order")}
+                {"hint_id": h.get("hint_id"), "title": h.get("title"),
+                 # Body is withheld until the team reveals (and is charged for)
+                 # the hint — otherwise the penalty would be free to dodge.
+                 "body_md": h.get("body_md") if h.get("hint_id") in revealed else None,
+                 "penalty_points": h.get("penalty_points"),
+                 "sort_order": h.get("sort_order"),
+                 "revealed": h.get("hint_id") in revealed}
                 for h in quest_packs_repo.list_hints(tid)
             ],
         })
@@ -943,6 +952,64 @@ async def list_event_announcements(event_id: str, request: Request, _: None = De
     """Player-facing announcement feed for an event (host broadcasts)."""
     resolved_event_id = _resolve_event_or_404(event_id)
     return {"announcements": announcements_repo.list_for_event(resolved_event_id, limit=20)}
+
+
+def _scoring_frozen(ev: Dict[str, Any]) -> bool:
+    """True when an event no longer accepts new player scoring.
+
+    Frozen and completed events are locked; an explicit ``scoring_frozen_at``
+    timestamp also locks scoring even while the event is otherwise active.
+    """
+    return ev["status"] in ("frozen", "completed", "archived") or bool(
+        ev.get("scoring_frozen_at")
+    )
+
+
+@app.get("/api/events/{event_id}/leaderboard")
+async def get_event_leaderboard(
+    event_id: str, request: Request, _: None = Depends(require_event_mode)
+):
+    """Player-facing live leaderboard for an event.
+
+    Returns the ranked teams (deterministic tie-break: higher points first, then
+    earliest to reach that total), a recent scoring activity feed, the frozen/
+    final flag, and the caller's own team rank highlight.
+    """
+    resolved_event_id = _resolve_event_or_404(event_id)
+    ev = events_repo.get_event(resolved_event_id)
+    if not ev:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "NOT_FOUND", "message": "Event not found."}},
+        )
+
+    rows = leaderboard_repo.get_team_leaderboard(resolved_event_id)
+
+    user = get_user_email(request)
+    identity = _resolve_attempt_identity(resolved_event_id, user)
+    team_id = identity.get("team_id")
+    you = None
+    if team_id:
+        you = next((r for r in rows if r.get("team_id") == team_id), None)
+        if you is None:
+            # On a team but unscored yet — surface with a null rank.
+            team_row = identity.get("team_row") or events_repo.get_team(team_id)
+            you = {
+                "event_id": resolved_event_id,
+                "team_id": team_id,
+                "display_name": (team_row or {}).get("display_name"),
+                "total_points": 0,
+                "rank": None,
+            }
+
+    return {
+        "event": _event_public(ev),
+        "frozen": _scoring_frozen(ev),
+        "status": ev["status"],
+        "leaderboard": rows,
+        "recent": leaderboard_repo.recent_scoring_feed(resolved_event_id, limit=25),
+        "you": you,
+    }
 
 
 @app.post("/api/host/events")
@@ -1679,6 +1746,79 @@ async def submit_attempt(
         "already_awarded": already_awarded,
         "results": public_results,
         "team_id": team_id,
+    }
+
+
+@app.post("/api/events/{event_id}/tasks/{task_id}/hints/{hint_id}/reveal")
+async def reveal_hint(
+    event_id: str,
+    task_id: str,
+    hint_id: str,
+    request: Request,
+    _: None = Depends(require_event_mode),
+):
+    """Reveal a hint and charge its penalty once per team.
+
+    Returns the hint body plus ``penalty_applied`` (the negative delta written
+    this call, 0 if already revealed or scoring is closed) and ``newly_applied``.
+    Revealing again is free — the per-team idempotency key guarantees a single
+    charge. While the event is paused/frozen the hint text is still returned but
+    no penalty is incurred (no new scoring when play is closed).
+    """
+    user = get_user_email(request)
+    resolved_event_id = _resolve_event_or_404(event_id)
+    ev = events_repo.get_event(resolved_event_id)
+
+    hint = quest_packs_repo.get_hint(hint_id)
+    if not hint or hint.get("task_id") != task_id:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "NOT_FOUND", "message": "Hint not found for this task."}},
+        )
+
+    identity = _resolve_attempt_identity(resolved_event_id, user)
+    team_id = identity.get("team_id")
+    workspace_id = identity.get("workspace_id")
+
+    penalty_applied = 0
+    newly_applied = False
+    scoring_open = bool(ev and attempts_open(ev["status"]) and not _scoring_frozen(ev))
+    if scoring_open:
+        outcome = default_scoring_service.apply_hint_penalty(
+            event_id=resolved_event_id,
+            hint_id=hint_id,
+            penalty_points=int(hint.get("penalty_points") or 0),
+            task_id=task_id,
+            quest_id=hint.get("quest_id"),
+            team_id=team_id,
+            user_id=user,
+            workspace_id=workspace_id,
+            created_by=user,
+        )
+        penalty_applied = outcome["points_delta"]
+        newly_applied = outcome["applied"]
+        if newly_applied:
+            record_audit(
+                action="hint.reveal",
+                actor_user_id=user,
+                event_id=resolved_event_id,
+                target_type="hint",
+                target_id=hint_id,
+                payload={"task_id": task_id, "team_id": team_id,
+                         "points_delta": penalty_applied, "workspace_id": workspace_id},
+            )
+
+    return {
+        "hint": {
+            "hint_id": hint_id,
+            "title": hint.get("title"),
+            "body_md": hint.get("body_md"),
+            "penalty_points": hint.get("penalty_points"),
+        },
+        "revealed": True,
+        "penalty_applied": penalty_applied,
+        "newly_applied": newly_applied,
+        "team_score": leaderboard_repo.get_team_score(resolved_event_id, team_id) if team_id else None,
     }
 
 

@@ -231,13 +231,18 @@ completion. 404s if the quest is not part of the event's pack version:
       "task_id": "tsk_1", "slug": "build-gold", "title": "Build the gold table",
       "objective": "...", "instructions_md": "...", "success_criteria_md": "...",
       "points": 200, "validation_mode": "sql_assertion", "complete": true,
-      "hints": [ { "title": "Hint 1", "body_md": "...", "penalty_points": 0, "sort_order": 1 } ]
+      "hints": [ { "hint_id": "hint_1", "title": "Hint 1", "body_md": "...", "penalty_points": -10, "sort_order": 1, "revealed": true } ]
     }
   ],
   "team_id": "team_red",
   "attempts_open": true
 }
 ```
+
+A hint's `body_md` is **withheld (`null`) until the team reveals it** via the
+hint-reveal endpoint (PR07) — `revealed` reflects whether this team has already
+unlocked (and been charged for) it. This stops a player reading the hint text
+for free and dodging the penalty.
 
 There is no per-task declared submission schema in the MVP: the player submits
 a free-form JSON `submission` object (see *Submit task attempt*), which the
@@ -329,34 +334,65 @@ Response (implemented in PR03):
 
 Results expose only player-safe fields (no `private_message`).
 
-### Request hint
+### Reveal hint (PR07)
 
 ```http
-POST /api/events/{event_id}/tasks/{task_id}/hints/{hint_id}/take
+POST /api/events/{event_id}/tasks/{task_id}/hints/{hint_id}/reveal
 ```
 
-Response:
+Reveals a hint's body and charges its penalty **once per team** (idempotent on
+`scoring_events.idempotency_key = hint:{team}:{event}:{hint}`). Re-revealing is
+free. While the event is paused/frozen/completed the body is still returned but
+**no penalty is incurred** (no new scoring when play is closed), so
+`penalty_applied` is `0` and `newly_applied` is `false`. The penalty is
+normalised to a non-positive delta (`-abs(penalty_points)`).
 
 ```json
 {
-  "hint_id": "hint_1",
-  "body_md": "Check the table owner and grants in Catalog Explorer.",
-  "penalty_points": -10,
+  "hint": {
+    "hint_id": "hint_1",
+    "title": "Hint 1",
+    "body_md": "Check the table owner and grants in Catalog Explorer.",
+    "penalty_points": -10
+  },
+  "revealed": true,
+  "penalty_applied": -10,
+  "newly_applied": true,
   "team_score": 1240
 }
 ```
 
-### Get event leaderboard
+### Get event leaderboard (PR07)
 
 ```http
 GET /api/events/{event_id}/leaderboard
 ```
 
-Optional query params:
+The player-facing live leaderboard. Ranking is deterministic: higher
+`total_points` first, ties broken by the team that reached the total **earliest**
+(`event_leaderboard` view: `RANK() OVER (... ORDER BY total_points DESC,
+last_scored_at ASC)`). `frozen` is `true` when the event is `frozen`/`completed`/
+`archived` or has a `scoring_frozen_at` set (no new player scoring); the UI shows
+a "Final results" / "Scoring frozen" badge. `you` highlights the caller's team
+(with a `null` rank when on a team but unscored). `recent` is the activity feed
+(team + task names, signed `points_delta`, including hint penalties and host
+manual adjustments).
 
-- `scope=team|individual`
-- `quest_id=...`
-- `include_recent=true`
+```json
+{
+  "event": { "event_id": "evt_1", "title": "...", "status": "active", "scoring_frozen_at": null },
+  "frozen": false,
+  "status": "active",
+  "leaderboard": [
+    { "event_id": "evt_1", "team_id": "team_blue", "display_name": "Blue", "total_points": 300, "rank": 1, "last_scored_at": "..." },
+    { "event_id": "evt_1", "team_id": "team_red", "display_name": "Red", "total_points": 100, "rank": 2, "last_scored_at": "..." }
+  ],
+  "recent": [
+    { "scoring_event_id": "score_1", "team_id": "team_blue", "team_name": "Blue", "task_id": "tsk_1", "task_title": "Build the gold table", "source_type": "validation", "points_delta": 200, "reason": "task_passed", "created_at": "..." }
+  ],
+  "you": { "team_id": "team_red", "display_name": "Red", "total_points": 100, "rank": 2 }
+}
+```
 
 ## Host/admin endpoints
 

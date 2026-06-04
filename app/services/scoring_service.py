@@ -24,6 +24,27 @@ from services import federation as fed
 logger = logging.getLogger("databricks-quest.services.scoring_service")
 
 
+def hint_penalty_idempotency_key(
+    event_id: str,
+    hint_id: str,
+    *,
+    team_id: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+) -> str:
+    """Return the once-only key for charging a team for revealing a hint.
+
+    Same scope policy as base points (workspace for federation, else team) but a
+    distinct ``hint:`` prefix so a hint penalty can never collide with a task's
+    base-points award.
+    """
+    if workspace_id:
+        return fed.deterministic_idempotency_key(
+            workspace_id, event_id, hint_id, "hint"
+        )
+    scope = team_id or "noteam"
+    return f"hint:{scope}:{event_id}:{hint_id}"
+
+
 def base_points_idempotency_key(
     event_id: str,
     task_id: str,
@@ -95,6 +116,57 @@ class ScoringService:
             workspace_id=workspace_id,
             created_by=created_by,
         )
+
+    def apply_hint_penalty(
+        self,
+        *,
+        event_id: str,
+        hint_id: str,
+        penalty_points: int,
+        task_id: Optional[str] = None,
+        quest_id: Optional[str] = None,
+        team_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        created_by: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Charge a team once for revealing a hint. Idempotent per hint+scope.
+
+        ``penalty_points`` is normalised to a non-positive delta — authors
+        usually write a negative value (``-10``) but a positive magnitude is
+        tolerated and still subtracts. A zero penalty or a missing scoring scope
+        writes no ledger row. Returns ``{"applied": bool, "points_delta": int,
+        "scoring_event_id": str|None}`` where ``applied`` is False when the hint
+        was already revealed (no double-charge).
+        """
+        delta = -abs(int(penalty_points or 0))
+        if delta == 0:
+            return {"applied": False, "points_delta": 0, "scoring_event_id": None}
+        if not team_id and not workspace_id:
+            return {"applied": False, "points_delta": 0, "scoring_event_id": None}
+
+        key = hint_penalty_idempotency_key(
+            event_id, hint_id, team_id=team_id, workspace_id=workspace_id
+        )
+        result = self._repo.insert_scoring_event(
+            event_id=event_id,
+            idempotency_key=key,
+            points_delta=delta,
+            source_type="hint_penalty",
+            source_id=hint_id,
+            reason="hint_revealed",
+            task_id=task_id,
+            quest_id=quest_id,
+            team_id=team_id,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            created_by=created_by,
+        )
+        return {
+            "applied": result["awarded"],
+            "points_delta": result["points"],
+            "scoring_event_id": result["scoring_event_id"],
+        }
 
 
 default_scoring_service = ScoringService()
