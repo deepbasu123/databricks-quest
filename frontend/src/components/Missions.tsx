@@ -1,141 +1,128 @@
-import { useEffect, useState } from 'react'
-import {
-  Zap, Target, TrendingUp, Calendar, Search,
-  CheckCircle2, Circle, Repeat, Sparkles, LayoutDashboard,
-} from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { CheckCircle2, Circle, Repeat, Sparkles } from 'lucide-react'
 import type { Mission } from '../types'
+import { useApi } from '../lib/api'
+import { categoryMeta, difficultyForPoints, missionIcon } from '../lib/mission-meta'
+import { QuestCard } from './quest/QuestCard'
+import { MissionDrawer } from './quest/MissionDrawer'
+import { EmptyState, ErrorState, SkeletonCard } from './quest/States'
 
-const ICON_MAP: Record<string, typeof Zap> = {
-  rocket: Zap,
-  briefcase: Target,
-  'git-branch': TrendingUp,
-  'play-circle': Zap,
-  clock: Calendar,
-  'upload-cloud': TrendingUp,
-  'calendar-check': Calendar,
-  search: Search,
-  sparkles: Sparkles,
-  'layout-dashboard': LayoutDashboard,
-}
-
-const CATEGORY_COLORS: Record<string, string> = {
-  'Getting Started': 'bg-green-500/20 text-green-400',
-  'Data Engineering': 'bg-cyan-500/20 text-cyan-400',
-  'Engagement': 'bg-violet-500/20 text-violet-400',
-  'Analytics': 'bg-amber-500/20 text-amber-400',
-}
+type MissionsResponse = { missions: Mission[] }
 
 export default function Missions() {
-  const [missions, setMissions] = useState<Mission[]>([])
+  const { data, loading, loaded, error, reload } = useApi<MissionsResponse>('/api/missions')
   const [filter, setFilter] = useState<string>('all')
+  const [selected, setSelected] = useState<Mission | null>(null)
 
-  useEffect(() => {
-    fetch('/api/missions')
-      .then(r => r.json())
-      .then(d => setMissions(d.missions || []))
-      .catch(() => {})
-  }, [])
-
-  const categories = ['all', ...new Set(missions.map(m => m.category))]
-  const filtered = filter === 'all' ? missions : missions.filter(m => m.category === filter)
-  const completed = missions.filter(m => m.status === 'completed').length
+  const missions = data?.missions ?? []
+  const categories = useMemo(() => ['all', ...Array.from(new Set(missions.map((m) => m.category)))], [missions])
+  const filtered = filter === 'all' ? missions : missions.filter((m) => m.category === filter)
+  const completed = missions.filter((m) => m.status === 'completed').length
   const total = missions.length
+  const pointsEarned = missions.filter((m) => m.status === 'completed').reduce((sum, m) => sum + m.points, 0)
+  const pct = total > 0 ? Math.round((completed / total) * 100) : 0
+
+  const showError = loaded && error && missions.length === 0
 
   return (
-    <div className="max-w-5xl space-y-6">
-      {/* Summary */}
-      <div className="card p-5 flex items-center justify-between">
-        <div>
-          <h3 className="text-lg font-bold text-white">Mission Progress</h3>
-          <p className="text-sm text-slate-400 mt-1">{completed} of {total} missions completed</p>
-        </div>
-        <div className="flex items-center gap-3">
-          <div className="h-2.5 w-48 bg-slate-700 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-gradient-to-r from-amber-500 to-orange-500 rounded-full progress-bar-animated"
-              style={{ width: `${total > 0 ? (completed / total) * 100 : 0}%` }}
-            />
+    <div className="mx-auto max-w-[1280px] space-y-5">
+      <QuestCard className="quest-topography">
+        <div className="relative z-10 flex flex-wrap items-center justify-between gap-6">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#F5B72E]">Mission progress</p>
+            <h2 className="mt-2 text-2xl font-bold text-white">{completed} of {total} missions complete</h2>
+            <p className="mt-1 text-sm text-slate-300">{pointsEarned.toLocaleString()} points earned from completed missions</p>
           </div>
-          <span className="text-sm font-semibold text-amber-400">{total > 0 ? Math.round((completed / total) * 100) : 0}%</span>
-        </div>
-      </div>
-
-      {/* Category filter */}
-      <div className="flex gap-2 flex-wrap">
-        {categories.map(cat => (
-          <button
-            key={cat}
-            onClick={() => setFilter(cat)}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all border
-              ${filter === cat
-                ? 'bg-amber-500/20 text-amber-400 border-amber-500/30'
-                : 'bg-slate-800 text-slate-400 border-slate-700 hover:border-slate-600'
-              }`}
-          >
-            {cat === 'all' ? 'All Missions' : cat}
-          </button>
-        ))}
-      </div>
-
-      {/* Mission grid */}
-      <div className="grid md:grid-cols-2 gap-4">
-        {filtered.map(mission => {
-          const Icon = ICON_MAP[mission.icon] || Target
-          const done = mission.status === 'completed'
-          return (
-            <div
-              key={mission.id}
-              className={`card-hover p-5 relative overflow-hidden
-                ${done ? 'border-green-500/30' : ''}`}
-            >
-              {done && (
-                <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-bl from-green-500/10 to-transparent" />
-              )}
-
-              <div className="flex items-start gap-4">
-                <div className={`w-11 h-11 rounded-lg flex items-center justify-center shrink-0
-                  ${done ? 'bg-green-500/20' : 'bg-slate-800'}`}>
-                  <Icon className={`w-5.5 h-5.5 ${done ? 'text-green-400' : 'text-amber-400'}`} />
-                </div>
-
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <h4 className="font-semibold text-white text-sm">{mission.name}</h4>
-                    {mission.award_type === 'repeatable' && (
-                      <Repeat className="w-3.5 h-3.5 text-violet-400" />
-                    )}
-                  </div>
-                  <p className="text-xs text-slate-400 mt-1 leading-relaxed">{mission.description}</p>
-
-                  <div className="flex items-center justify-between mt-3">
-                    <span className={`text-xs px-2 py-0.5 rounded-full ${CATEGORY_COLORS[mission.category] || 'bg-slate-700 text-slate-300'}`}>
-                      {mission.category}
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-bold text-amber-400">+{mission.points}</span>
-                      <span className="text-xs text-slate-500">pts</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="shrink-0 mt-0.5">
-                  {done ? (
-                    <CheckCircle2 className="w-5 h-5 text-green-400" />
-                  ) : (
-                    <Circle className="w-5 h-5 text-slate-600" />
-                  )}
-                </div>
-              </div>
-
-              {done && mission.completed_at && (
-                <p className="text-xs text-green-400/60 mt-3 ml-15">
-                  Completed {new Date(mission.completed_at).toLocaleDateString()}
-                </p>
-              )}
+          <div className="w-full max-w-sm">
+            <div className="mb-2 flex justify-between text-xs text-slate-400">
+              <span>Overall completion</span>
+              <span className="font-semibold text-[#FF8A3D]">{pct}%</span>
             </div>
+            <div className="h-2.5 overflow-hidden rounded-full bg-white/10">
+              <div className="h-full rounded-full bg-gradient-to-r from-[#FF5F1F] to-[#FFB21F] shadow-[0_0_18px_rgba(255,95,31,0.55)]" style={{ width: `${pct}%` }} />
+            </div>
+          </div>
+        </div>
+      </QuestCard>
+
+      <div className="flex flex-wrap gap-2">
+        {categories.map((cat) => {
+          const active = filter === cat
+          const meta = cat === 'all' ? null : categoryMeta(cat)
+          return (
+            <button
+              key={cat}
+              onClick={() => setFilter(cat)}
+              className={`rounded-xl border px-3.5 py-2 text-xs font-semibold transition-all ${
+                active ? 'border-[#FF5F1F]/40 bg-[#FF5F1F]/12 text-white' : 'border-white/10 bg-white/[0.03] text-slate-400 hover:border-white/20 hover:text-slate-200'
+              }`}
+              style={active && meta ? { borderColor: `${meta.color}66`, background: meta.tint, color: '#fff' } : undefined}
+            >
+              {cat === 'all' ? 'All Missions' : cat}
+            </button>
           )
         })}
       </div>
+
+      {showError ? (
+        <ErrorState message={error ?? undefined} onRetry={reload} />
+      ) : loading && missions.length === 0 ? (
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <SkeletonCard key={i} />
+          ))}
+        </div>
+      ) : filtered.length === 0 ? (
+        <EmptyState
+          icon={Sparkles}
+          title="No missions in this category yet"
+          message="Try a different category, or start completing platform actions to unlock more quests."
+        />
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {filtered.map((mission) => (
+            <MissionTile key={mission.id} mission={mission} onClick={() => setSelected(mission)} />
+          ))}
+        </div>
+      )}
+
+      <MissionDrawer mission={selected} onClose={() => setSelected(null)} />
     </div>
+  )
+}
+
+function MissionTile({ mission, onClick }: { mission: Mission; onClick: () => void }) {
+  const meta = categoryMeta(mission.category)
+  const Icon = missionIcon(mission.icon)
+  const done = mission.status === 'completed'
+  const repeatable = mission.award_type === 'repeatable'
+
+  return (
+    <button
+      onClick={onClick}
+      className="quest-card group p-5 text-left transition-transform duration-200 hover:-translate-y-0.5"
+    >
+      <div className="relative z-10 flex items-start gap-4">
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl" style={{ background: meta.tint, color: meta.color }}>
+          <Icon className="h-5 w-5" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <h4 className="truncate text-sm font-semibold text-white">{mission.name}</h4>
+            {repeatable && <Repeat className="h-3.5 w-3.5 shrink-0 text-[#8B5CF6]" />}
+          </div>
+          <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-slate-400">{mission.description}</p>
+          <div className="mt-3 flex items-center justify-between">
+            <span className="rounded-full px-2 py-0.5 text-[11px] font-medium" style={{ background: meta.tint, color: meta.color }}>
+              {difficultyForPoints(mission.points)}
+            </span>
+            <span className="text-sm font-bold text-[#FF8A3D]">+{mission.points}<span className="ml-1 text-[11px] font-medium text-slate-500">pts</span></span>
+          </div>
+        </div>
+        <div className="shrink-0">
+          {done ? <CheckCircle2 className="h-5 w-5 text-[#22C55E]" /> : <Circle className="h-5 w-5 text-slate-600 group-hover:text-slate-400" />}
+        </div>
+      </div>
+    </button>
   )
 }

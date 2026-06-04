@@ -1,3 +1,6 @@
+/* Databricks Quest UX brand system */
+@import './styles/quest.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
