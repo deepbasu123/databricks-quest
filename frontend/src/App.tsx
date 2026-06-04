@@ -253,7 +253,7 @@ export default function App() {
 
         <main className="quest-grid-bg min-w-0 flex-1 overflow-y-auto p-4 lg:p-5">
           <div key={page} className="quest-rise">
-            {page === 'dashboard' && <DashboardV2 profile={profile} onRefresh={fetchProfile} notifications={notifications} />}
+            {page === 'dashboard' && <DashboardV2 profile={profile} onRefresh={fetchProfile} notifications={notifications} onNavigate={(p) => setPage(p as NavPage)} />}
             {page === 'missions' && <Missions />}
             {page === 'leaderboard' && <Leaderboard profile={profile} />}
             {page === 'badges' && <BadgeVault profile={profile} />}

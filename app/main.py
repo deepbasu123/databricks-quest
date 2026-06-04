@@ -873,6 +873,9 @@ class CreateEventPayload(BaseModel):
 class CreateTeamPayload(BaseModel):
     name: str
     display_name: Optional[str] = None
+    color: Optional[str] = None
+    team_catalog: Optional[str] = None
+    team_schema: Optional[str] = None
 
 
 class RenameTeamPayload(BaseModel):
