@@ -717,6 +717,55 @@ if [ -z "$QUEST_CATALOG" ]; then
 fi
 success "Catalog: $QUEST_CATALOG (schema: $QUEST_SCHEMA)"
 
+# ── Pre-flight: verify the scored-tables location is writable ────────────────
+# Adoption scoring writes Delta tables to ${QUEST_CATALOG}.${QUEST_SCHEMA}. On a
+# governed workspace the deploying identity often lacks CREATE SCHEMA there — which
+# otherwise fails DEEP in Step 7, after the app + Lakebase are already provisioned
+# and the app comes up empty. Check now and fail fast with the exact admin grant.
+if [ -z "$SKIP_SCORING" ] && [ -n "${DATABRICKS_TOKEN:-}" ] && [ -n "$WAREHOUSE_ID" ]; then
+  info "Pre-flight: checking $USER_EMAIL can create scored tables in $QUEST_CATALOG.$QUEST_SCHEMA ..."
+  PF=$(QUEST_CATALOG="$QUEST_CATALOG" QUEST_SCHEMA="$QUEST_SCHEMA" WH="$WAREHOUSE_ID" \
+       DBX_HOST="${DATABRICKS_HOST:-$WORKSPACE_HOST}" DBX_TOKEN="$DATABRICKS_TOKEN" python3 - <<'PYEOF'
+import os, json, time, urllib.request
+host=os.environ["DBX_HOST"].rstrip("/"); tok=os.environ["DBX_TOKEN"]; wh=os.environ["WH"]
+cat=os.environ["QUEST_CATALOG"]; sch=os.environ["QUEST_SCHEMA"]
+def sql(s):
+    body=json.dumps({"warehouse_id":wh,"statement":s,"wait_timeout":"30s"}).encode()
+    req=urllib.request.Request(host+"/api/2.0/sql/statements",data=body,
+        headers={"Authorization":"Bearer "+tok,"Content-Type":"application/json"})
+    try: d=json.loads(urllib.request.urlopen(req,timeout=60).read())
+    except Exception as e: return "ERROR", str(e)[:160]
+    st=d.get("status",{}); sid=d.get("statement_id")
+    while st.get("state") in ("PENDING","RUNNING") and sid:
+        time.sleep(2)
+        rr=urllib.request.Request(host+"/api/2.0/sql/statements/"+sid,headers={"Authorization":"Bearer "+tok})
+        d=json.loads(urllib.request.urlopen(rr,timeout=30).read()); st=d.get("status",{})
+    return st.get("state"), (st.get("error",{}) or {}).get("message","")
+state,msg=sql("CREATE SCHEMA IF NOT EXISTS `%s`.`%s`"%(cat,sch))
+if state!="SUCCEEDED" and ("NO_SUCH_CATALOG" in (msg or "").upper() or "was not found" in (msg or "")):
+    cstate,cmsg=sql("CREATE CATALOG IF NOT EXISTS `%s`"%cat)
+    if cstate=="SUCCEEDED": state,msg=sql("CREATE SCHEMA IF NOT EXISTS `%s`.`%s`"%(cat,sch))
+    else: msg=cmsg
+print("OK" if state=="SUCCEEDED" else "DENIED::"+(msg or "unknown error"))
+PYEOF
+)
+  if [ "$PF" != "OK" ]; then
+    echo ""
+    fail "Cannot create the scored-tables schema '$QUEST_CATALOG.$QUEST_SCHEMA' as $USER_EMAIL.
+    ${PF#DENIED::}
+
+    Adoption scoring writes Delta tables here, so it must be writable BEFORE deploying.
+    Ask a metastore admin or the catalog owner to run ONCE, then re-run this deploy:
+
+        CREATE CATALOG IF NOT EXISTS $QUEST_CATALOG;          -- only if it doesn't exist
+        GRANT USE CATALOG, CREATE SCHEMA ON CATALOG $QUEST_CATALOG TO \`$USER_EMAIL\`;
+        -- the schema also needs CREATE TABLE, MODIFY, SELECT for the run-as identity
+
+    Or: --catalog <a catalog you can already write to>   |   --skip-scoring (deploy app shell, populate later)."
+  fi
+  success "Pre-flight OK: $QUEST_CATALOG.$QUEST_SCHEMA is writable"
+fi
+
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 5: Build Frontend
 # ══════════════════════════════════════════════════════════════════════════════
