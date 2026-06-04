@@ -124,12 +124,57 @@ class EventsRepository:
     def list_event_hosts(self, event_id: str) -> List[Dict[str, Any]]:
         try:
             return db.execute_query(
-                "SELECT user_id, role FROM event_hosts WHERE event_id = %s",
+                "SELECT user_id, role FROM event_hosts WHERE event_id = %s ORDER BY user_id ASC",
                 (event_id,),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("list_event_hosts failed: %s", exc)
             return []
+
+    def add_host(self, event_id: str, user_id: str, role: str = "host") -> bool:
+        """Grant a user the host role for an event (idempotent).
+
+        Returns True when a new row was inserted, False if already a host.
+        """
+        if role not in ("owner", "host"):
+            role = "host"
+        try:
+            affected = db.execute(
+                """
+                INSERT INTO event_hosts (event_id, user_id, role)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (event_id, user_id) DO NOTHING
+                """,
+                (event_id, user_id, role),
+            )
+            return bool(affected)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("add_host failed: %s", exc)
+            raise EventStateError("Could not add host.", "HOST_WRITE_FAILED", 503)
+
+    def remove_host(self, event_id: str, user_id: str) -> None:
+        """Revoke a user's host role. Refuses to remove the last owner.
+
+        Raises :class:`EventStateError` when the target is the only ``owner`` row
+        so an event can never be left without an owning host.
+        """
+        hosts = self.list_event_hosts(event_id)
+        target = next((h for h in hosts if (h.get("user_id") or "").lower() == (user_id or "").lower()), None)
+        if not target:
+            raise EventStateError("Not a host of this event.", "NOT_A_HOST", 404)
+        owners = [h for h in hosts if (h.get("role") or "") == "owner"]
+        if target.get("role") == "owner" and len(owners) <= 1:
+            raise EventStateError(
+                "Cannot remove the last owner of an event.", "LAST_OWNER", 409
+            )
+        try:
+            db.execute(
+                "DELETE FROM event_hosts WHERE event_id = %s AND user_id = %s",
+                (event_id, target.get("user_id")),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("remove_host failed: %s", exc)
+            raise EventStateError("Could not remove host.", "HOST_WRITE_FAILED", 503)
 
     def list_teams(self, event_id: str) -> List[Dict[str, Any]]:
         try:
@@ -435,6 +480,28 @@ class EventsRepository:
             raise EventStateError("Could not create team.", "CREATE_FAILED", 503)
         return self.get_team(team_id)
 
+    def rename_team(self, team_id: str, display_name: str) -> Dict[str, Any]:
+        """Update a team's display name (player self-service rename).
+
+        Only the human-facing ``display_name`` changes; the immutable ``name``
+        (used for namespace derivation) is left untouched so resource targets
+        stay stable.
+        """
+        display_name = (display_name or "").strip()
+        if not display_name:
+            raise EventStateError("Display name is required.", "INVALID_TEAM", 400)
+        try:
+            updated = db.execute(
+                "UPDATE teams SET display_name = %s WHERE team_id = %s",
+                (display_name, team_id),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("rename_team failed: %s", exc)
+            raise EventStateError("Could not rename team.", "RENAME_FAILED", 503)
+        if not updated:
+            raise EventStateError("Team not found.", "TEAM_NOT_FOUND", 404)
+        return self.get_team(team_id)
+
     def register_participant(
         self,
         *,
@@ -464,20 +531,22 @@ class EventsRepository:
             raise EventStateError("Could not register participant.", "REGISTER_FAILED", 503)
         return self.get_participant(event_id, user_id)
 
-    def assign_team(self, team_id: str, participant_id: str) -> None:
-        """Idempotently add a participant to a team (additive, no reassign)."""
+    def set_team_namespace(
+        self, team_id: str, catalog: str, schema: str
+    ) -> None:
+        """Persist a team's resolved catalog/schema (called after bootstrap).
+
+        Stamps the values the resource bootstrap actually provisioned so the
+        validator-variable resolution and the host resource view show a stable,
+        materialized namespace rather than re-deriving it each request.
+        """
         try:
             db.execute(
-                """
-                INSERT INTO team_members (team_id, participant_id)
-                VALUES (%s, %s)
-                ON CONFLICT (team_id, participant_id) DO NOTHING
-                """,
-                (team_id, participant_id),
+                "UPDATE teams SET team_catalog = %s, team_schema = %s WHERE team_id = %s",
+                (catalog, schema, team_id),
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("assign_team failed: %s", exc)
-            raise EventStateError("Could not assign participant to team.", "ASSIGN_FAILED", 503)
+            logger.warning("set_team_namespace failed: %s", exc)
 
     def set_participant_team(
         self, event_id: str, participant_id: str, team_id: str
@@ -594,6 +663,20 @@ class EventsRepository:
                         participants_created += 1
 
                     if team_id:
+                        # Single-team-per-event invariant: drop any prior
+                        # membership on a different team in THIS event before
+                        # adding the target, so a re-import to a new team can
+                        # never leave a participant on two teams (which would
+                        # double-count scoring).
+                        cur.execute(
+                            """
+                            DELETE FROM team_members
+                            WHERE participant_id = %s
+                              AND team_id IN (SELECT team_id FROM teams WHERE event_id = %s)
+                              AND team_id <> %s
+                            """,
+                            (participant_id, event_id, team_id),
+                        )
                         cur.execute(
                             """
                             INSERT INTO team_members (team_id, participant_id)

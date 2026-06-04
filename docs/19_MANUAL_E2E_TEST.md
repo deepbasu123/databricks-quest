@@ -129,7 +129,7 @@ capacity before a large event.
 **How to test**
 - Use a load tool (`k6`, `locust`, or `hey`) against a staging deploy. Drive:
   - `GET /api/events/{id}/leaderboard` (read-heavy; simulate ~1 poll/5s/player).
-  - `POST /api/events/{id}/tasks/{task_id}/submit` (write path; stagger across
+  - `POST /api/events/{id}/tasks/{task_id}/attempts` (write path; stagger across
     teams/tasks).
 - Pre-seed an event with representative teams/tasks (import a sample pack, create
   N teams, bootstrap resources).

@@ -48,6 +48,13 @@ QUEST_EVENT_MODE=""         # "on" enables Event Mode; empty = off (legacy)
 # Admin page is never wide open in a deployment.
 QUEST_ADMIN_ALLOWLIST=""    # e.g. "alice@corp.com,bob@corp.com"
 
+# ── Host allowlist (Event Mode) ──────────────────────────────────────────────
+# Comma-separated emails allowed to call GameDay host endpoints (/api/host/*)
+# regardless of per-event event_hosts rows. Host authority is the union of this
+# allowlist, the admin allowlist, and per-event event_hosts. When Event Mode is
+# on and NONE of these are configured, host endpoints fail closed.
+QUEST_HOST_ALLOWLIST=""     # e.g. "host1@corp.com,host2@corp.com"
+
 # ── Federation (ADR_006) — one codebase, role selected by these flags ────────
 QUEST_ROLE=""               # standalone (default) | master | child
 MASTER_LAKEBASE_HOST=""     # child: the MASTER workspace's shared Lakebase host
@@ -181,16 +188,22 @@ write_app_yaml() {
     # Admin allowlist for /api/admin/* (comma-separated emails). When set, the
     # Admin page and its APIs are restricted to these users; absence = open.
     [ -n "$QUEST_ADMIN_ALLOWLIST" ] && { echo "  - name: QUEST_ADMIN_ALLOWLIST"; echo "    value: \"$QUEST_ADMIN_ALLOWLIST\""; }
+    # Host allowlist for /api/host/* (comma-separated emails). Only meaningful in
+    # Event Mode; absence is fine when admins or per-event event_hosts exist.
+    [ -n "$QUEST_HOST_ALLOWLIST" ] && { echo "  - name: QUEST_HOST_ALLOWLIST"; echo "    value: \"$QUEST_HOST_ALLOWLIST\""; }
     # Event Mode master switch. Only emitted when ON; absence = legacy default,
     # so a standalone adoption deploy keeps its exact two-variable app.yaml.
     if [ "$QUEST_EVENT_MODE" = "on" ]; then
       echo "  - name: QUEST_EVENT_MODE"
       echo "    value: \"on\""
     fi
+    # Event slug this deployment is wired to. Emitted for ANY role (including
+    # standalone Event-Mode) when set, so a single-workspace GameDay can pin its
+    # event the same way master/child do.
+    [ -n "$EVENT_SLUG" ] && { echo "  - name: QUEST_EVENT_SLUG"; echo "    value: \"$EVENT_SLUG\""; }
     if [ -n "$QUEST_ROLE" ] && [ "$QUEST_ROLE" != "standalone" ]; then
       echo "  - name: QUEST_ROLE"
       echo "    value: \"$QUEST_ROLE\""
-      [ -n "$EVENT_SLUG" ]   && { echo "  - name: QUEST_EVENT_SLUG"; echo "    value: \"$EVENT_SLUG\""; }
       [ -n "$WORKSPACE_ID" ] && { echo "  - name: QUEST_WORKSPACE_ID"; echo "    value: \"$WORKSPACE_ID\""; }
       if [ "$QUEST_ROLE" = "child" ]; then
         echo "  - name: LAKEBASE_USER"
@@ -221,6 +234,7 @@ while [[ $# -gt 0 ]]; do
     --full)           DEPLOY_MODE="full"; shift ;;
     --event-mode)         QUEST_EVENT_MODE="on"; shift ;;
     --admins)             QUEST_ADMIN_ALLOWLIST="$2"; shift 2 ;;
+    --host-allowlist)     QUEST_HOST_ALLOWLIST="$2"; shift 2 ;;
     --role)               QUEST_ROLE="$2"; shift 2 ;;
     --master-lakebase-host)  MASTER_LAKEBASE_HOST="$2"; shift 2 ;;
     --master-lakebase-token) MASTER_LAKEBASE_TOKEN="$2"; shift 2 ;;
@@ -256,6 +270,11 @@ while [[ $# -gt 0 ]]; do
       echo "                           When OFF, Event APIs 404, Event UI is hidden,"
       echo "                           and GameDay migrations are skipped."
       echo "                           Implied by --role master|child."
+      echo "  --host-allowlist EMAILS  Comma-separated emails allowed to call GameDay"
+      echo "                           host endpoints (/api/host/*). Host authority is the"
+      echo "                           union of this list, --admins, and per-event hosts."
+      echo "                           With Event Mode on and none configured, host"
+      echo "                           endpoints fail closed (set QUEST_HOST_OPEN=1 in dev)."
       echo ""
       echo "Multi-workspace federation (ADR_006 — one codebase, role-driven):"
       echo "  --role ROLE              standalone (default) | master | child"
@@ -479,6 +498,24 @@ fi
 # so they must NOT seed their own deployer as a global admin.
 if [ -z "$QUEST_ADMIN_ALLOWLIST" ] && [[ "$USER_EMAIL" == *"@"* ]] && [ "$QUEST_ROLE" != "child" ]; then
   QUEST_ADMIN_ALLOWLIST="$USER_EMAIL"
+fi
+
+# Host authority guard (Event Mode). Host endpoints fail closed when no
+# authority is configured, so make the effective authority explicit at deploy
+# time. master/standalone must have a host allowlist or admins (the admin
+# default above normally satisfies this); a child inherits admins from master.
+if [ "$QUEST_EVENT_MODE" = "on" ]; then
+  if [ -z "$QUEST_HOST_ALLOWLIST" ] && [ -z "$QUEST_ADMIN_ALLOWLIST" ] && [ "$QUEST_ROLE" != "child" ]; then
+    fail "Event Mode requires host authority: pass --host-allowlist EMAILS and/or --admins EMAILS.
+    (Host endpoints fail closed when no allowlist, admins, or per-event hosts exist.)"
+  fi
+  if [ -n "$QUEST_HOST_ALLOWLIST" ]; then
+    success "Host authority: allowlist=[$QUEST_HOST_ALLOWLIST]${QUEST_ADMIN_ALLOWLIST:+ + admins=[$QUEST_ADMIN_ALLOWLIST]}"
+  elif [ "$QUEST_ROLE" = "child" ]; then
+    info "Host authority: inherited admins from master (shared quest_admins) + per-event hosts"
+  else
+    warn "Host authority: no --host-allowlist set; relying on admins=[$QUEST_ADMIN_ALLOWLIST] + per-event hosts"
+  fi
 fi
 
 # Get workspace host

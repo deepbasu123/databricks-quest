@@ -1,5 +1,7 @@
 # Sample Validator Library
 
+> **Start with [`docs/AUTHORING_QUEST_PACKS.md`](../docs/AUTHORING_QUEST_PACKS.md)** — the single guided authoring walkthrough. This file is the copy-paste validator-pattern appendix.
+
 ## SQL assertion
 
 ```yaml

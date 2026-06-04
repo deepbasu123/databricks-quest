@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import { Boxes, Database, Trash2 } from 'lucide-react'
 import type {
+  FederationStatus,
   HostAttemptDetail,
   HostAttemptList,
   HostOverview,
@@ -30,6 +31,7 @@ import { QuestCard } from './quest/QuestCard'
 import { EmptyState, ErrorState, Skeleton } from './quest/States'
 import { ValidationStatus } from './EventPlay'
 import ReportPanel from './ReportPanel'
+import { RosterImport, WorkspacesHealth, UnmappedIdentities } from './Federation'
 
 // Map a target lifecycle status to the host verb + button presentation.
 const TRANSITIONS: Record<string, { verb: string; label: string; Icon: typeof Play; cls: string }> = {
@@ -52,12 +54,22 @@ async function postJson(url: string, body?: unknown): Promise<any> {
   return data
 }
 
-export default function HostConsole({ eventRef }: { eventRef: string }) {
+export default function HostConsole({
+  eventRef,
+  federation,
+}: {
+  eventRef: string
+  // When present (federation `master` mount), the cross-workspace panels are
+  // folded in below the standard host sections so master gets one console.
+  federation?: FederationStatus
+}) {
   const { data, loading, loaded, error, reload } = useApi<HostOverview>(`/api/host/events/${eventRef}`)
 
   if (loading && !data) return <Skeleton className="h-64 w-full" />
   if (loaded && error && !data) return <ErrorState message={error ?? undefined} onRetry={reload} />
   if (!data) return null
+
+  const federationEventId = federation?.event_id || eventRef
 
   return (
     <div className="space-y-5">
@@ -68,6 +80,13 @@ export default function HostConsole({ eventRef }: { eventRef: string }) {
       </div>
       <AnnouncementComposer eventRef={eventRef} overview={data} onPosted={reload} />
       <ResourcesPanel eventRef={eventRef} />
+      {federation && (
+        <>
+          <RosterImport eventId={federationEventId} />
+          <WorkspacesHealth eventId={federationEventId} />
+          <UnmappedIdentities eventId={federationEventId} />
+        </>
+      )}
       <ReportPanel eventRef={eventRef} />
       <AttemptsInspector eventRef={eventRef} />
       <PackImporter />
@@ -695,7 +714,15 @@ function ResourcesPanel({ eventRef }: { eventRef: string }) {
               disabled={!!busy}
               className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:bg-white/[0.08] disabled:opacity-50"
             >
-              <Boxes className="h-3.5 w-3.5" /> Dry-run plan
+              {busy === 'plan-bootstrap' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Boxes className="h-3.5 w-3.5" />} Dry-run plan
+            </button>
+            <button
+              onClick={() => act('plan-reset')}
+              disabled={!!busy}
+              title="Preview the DROP statements a reset would run — nothing is executed"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:bg-white/[0.08] disabled:opacity-50"
+            >
+              {busy === 'plan-reset' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />} Dry-run reset
             </button>
             <button
               onClick={() => act('bootstrap')}

@@ -1,5 +1,7 @@
 # Sample GameDay quest packs
 
+> **Authoring a pack? Start with [`docs/AUTHORING_QUEST_PACKS.md`](../../docs/AUTHORING_QUEST_PACKS.md)** — the single guided scaffold→author→lint→import→version walkthrough. This file covers the run-flow / customization of the built-in packs.
+
 Built-in, ready-to-run quest packs that prove the platform end-to-end. Both lint
 and import cleanly and are exercised by `tests/test_sample_packs.py`.
 

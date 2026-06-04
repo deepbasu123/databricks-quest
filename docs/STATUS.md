@@ -5,8 +5,9 @@ lands. Other docs (the PR plan, the GameDay README, per-doc implementation
 notes) should point here rather than restating overall status.
 
 - **Last updated:** 2026-06-03
-- **Active branch / PR:** `feature/gameday-pr12-hardening-release-docs` (stacked on PR11)
+- **Active branch / PR:** `feature/gameday-pilot-readiness` (stacked on `feature/gameday-pr12-hardening-release-docs`)
 - **Plan of record:** [`13_PR_ALIGNED_SPRINT_PLAN.md`](13_PR_ALIGNED_SPRINT_PLAN.md)
+- **Pilot readiness:** standalone **and** federated master/child are pilot-ready. See [`20_STATE_OF_NATION.md`](20_STATE_OF_NATION.md) for the closed P0–P3 checklist.
 
 Legend: ✅ landed · 🟡 in progress · ⏳ planned (not started) · ⛔ blocked
 
@@ -17,7 +18,7 @@ Legend: ✅ landed · 🟡 in progress · ⏳ planned (not started) · ⛔ block
 | Mode | Status | Notes |
 |---|---|---|
 | **Adoption Mode** | ✅ live | System-table scoring, missions, leaderboard, badges, admin. Unchanged. **The default** — Event Mode must be explicitly enabled. |
-| **Event Mode (GameDay)** | 🟡 in progress (opt-in) | Off by default; enable with `--event-mode` / `QUEST_EVENT_MODE=on` (implied by `master`/`child` roles). When off, GameDay APIs 404, Event UI is hidden, and GameDay migrations are skipped. Schema, quest packs, validation/scoring write path (PR03), event/team lifecycle + join + attempt gating (PR04), and federation plumbing landed. End-to-end host→play→score→leaderboard works via API; player gameplay UI (PR05), host console UI (PR06), the live player leaderboard + hint-penalty scoring (PR07), namespace-guarded resource bootstrap/reset (PR08), two shipped sample quest packs (PR09), security/observability hardening — request ids, structured logs, expanded health, permission-model docs (PR10) — the post-event report with JSON/CSV/Markdown export for account follow-up (PR11), and release hardening + docs — dual-mode README, troubleshooting/release/E2E guides (PR12) — have landed. The GameDay MVP is field-ready. |
+| **Event Mode (GameDay)** | 🟡 in progress (opt-in) | Off by default; enable with `--event-mode` / `QUEST_EVENT_MODE=on` (implied by `master`/`child` roles). When off, GameDay APIs 404, Event UI is hidden, and GameDay migrations are skipped. Schema, quest packs, validation/scoring write path (PR03), event/team lifecycle + join + attempt gating (PR04), and federation plumbing landed. End-to-end host→play→score→leaderboard works via API; player gameplay UI (PR05), host console UI (PR06), the live player leaderboard + hint-penalty scoring (PR07), namespace-guarded resource bootstrap/reset (PR08), two shipped sample quest packs (PR09), security/observability hardening — request ids, structured logs, expanded health, permission-model docs (PR10) — the post-event report with JSON/CSV/Markdown export for account follow-up (PR11), and release hardening + docs — dual-mode README, troubleshooting/release/E2E guides (PR12) — have landed. A sweeping pilot-readiness pass then closed the P0–P3 gaps: fail-closed unified host auth, the validator-variable namespace fallback, the executable `databricks_sdk` validator, the full master host console + child→master connection pooling, live-UX polish (leaderboard polling, attempt polling, hint-error surfacing, team self-service, health banner), a participant roster in the report, the core-loop HTTP test suite, and a committed quest-authoring agent skill. **Both standalone and federated master/child are pilot-ready.** |
 
 ---
 
@@ -57,10 +58,10 @@ remain gated on PR03/PR04.
 
 See [`README_GAMEDAY.md`](../README_GAMEDAY.md#testing) for commands. Tiers:
 
-- **Tier 0 — local, no Databricks** ✅: `pytest tests/` (80), `compileall`, frontend build, offline quest-pack lint. PR03 adds SQL-safety, expectation, dispatch, and scoring-idempotency suites (all pure / fake-DB).
-- **Tier 1 — infra on deploy** ✅: standalone/master/child boot; `/api/health` shows migrations `001`+`002`+`003`; migration idempotency; quest-pack lint/import; connectivity + INSERT-only credential scope (`scripts/federation_spike.py`); child startup check-in in the master Workspaces panel.
-- **Tier 2 — federation reads + gameplay write path** 🟡 (needs an `events` row + a team seeded by SQL until PR04): attempt submission `POST /api/events/{id}/tasks/{task_id}/attempts` (SQL validator needs a warehouse — set `QUEST_SQL_WAREHOUSE_ID`; manual validator works with no warehouse), `validation_results`/`scoring_events` written, idempotent re-submit; roster import, `/api/federation/status` team resolution, `event_leaderboard` + `unmapped_identities` views.
-- **Tier 3 — full end-to-end** ⛔ blocked on **PR04** (events/teams APIs): child plays → validated → scored → master leaderboard → child sees rank. The write path exists (PR03); it just needs the event/team rows PR04 will create through the API instead of seed SQL.
+- **Tier 0 — local, no Databricks** ✅: `pytest tests/` (258), `compileall`, frontend build (`npm run build`), offline quest-pack lint. Suites cover SQL-safety, expectation, dispatch, scoring idempotency, the **core gameplay loop over HTTP** (`test_core_loop.py`), the executable `databricks_sdk` validator (`test_sdk_validator.py`), quest-pack import negatives, the migration runner, and the federation HTTP surface — all pure / fake-DB. A Vitest frontend smoke suite (`frontend/src/test/`) runs in CI (`npm run test`).
+- **Tier 1 — infra on deploy** ✅: standalone/master/child boot; `/api/health` reports role/event-mode, subsystem checks, registered validator types, and executable SDK check names; migration idempotency; quest-pack lint/import; connectivity + INSERT-only credential scope (`scripts/federation_spike.py`); child startup check-in in the master Workspaces panel.
+- **Tier 2 — federation reads + gameplay write path** ✅: event/team rows created through the PR04 APIs (no seed SQL needed); attempt submission `POST /api/events/{id}/tasks/{task_id}/attempts` (SQL validator needs a warehouse — set `QUEST_SQL_WAREHOUSE_ID`; manual + `databricks_sdk` validators work with no warehouse), `validation_results`/`scoring_events` written, idempotent re-submit; roster import, `/api/federation/status` team resolution, `event_leaderboard` + `unmapped_identities` views.
+- **Tier 3 — full end-to-end** ✅: child plays → validated → scored → master leaderboard → child sees rank. Event/team rows are created through the API (PR04); the master host console (PR-pilot D) surfaces lifecycle, teams, attempts, roster import, workspace health, and the report in one place.
 
 ---
 
@@ -68,9 +69,9 @@ See [`README_GAMEDAY.md`](../README_GAMEDAY.md#testing) for commands. Tiers:
 
 - **Scoring write path landed (PR03)** — submitting an attempt validates, persists `task_attempts` + `validation_results`, and awards base points once via `scoring_events` (idempotent per team/workspace). Manual validators return a pending state; the host manual-override UI is a later PR.
 - **SQL validator needs a warehouse** — set `QUEST_SQL_WAREHOUSE_ID` (or per-validator `warehouse_id`); without one, `sql_assertion` returns a player-safe `error` and the host sees the diagnostic in `validation_results.private_message`. Safety/templating/expectation logic is warehouse-independent and unit-tested.
-- **No event/team APIs yet** — event creation lives in PR04; attempt submission + roster import require an existing `event_id` and (standalone) a team + team_member (seed via SQL to test Tier 2 early).
-- **Federation writer credential** is a single shared secret distributed per event; rotate per event (see ADR_006). Per-child OAuth roles are a future hardening option.
-- **Endpoints present today:** `/api/health`, adoption reads, `/api/host/quest-packs/*`, `/api/events/{id}/tasks/{task_id}/attempts` (POST), `/api/events/{id}/attempts/{attempt_id}` (GET), `/api/federation/status|leaderboard`, `/api/host/events/{id}/roster|workspaces|identities/unmapped`.
+- **Host authority is fail-closed** — in Event Mode a `/api/host/*` caller must be in `QUEST_HOST_ALLOWLIST`, an admin, or an `event_hosts` row for the event; when no authority is configured anywhere, access is denied unless the `QUEST_HOST_OPEN=1` dev escape hatch is set. Manage per-event hosts via `/api/host/events/{id}/hosts`.
+- **Federation writer credential** is a single shared secret distributed per event; rotate per event (see ADR_006). The child→master writer path uses a bounded connection pool (`LAKEBASE_POOL_MIN`/`MAX`). Per-child OAuth roles are a future hardening option.
+- **Endpoints present today:** `/api/health` (role/event-mode/validator types/SDK checks), adoption reads, `/api/host/quest-packs/*` (lint/import), event lifecycle + `/api/host/events/{id}` overview/`teams`/`attempts`/`announcements`/`adjustments`/`hosts`/`report`/`export`/`bootstrap`/`reset`, `/api/events/{id}/join|team|teams|team/rename|quests|leaderboard`, `/api/events/{id}/tasks/{task_id}/attempts` (POST), `/api/events/{id}/attempts/{attempt_id}` (GET), `/api/events/{id}/tasks/{task_id}/hints/{id}/reveal`, `/api/federation/status|leaderboard`, `/api/host/events/{id}/roster|workspaces|identities/unmapped`.
 
 ---
 

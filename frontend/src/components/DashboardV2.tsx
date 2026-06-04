@@ -33,11 +33,12 @@ type DashboardV2Props = {
   profile: UserProfile | null
   notifications: Notification[]
   onRefresh: () => void
+  onNavigate?: (page: string) => void
 }
 
 type PathItem = { label: string; done: boolean }
 
-export default function DashboardV2({ profile, notifications, onRefresh }: DashboardV2Props) {
+export default function DashboardV2({ profile, notifications, onRefresh, onNavigate }: DashboardV2Props) {
   const missionsApi = useApi<{ missions: Mission[] }>('/api/missions')
   const leaderboardApi = useApi<{ leaderboard: LeaderboardEntry[] }>('/api/leaderboard?period=all')
 
@@ -153,7 +154,10 @@ export default function DashboardV2({ profile, notifications, onRefresh }: Dashb
                   <Chip icon={BarChart3} label={difficultyForPoints(recommended.points)} />
                   <Chip icon={Shield} label="Detected from system tables" />
                 </div>
-                <button className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#FF7A1A] to-[#E93D1E] px-5 py-3 text-sm font-semibold text-white shadow-xl shadow-[#FF5F1F]/20 transition hover:brightness-110">
+                <button
+                  onClick={() => onNavigate?.('missions')}
+                  className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#FF7A1A] to-[#E93D1E] px-5 py-3 text-sm font-semibold text-white shadow-xl shadow-[#FF5F1F]/20 transition hover:brightness-110"
+                >
                   Start Mission <ChevronRight className="h-4 w-4" />
                 </button>
               </div>

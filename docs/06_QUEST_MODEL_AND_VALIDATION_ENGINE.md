@@ -1,5 +1,7 @@
 # 06 — Quest Model and Validation Engine
 
+> **Authoring a pack? Start with [`AUTHORING_QUEST_PACKS.md`](AUTHORING_QUEST_PACKS.md)** — the single guided scaffold→author→lint→import→version walkthrough. This file is the model + validation-engine deep dive behind it.
+
 ## Why validation is the product
 
 A GameDay succeeds or fails on whether participants trust the scoring.

@@ -1,5 +1,7 @@
 # Sample Quest Pack — AI/BI Intelligence Challenge
 
+> **Start with [`docs/AUTHORING_QUEST_PACKS.md`](../docs/AUTHORING_QUEST_PACKS.md)** — the single guided authoring walkthrough. This file is a complete worked-pack appendix.
+
 Below is a sample starter pack. It is intentionally small enough for MVP testing.
 
 ```yaml

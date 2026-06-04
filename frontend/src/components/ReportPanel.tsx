@@ -1,4 +1,4 @@
-import { BarChart3, Crown, Download, FileText, Lightbulb, Trophy } from 'lucide-react'
+import { BarChart3, Crown, Download, FileText, Lightbulb, Trophy, Users } from 'lucide-react'
 import { useApi } from '../lib/api'
 import { QuestCard } from './quest/QuestCard'
 import { EmptyState, Skeleton } from './quest/States'
@@ -89,6 +89,38 @@ export default function ReportPanel({ eventRef }: { eventRef: string }) {
               </table>
             </div>
           </section>
+
+          {data.roster && data.roster.length > 0 && (
+            <section>
+              <h4 className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-slate-400">
+                <Users className="h-3.5 w-3.5 text-[#FF8A3D]" /> Participant roster ({data.roster.length})
+              </h4>
+              <div className="overflow-hidden rounded-xl border border-white/10">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-white/10 bg-white/[0.02] text-left text-[11px] uppercase tracking-wider text-slate-500">
+                      <th className="px-3 py-2 font-semibold">Participant</th>
+                      <th className="px-3 py-2 font-semibold">Role</th>
+                      <th className="px-3 py-2 font-semibold">Team</th>
+                      <th className="px-3 py-2 text-right font-semibold">Tasks passed</th>
+                      <th className="px-3 py-2 text-right font-semibold">Attempts</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.roster.map((r) => (
+                      <tr key={r.user_id} className="border-b border-white/5 last:border-0">
+                        <td className="px-3 py-2 text-white">{r.display_name}</td>
+                        <td className="px-3 py-2 text-slate-400">{r.role}</td>
+                        <td className="px-3 py-2 text-slate-300">{r.team_name}</td>
+                        <td className="px-3 py-2 text-right text-slate-300">{r.tasks_passed}</td>
+                        <td className="px-3 py-2 text-right text-slate-400">{r.attempts_total}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
 
           {data.blockers.length > 0 && (
             <section>

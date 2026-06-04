@@ -90,6 +90,38 @@ class ReportingRepository:
             logger.warning("hint_usage failed: %s", exc)
             return []
 
+    def participant_roster(self, event_id: str) -> List[Dict[str, Any]]:
+        """Every participant with their team and personally-submitted attempt stats.
+
+        Points are scored at the team level, so per-person attribution here is the
+        honest individual signal: how many distinct tasks the participant
+        personally submitted that passed, and their total attempts. Left joins keep
+        un-teamed participants (and those who never submitted) in the roster.
+        """
+        try:
+            return db.execute_query(
+                """
+                SELECT p.participant_id, p.user_id, p.display_name, p.role,
+                       t.team_id, t.display_name AS team_name, t.name AS team_slug,
+                       COUNT(a.attempt_id) AS attempts_total,
+                       COUNT(DISTINCT CASE WHEN a.status = 'passed' THEN a.task_id END)
+                           AS tasks_passed
+                FROM participants p
+                LEFT JOIN team_members tmem ON tmem.participant_id = p.participant_id
+                LEFT JOIN teams t ON t.team_id = tmem.team_id AND t.event_id = p.event_id
+                LEFT JOIN task_attempts a
+                       ON a.submitted_by = p.user_id AND a.event_id = p.event_id
+                WHERE p.event_id = %s
+                GROUP BY p.participant_id, p.user_id, p.display_name, p.role,
+                         t.team_id, t.display_name, t.name
+                ORDER BY t.display_name ASC NULLS LAST, p.display_name ASC
+                """,
+                (event_id,),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("participant_roster failed: %s", exc)
+            return []
+
     def first_solves(self, event_id: str) -> List[Dict[str, Any]]:
         """The first team to complete each task (champions / first-blood)."""
         try:

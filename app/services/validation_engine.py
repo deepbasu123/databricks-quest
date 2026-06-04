@@ -19,6 +19,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from validators import (
+    DatabricksSDKValidator,
     ManualValidator,
     SQLAssertionValidator,
     ValidationContext,
@@ -38,12 +39,21 @@ _SAFE_DEFAULT_MESSAGE = (
 class ValidationEngine:
     """Dispatches stored validator rows to validator implementations."""
 
-    def __init__(self, sql_executor: Optional[Executor] = None):
-        # ``sql_executor`` is injectable for tests; production passes None and
-        # the SQL validator lazily builds an SDK-backed executor per call.
+    def __init__(
+        self,
+        sql_executor: Optional[Executor] = None,
+        sdk_validator: Optional[Validator] = None,
+    ):
+        # ``sql_executor``/``sdk_validator`` are injectable for tests; production
+        # passes None and the validators lazily build SDK-backed backends.
+        sdk = sdk_validator or DatabricksSDKValidator()
         self._registry: Dict[str, Validator] = {
             "sql_assertion": SQLAssertionValidator(executor=sql_executor),
             "manual": ManualValidator(),
+            "databricks_sdk": sdk,
+            # ``workspace_api`` is an alias for the SDK validator (same backend);
+            # both names appear across quest packs and docs.
+            "workspace_api": sdk,
         }
 
     def supported_types(self) -> List[str]:

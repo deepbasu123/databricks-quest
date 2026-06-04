@@ -24,6 +24,7 @@ from .base import (
 )
 from .manual import ManualValidator
 from .sql_assertion import SQLAssertionValidator
+from .databricks_sdk import DatabricksSDKValidator
 
 __all__ = [
     "ValidationContext",
@@ -32,4 +33,5 @@ __all__ = [
     "ValidatorConfigError",
     "ManualValidator",
     "SQLAssertionValidator",
+    "DatabricksSDKValidator",
 ]

@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 KNOWN_VALIDATOR_TYPES = {
     "sql_assertion",
     "databricks_sdk",
+    "workspace_api",
     "system_table",
     "notebook",
     "python_code",

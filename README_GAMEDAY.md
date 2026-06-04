@@ -110,6 +110,31 @@ The page is "open to all" only when nothing is configured anywhere — no env
 allowlist **and** an empty/unreachable `quest_admins` (e.g. running locally
 without `deploy.sh`).
 
+### Host access (`--host-allowlist`) — fail-closed in Event Mode
+
+The **Host console** (`/api/host/*`) is GameDay-only and gated separately from
+the Admin page. A caller is a host when they are in `QUEST_HOST_ALLOWLIST`, are
+an admin, **or** are listed in the event's `event_hosts` rows (managed in-app via
+`/api/host/events/{id}/hosts`).
+
+**The gate is fail-closed.** In Event Mode, if no host authority is configured
+anywhere — empty allowlist, no admins, and no `event_hosts` for the event —
+access is **denied** (not open). The only escape hatch is the dev-only
+`QUEST_HOST_OPEN=1`, intended for local testing.
+
+Seed the allowlist at deploy time:
+
+```bash
+./deploy.sh --event-mode --host-allowlist "host1@corp.com,host2@corp.com"
+```
+
+Any `--event-mode` / `--role master` deploy requires either `--host-allowlist`
+or `--admins` (defaulting to the deploying user, as before) and the deploy
+script prints the **effective host authority** loudly so you can't ship an event
+nobody can host. `--host-allowlist` writes `QUEST_HOST_ALLOWLIST` into
+`app.yaml`. The frontend Host tab keys off the same rule (`lobby.is_host`), so
+"see the tab → 403" and "allowlisted → no tab" can't happen.
+
 ---
 
 ## Deploy — single workspace
@@ -231,10 +256,23 @@ Notes:
 
 ## Quest packs (works today)
 
-Quests are configuration, not code. Author a manifest (see
-[`samples/QUEST_PACK_SCHEMA.md`](samples/QUEST_PACK_SCHEMA.md) and
-[`samples/SAMPLE_QUEST_PACK_AI_BI.md`](samples/SAMPLE_QUEST_PACK_AI_BI.md)) and
-import it.
+Quests are configuration, not code. The single guided walkthrough is
+[`docs/AUTHORING_QUEST_PACKS.md`](docs/AUTHORING_QUEST_PACKS.md) (scaffold →
+author → lint → import → version-bump); the deep-dive references are
+[`samples/QUEST_PACK_SCHEMA.md`](samples/QUEST_PACK_SCHEMA.md),
+[`samples/SAMPLE_VALIDATOR_LIBRARY.md`](samples/SAMPLE_VALIDATOR_LIBRARY.md), and
+[`samples/SAMPLE_QUEST_PACK_AI_BI.md`](samples/SAMPLE_QUEST_PACK_AI_BI.md). A
+committed Cursor skill (`.cursor/skills/quest-pack-author/`) drives both the
+create and update flows for agents.
+
+**Validator types.** `sql_assertion` (read-only `SELECT`/`WITH` against the
+team's bootstrapped namespace) and `databricks_sdk`/`workspace_api` (read-only
+workspace lookups — `dashboard_exists_for_team`, `table_exists`,
+`genie_space_exists`, `job_exists_with_schedule`, …) **execute** today;
+`manual` routes to host review. The live, executable set is reported by
+`GET /api/health` (`validator_types` + `sdk_checks`) so authors never claim a
+check runs when it is actually host-reviewed. Always pair every `databricks_sdk`
+task with a `manual` fallback so a pilot is never blocked when a check can't run.
 
 Lint locally without a server:
 
@@ -389,6 +427,11 @@ Every event has a **Standings** tab (all roles). For standalone/master it calls
 **Ranking is deterministic.** The `event_leaderboard` view ranks by
 `total_points DESC` then `last_scored_at ASC`, so ties go to the team that
 reached the total first — the order never flickers between refreshes.
+
+**The board is live.** The Standings tab polls every ~10s on top of the manual
+Refresh and pauses while the browser tab is hidden, so spectators and players
+see scores move without reloading. Player attempt views poll the attempt record
+after submit so `queued`/`running` validations resolve in-place.
 
 **Hint penalties now affect the score.** Hint bodies are withheld until a player
 reveals them. Revealing calls

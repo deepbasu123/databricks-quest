@@ -79,6 +79,14 @@ class _FakeCursor:
         elif up.startswith("INSERT INTO PARTICIPANTS"):
             participant_id, event_id, user_id = params[0], params[1], params[2]
             self.s["participants"].setdefault((event_id, user_id), participant_id)
+        elif up.startswith("DELETE FROM TEAM_MEMBERS"):
+            # Single-team invariant: drop any membership for this participant on
+            # a team other than the target before inserting (mirrors the repo).
+            participant_id, _event_id, keep_team = params
+            self.s["team_members"] = {
+                (t, p) for (t, p) in self.s["team_members"]
+                if not (p == participant_id and t != keep_team)
+            }
         elif "TEAM_MEMBERS" in up and up.startswith("INSERT"):
             team_id, participant_id = params
             self.s["team_members"].add((team_id, participant_id))

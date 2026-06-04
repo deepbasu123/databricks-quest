@@ -230,13 +230,24 @@ def get_user_email(request: Request) -> str:
     return email
 
 
-# Optional host allowlist for GameDay host endpoints. When QUEST_HOST_ALLOWLIST
-# is set (comma-separated emails) only those users may call /api/host/*; when
-# unset the endpoints are open, matching today's /api/admin behaviour. This is
-# the single chokepoint to replace with the full event role model in a later PR.
+# Host authority for GameDay host endpoints. A user is a host when ANY of:
+#   - they are listed in QUEST_HOST_ALLOWLIST (comma-separated emails), OR
+#   - they are an admin (env QUEST_ADMIN_ALLOWLIST ∪ DB quest_admins), OR
+#   - they hold an event_hosts row for the event in the request path.
+# This unifies the three authorities so "see the Host tab but get a 403" and
+# "allowlisted but no tab" can no longer diverge — the frontend lobby uses the
+# same rule via the event lobby's ``is_host`` field.
 QUEST_HOST_ALLOWLIST = [
     e.strip().lower() for e in os.getenv("QUEST_HOST_ALLOWLIST", "").split(",") if e.strip()
 ]
+
+# Fail-closed dev escape hatch. When Event Mode is on but NO host authority is
+# configured anywhere (no allowlist, no admins, and — for an event — no
+# event_hosts rows), host endpoints deny by default. Set QUEST_HOST_OPEN=1 to
+# reopen them for local development only.
+QUEST_HOST_OPEN = os.getenv("QUEST_HOST_OPEN", "").strip().lower() in {
+    "1", "true", "on", "yes", "enabled", "enable",
+}
 
 # Env admin allowlist — the *bootstrap/fallback* for the Admin page
 # (/api/admin/*). Set from deploy.sh's --admins flag (comma-separated emails),
@@ -331,20 +342,72 @@ def require_event_mode() -> None:
     _ensure_event_mode()
 
 
+def _resolve_event_id_opt(event_id_or_slug: Optional[str]) -> Optional[str]:
+    """Resolve an event id/slug to a canonical event_id, or None if unknown."""
+    if not event_id_or_slug:
+        return None
+    try:
+        ev = events_repo.get_event(event_id_or_slug) or events_repo.get_event_by_slug(
+            event_id_or_slug
+        )
+        return ev["event_id"] if ev else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def is_host_user(user: str, event_id: Optional[str]) -> bool:
+    """Unified host check: allowlist OR admin OR event_hosts membership.
+
+    Fail-closed: when no host authority is configured anywhere (empty allowlist,
+    no admins, and no event_hosts rows for the event) the user is a host only if
+    the ``QUEST_HOST_OPEN`` dev escape hatch is set.
+    """
+    u = (user or "").lower()
+    allowlist = QUEST_HOST_ALLOWLIST
+    admins = admin_emails()  # env ∪ DB
+
+    if allowlist and u in allowlist:
+        return True
+    if admins and u in admins:
+        return True
+    if event_id:
+        try:
+            if events_repo.is_host(event_id, user):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+
+    # No explicit grant matched. Decide open vs fail-closed.
+    event_has_hosts = False
+    if event_id:
+        try:
+            event_has_hosts = bool(events_repo.list_event_hosts(event_id))
+        except Exception:  # noqa: BLE001
+            event_has_hosts = False
+    no_authority = (not allowlist) and (not admins) and (not event_has_hosts)
+    if no_authority:
+        return QUEST_HOST_OPEN
+    return False
+
+
 def require_host(request: Request) -> str:
-    """FastAPI dependency: resolve the user and enforce the host allowlist.
+    """FastAPI dependency: resolve the user and enforce host authority.
 
     Also gates on Event Mode — every ``/api/host/*`` surface is GameDay-only, so
-    a legacy (Event-Mode-off) deployment 404s here.
+    a legacy (Event-Mode-off) deployment 404s here. Host authority is the union
+    of the allowlist, admins, and per-event ``event_hosts`` membership, resolved
+    against the ``event_id`` (or slug) in the request path when present.
     """
     _ensure_event_mode()
     user = get_user_email(request)
-    if QUEST_HOST_ALLOWLIST and user.lower() not in QUEST_HOST_ALLOWLIST:
-        raise HTTPException(
-            status_code=403,
-            detail={"error": {"code": "FORBIDDEN", "message": "Host role required."}},
-        )
-    return user
+    path_params = getattr(request, "path_params", {}) or {}
+    event_id = _resolve_event_id_opt(path_params.get("event_id"))
+    if is_host_user(user, event_id):
+        return user
+    raise HTTPException(
+        status_code=403,
+        detail={"error": {"code": "FORBIDDEN", "message": "Host role required."}},
+    )
 
 
 def require_master_host(request: Request) -> str:
@@ -433,12 +496,17 @@ async def health():
 
     # Validator + scoring subsystem indicators (no DB writes).
     validator_types = default_engine.supported_types()
+    try:
+        from services.sdk_checks import known_checks
+        sdk_checks = known_checks()
+    except Exception:  # noqa: BLE001
+        sdk_checks = []
     warehouse_configured = bool(os.getenv("QUEST_SQL_WAREHOUSE_ID", "").strip())
 
     checks = {
         "lakebase": {"ok": db_ok, "latency_ms": db_latency_ms},
         "migrations": {"ok": bool(migrations), "applied": len(migrations)},
-        "validators": {"ok": bool(validator_types), "types": validator_types},
+        "validators": {"ok": bool(validator_types), "types": validator_types, "sdk_checks": sdk_checks},
         "scoring": {"ok": db_ok},  # scoring needs the ledger (Lakebase)
         "sql_warehouse": {"ok": warehouse_configured, "configured": warehouse_configured},
     }
@@ -673,6 +741,14 @@ async def add_admin(payload: AddAdminPayload, user: str = Depends(require_admin)
                               "message": "Could not persist admin (is Lakebase writable from this app?)."}},
         )
     _invalidate_admin_cache()
+    record_audit(
+        action="admin.add",
+        actor_user_id=user,
+        event_id=None,
+        target_type="admin",
+        target_id=email,
+        payload={"email": email, "added": created},
+    )
     return {"email": email, "added": created, "added_by": user}
 
 
@@ -718,6 +794,14 @@ async def remove_admin(email: str, user: str = Depends(require_admin)):
                                          "Use the master/host workspace app to remove admins."}},
         )
     _invalidate_admin_cache()
+    record_audit(
+        action="admin.remove",
+        actor_user_id=user,
+        event_id=None,
+        target_type="admin",
+        target_id=target,
+        payload={"email": target},
+    )
     return {"email": target, "removed": True}
 
 
@@ -794,6 +878,13 @@ class CreateTeamPayload(BaseModel):
     team_schema: Optional[str] = None
 
 
+class RenameTeamPayload(BaseModel):
+    display_name: str
+    color: Optional[str] = None
+    team_catalog: Optional[str] = None
+    team_schema: Optional[str] = None
+
+
 class JoinEventPayload(BaseModel):
     display_name: Optional[str] = None
     team_id: Optional[str] = None
@@ -853,7 +944,8 @@ async def get_event_lobby(event_id: str, request: Request, _: None = Depends(req
         "event": _event_public(ev),
         "joinable": ev["status"] in JOINABLE_STATUSES,
         "attempts_open": attempts_open(ev["status"]),
-        "is_host": events_repo.is_host(resolved_event_id, user),
+        "is_host": is_host_user(user, resolved_event_id),
+        "team_self_service": _TEAM_SELF_SERVICE,
         "teams": events_repo.list_teams_with_counts(resolved_event_id),
         "counts": events_repo.event_counts(resolved_event_id, ev.get("pack_version_id")),
         "you": {
@@ -918,6 +1010,104 @@ async def join_event(
         "team_id": team["team_id"] if team else None,
         "team_name": (team.get("display_name") or team.get("name")) if team else None,
     }
+
+
+# Player team self-service: create/rename a team from the lobby. Defaults on;
+# set QUEST_TEAM_SELF_SERVICE=0 to require hosts to pre-create every team.
+_TEAM_SELF_SERVICE = os.getenv("QUEST_TEAM_SELF_SERVICE", "1").strip().lower() not in (
+    "0", "false", "no", "off",
+)
+
+
+@app.post("/api/events/{event_id}/teams")
+async def player_create_team(
+    event_id: str,
+    body: CreateTeamPayload,
+    request: Request,
+    _: None = Depends(require_event_mode),
+):
+    """Player self-service: create a team and join it (gated to joinable events).
+
+    Distinct from the host endpoint (``/api/host/events/{id}/teams``): this is
+    open to any authenticated player while the event is joinable and self-service
+    is enabled, and it places the caller on the new team (single-team invariant).
+    """
+    if not _TEAM_SELF_SERVICE:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": {"code": "SELF_SERVICE_DISABLED", "message": "Team self-service is turned off for this deployment."}},
+        )
+    resolved_event_id = _resolve_event_or_404(event_id)
+    ev = events_repo.get_event(resolved_event_id)
+    user = get_user_email(request)
+    if ev["status"] not in JOINABLE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": {"code": "NOT_JOINABLE", "message": "This event is not open for joining right now."}},
+        )
+    try:
+        team = events_repo.create_team(
+            event_id=resolved_event_id, name=body.name, display_name=body.display_name
+        )
+        participant = events_repo.register_participant(
+            event_id=resolved_event_id, user_id=user, email=user
+        )
+        events_repo.set_participant_team(
+            resolved_event_id, participant["participant_id"], team["team_id"]
+        )
+    except EventStateError as exc:
+        raise _event_state_error(exc)
+    record_audit(
+        action="team.self_create",
+        actor_user_id=user,
+        event_id=resolved_event_id,
+        target_type="team",
+        target_id=team["team_id"],
+        payload={"name": team.get("name"), "joined": True},
+    )
+    return {"team": _team_public(team), "joined": True}
+
+
+@app.post("/api/events/{event_id}/team/rename")
+async def player_rename_team(
+    event_id: str,
+    body: RenameTeamPayload,
+    request: Request,
+    _: None = Depends(require_event_mode),
+):
+    """Player self-service: rename the caller's own team (display name only)."""
+    if not _TEAM_SELF_SERVICE:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": {"code": "SELF_SERVICE_DISABLED", "message": "Team self-service is turned off for this deployment."}},
+        )
+    resolved_event_id = _resolve_event_or_404(event_id)
+    ev = events_repo.get_event(resolved_event_id)
+    user = get_user_email(request)
+    if ev["status"] not in JOINABLE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": {"code": "NOT_JOINABLE", "message": "Renaming is closed for this event right now."}},
+        )
+    team = events_repo.get_team_for_user(resolved_event_id, user)
+    if not team:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": {"code": "NOT_ON_TEAM", "message": "Join a team before renaming it."}},
+        )
+    try:
+        updated = events_repo.rename_team(team["team_id"], body.display_name)
+    except EventStateError as exc:
+        raise _event_state_error(exc)
+    record_audit(
+        action="team.self_rename",
+        actor_user_id=user,
+        event_id=resolved_event_id,
+        target_type="team",
+        target_id=team["team_id"],
+        payload={"display_name": updated.get("display_name")},
+    )
+    return {"team": _team_public(updated)}
 
 
 def _find_team_by_name(event_id: str, name: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -1264,6 +1454,65 @@ async def host_import_participants(
     return result
 
 
+class AddHostPayload(BaseModel):
+    email: str
+    role: str = "host"
+
+
+@app.get("/api/host/events/{event_id}/hosts")
+async def host_list_hosts(event_id: str, user: str = Depends(require_host)):
+    """List the hosts (event_hosts rows) for an event."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    return {"hosts": events_repo.list_event_hosts(resolved_event_id)}
+
+
+@app.post("/api/host/events/{event_id}/hosts")
+async def host_add_host(
+    event_id: str, body: AddHostPayload, user: str = Depends(require_host)
+):
+    """Grant a user the host role for an event (audited)."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    email = (body.email or "").strip().lower()
+    if "@" not in email or email.startswith("@") or email.endswith("@"):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "INVALID_EMAIL", "message": "A valid email is required."}},
+        )
+    try:
+        created = events_repo.add_host(resolved_event_id, email, role=body.role)
+    except EventStateError as exc:
+        raise _event_state_error(exc)
+    record_audit(
+        action="host.add",
+        actor_user_id=user,
+        event_id=resolved_event_id,
+        target_type="event_host",
+        target_id=email,
+        payload={"email": email, "role": body.role, "added": created},
+    )
+    return {"email": email, "role": body.role, "added": created}
+
+
+@app.delete("/api/host/events/{event_id}/hosts/{email}")
+async def host_remove_host(event_id: str, email: str, user: str = Depends(require_host)):
+    """Revoke a user's host role for an event (audited, last-owner-protected)."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    target = (email or "").strip().lower()
+    try:
+        events_repo.remove_host(resolved_event_id, target)
+    except EventStateError as exc:
+        raise _event_state_error(exc)
+    record_audit(
+        action="host.remove",
+        actor_user_id=user,
+        event_id=resolved_event_id,
+        target_type="event_host",
+        target_id=target,
+        payload={"email": target},
+    )
+    return {"email": target, "removed": True}
+
+
 def _transition_endpoint(target: str):
     async def _do(event_id: str, request: Request, user: str = Depends(require_host)):
         resolved_event_id = _resolve_event_or_404(event_id)
@@ -1518,6 +1767,7 @@ def _assemble_event_report(event_id: str) -> Dict[str, Any]:
         first_solves=reporting_repo.first_solves(event_id),
         status_counts=attempts_repo.attempt_status_counts(event_id),
         counts=events_repo.event_counts(event_id, pack_version_id),
+        participants=reporting_repo.participant_roster(event_id),
     )
 
 
@@ -1692,6 +1942,21 @@ async def host_bootstrap_resources(
     result = default_resource_service.execute_plan(
         ev, plan, executor, created_by=user
     )
+
+    # Persist each team's resolved namespace so validator-variable resolution
+    # and the host resource view see a stable, materialized target (the same
+    # value the plan just provisioned), rather than re-deriving it per request.
+    if result.get("ok"):
+        try:
+            teams = events_repo.list_teams(resolved_event_id)
+            for target in ns.team_targets(ev, teams):
+                if target.get("team_id"):
+                    events_repo.set_team_namespace(
+                        target["team_id"], target["catalog"], target["schema"]
+                    )
+        except ns.NamespaceError as exc:
+            logger.warning("namespace persist skipped (unsafe namespace): %s", exc)
+
     record_audit(
         action="resources.bootstrap", actor_user_id=user, event_id=resolved_event_id,
         target_type="event", target_id=resolved_event_id,
@@ -1911,14 +2176,74 @@ def _build_validator_variables(
     team's resources.
     """
     variables: Dict[str, Any] = {"event_id": event_id}
+
+    # Load the event once so we can resolve event-scoped variables and derive
+    # team namespace fallbacks from the same source.
+    ev: Optional[Dict[str, Any]] = None
+    try:
+        ev = events_repo.get_event(event_id)
+    except Exception:  # noqa: BLE001 - event lookup is best-effort here
+        ev = None
+
+    if ev:
+        if ev.get("slug"):
+            variables["event_slug"] = ev["slug"]
+        starts_at = _iso_or_none(ev.get("starts_at"))
+        ends_at = _iso_or_none(ev.get("ends_at"))
+        if starts_at:
+            variables["event_start"] = starts_at
+        if ends_at:
+            variables["event_end"] = ends_at
+        try:
+            ens = ns.event_namespace(ev)
+            variables["event_catalog"] = ens["catalog"]
+            variables["team_prefix"] = ens["schema_prefix"]
+        except ns.NamespaceError:
+            pass
+
     if team_id:
         variables["team_id"] = team_id
     if team_row:
-        if team_row.get("team_catalog"):
-            variables["team_catalog"] = team_row["team_catalog"]
-        if team_row.get("team_schema"):
-            variables["team_schema"] = team_row["team_schema"]
+        if team_row.get("name"):
+            # team_slug is the sanitized team name used to derive its schema and
+            # to name team-scoped artefacts; SDK checks filter dashboards/jobs by
+            # it (name_contains: ${team_slug}).
+            variables["team_slug"] = ns.sanitize_identifier(team_row["name"])
+        catalog = team_row.get("team_catalog")
+        schema = team_row.get("team_schema")
+        # Fallback: if the team row's namespace columns are blank (teams created
+        # by self-join / bulk import before bootstrap persisted them), derive the
+        # same deterministic target the bootstrap plan uses so
+        # ${team_catalog}.${team_schema} always resolves. This is the core P0
+        # gameplay fix — without it, sql_assertion checks reference an empty
+        # namespace and silently fail right after an event opens.
+        if (not catalog or not schema) and ev:
+            try:
+                target = ns.team_target(ev, team_row)
+                catalog = catalog or target["catalog"]
+                schema = schema or target["schema"]
+            except ns.NamespaceError:
+                # An unsafe/misconfigured namespace stays unresolved; the safety
+                # layer will reject any ${...} slot rather than guess.
+                pass
+        if catalog:
+            variables["team_catalog"] = catalog
+        if schema:
+            variables["team_schema"] = schema
     return variables
+
+
+def _iso_or_none(value: Any) -> Optional[str]:
+    """Best-effort ISO-8601 rendering of a timestamp column for template vars."""
+    if value is None:
+        return None
+    iso = getattr(value, "isoformat", None)
+    if callable(iso):
+        try:
+            return iso()
+        except Exception:  # noqa: BLE001
+            return str(value)
+    return str(value)
 
 
 def _resolve_attempt_identity(event_id: str, user: str) -> Dict[str, Any]:
@@ -2037,6 +2362,8 @@ async def submit_attempt(
     request_id = getattr(request.state, "request_id", None)
     outcomes = []
     public_results = []
+    results_persisted = 0
+    results_failed_to_persist = 0
     for v in validators:
         outcome = default_engine.run_validator(v, submission, variables)
         outcomes.append(outcome)
@@ -2061,11 +2388,25 @@ async def submit_attempt(
                 evidence=outcome.evidence,
                 workspace_id=workspace_id,
             )
+            results_persisted += 1
         except Exception as exc:  # noqa: BLE001 - persistence best-effort per result
-            logger.warning("record_validation_result failed: %s", exc)
+            results_failed_to_persist += 1
+            # Distinct, loud log: a passing task whose evidence didn't persist is
+            # an integrity problem the host must be able to find.
+            logger.error(
+                "VALIDATION_RESULT_PERSIST_FAILED attempt=%s validator=%s: %s",
+                attempt_id, v.get("validator_id"), exc,
+            )
         public_results.append({"status": outcome.status, "message": outcome.public_message})
 
     status = aggregate_status(outcomes) if validators else "error"
+
+    # Never let scoring proceed when the result ledger is empty: if we ran
+    # validators but persisted ZERO result rows, the evidence trail is missing,
+    # so force an error rather than awarding points on unrecorded results.
+    persist_integrity_error = bool(validators) and results_persisted == 0
+    if persist_integrity_error:
+        status = "error"
 
     points_awarded = 0
     already_awarded = False
@@ -2097,7 +2438,12 @@ async def submit_attempt(
             reason="task_passed",
         )
 
-    error_sentinel = "validation_error" if status == "error" else None
+    if persist_integrity_error:
+        error_sentinel = "result_persist_failed"
+    elif status == "error":
+        error_sentinel = "validation_error"
+    else:
+        error_sentinel = None
     try:
         attempts_repo.set_status(attempt_id, status, error_sentinel)
     except Exception as exc:  # noqa: BLE001
@@ -2114,6 +2460,8 @@ async def submit_attempt(
             "status": status,
             "points_awarded": points_awarded,
             "validators": len(validators),
+            "results_persisted": results_persisted,
+            "results_failed_to_persist": results_failed_to_persist,
             "workspace_id": workspace_id,
         },
     )

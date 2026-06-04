@@ -109,14 +109,15 @@ Every validator should use templated team variables rather than trusting arbitra
 
 ## SQL validator safety
 
-Default SQL validator rules:
+Default SQL validator rules (enforced by `app/validators/safety.py::ensure_safe_select`):
 
-- allow `SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN`
-- block `DROP`, `DELETE`, `TRUNCATE`, `ALTER`, `GRANT`, `REVOKE`, `CREATE`, `INSERT`, `UPDATE`, `MERGE` unless explicit host allowlist
-- block multiple statements by default
-- validate catalog/schema prefixes
-- apply timeout
-- truncate returned evidence
+- allow **only** read-only `SELECT` and `WITH … SELECT` statements
+- block everything else — `DROP`, `DELETE`, `TRUNCATE`, `ALTER`, `GRANT`, `REVOKE`, `CREATE`, `INSERT`, `UPDATE`, `MERGE`, and also `SHOW`/`DESCRIBE`/`EXPLAIN` (the allowlist is intentionally narrower than the SQL surface so a validator can never branch into a non-`SELECT` form)
+- block multiple/stacked statements by default
+- resolve only the server-provided template slots (`${team_catalog}`, `${team_schema}`, `${event_id}`); any other `${…}` slot is refused
+- validate catalog/schema identifiers (letters/digits/underscores only)
+- apply a per-validator timeout
+- truncate returned evidence (host sees diagnostics in `validation_results.private_message`)
 
 ## Notebook/Python validator safety
 
