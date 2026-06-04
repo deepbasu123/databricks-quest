@@ -106,6 +106,44 @@ and safe for existing clients to ignore:
 `migrations_applied` is an empty list when Lakebase is unavailable or migrations
 have not yet run, so health never fails because of migration state.
 
+### `/api/health` subsystem checks (PR10)
+
+`/api/health` additionally reports a `checks` block and `validator_types`, so an
+operator can see *which* subsystem is degraded rather than a binary up/down:
+
+```json
+{
+  "status": "ok",
+  "db_connected": true,
+  "db_latency_ms": 12.4,
+  "validator_types": ["manual", "sql_assertion"],
+  "checks": {
+    "lakebase":      { "ok": true, "latency_ms": 12.4 },
+    "migrations":    { "ok": true, "applied": 5 },
+    "validators":    { "ok": true, "types": ["manual", "sql_assertion"] },
+    "scoring":       { "ok": true },
+    "sql_warehouse": { "ok": false, "configured": false }
+  }
+}
+```
+
+`status` is `degraded` only when Lakebase is down; an unset SQL warehouse is
+informational (dry-run still works), not degraded.
+
+### Request correlation & error envelope (PR10)
+
+Every response carries an `X-Request-ID` header (an inbound one is honoured,
+else a `req_…` id is minted). Every error response uses a single envelope with
+that id embedded, so a player can quote it to their host:
+
+```json
+{ "error": { "code": "EVENT_NOT_ACTIVE", "message": "This event is paused…", "request_id": "req_4f1c…" } }
+```
+
+Each validator outcome and scoring decision also emits one structured
+`key=value` log line (ids, type, status, point delta) — no player payloads. See
+`docs/12_SECURITY_GOVERNANCE_COST.md` for the full permission model.
+
 ## New public/player endpoints
 
 ### List active events

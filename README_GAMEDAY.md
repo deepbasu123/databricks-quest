@@ -25,12 +25,13 @@ migrations are skipped. Enable GameDay explicitly with `--event-mode` (or set
 
 **Live status lives in one place:
 [`docs/STATUS.md`](docs/STATUS.md)** — the authoritative per-PR tracker (what's
-landed, what's deployable/testable, known gaps). In short: PR01–PR09 and the
+landed, what's deployable/testable, known gaps). In short: PR01–PR10 and the
 federation plumbing (PR13–PR16) have landed — schema, quest packs, the
 validation/scoring write path, event/team lifecycle, the player gameplay UI, the
 host console, the live player leaderboard with hint-penalty scoring,
-namespace-guarded team resource bootstrap/reset, and two shipped sample quest
-packs.
+namespace-guarded team resource bootstrap/reset, two shipped sample quest packs,
+and security/observability hardening (request ids, structured logs, expanded
+health, permission-model docs).
 
 > **What this means for testing:** the full loop is testable now — a host can
 > create an event, import a pack, run the lifecycle, players join and submit
