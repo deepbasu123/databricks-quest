@@ -149,6 +149,10 @@ MISSION_DEFINITIONS = [
     # --- Analytics ---
     {"id": "genie_creator", "name": "Genie Creator", "description": "Create your first AI/BI Genie space", "points": 200, "category": "Analytics", "award_type": "one_time", "icon": "sparkles"},
     {"id": "dashboard_designer", "name": "Dashboard Designer", "description": "Create your first Databricks Dashboard", "points": 150, "category": "Analytics", "award_type": "one_time", "icon": "layout-dashboard"},
+    {"id": "genie_explorer", "name": "Genie Explorer", "description": "Ask a question in an AI/BI Genie space", "points": 100, "category": "Analytics", "award_type": "one_time", "icon": "search"},
+    {"id": "dashboard_viewer", "name": "Dashboard Explorer", "description": "Open and view a published AI/BI dashboard", "points": 75, "category": "Analytics", "award_type": "one_time", "icon": "bar-chart-2"},
+    {"id": "genie_code_user", "name": "AI Assistant", "description": "Use the Databricks Assistant (Genie) to write or fix code", "points": 100, "category": "AI / ML", "award_type": "one_time", "icon": "brain"},
+    {"id": "lakebase_builder", "name": "Lakebase Builder", "description": "Create your first Lakebase (Postgres) database instance", "points": 250, "category": "Lakebase", "award_type": "one_time", "icon": "database"},
     {"id": "data_explorer", "name": "Data Explorer", "description": "Execute 50+ SQL queries in a single week", "points": 150, "category": "Analytics", "award_type": "repeatable", "icon": "search"},
     {"id": "power_analyst", "name": "Power Analyst", "description": "Execute 200+ SQL queries in a single week", "points": 200, "category": "Analytics", "award_type": "repeatable", "icon": "bar-chart-2"},
     {"id": "alert_creator", "name": "Alert Creator", "description": "Create a SQL Alert with a schedule", "points": 150, "category": "Analytics", "award_type": "one_time", "icon": "bell"},

@@ -72,6 +72,7 @@ export const CATEGORY_META: Record<string, CategoryMeta> = {
   Consumption: { color: '#F5B72E', tint: 'rgba(245,183,46,0.16)' },
   Engagement: { color: '#F43F5E', tint: 'rgba(244,63,94,0.16)' },
   Governance: { color: '#38BDF8', tint: 'rgba(56,189,248,0.16)' },
+  Lakebase: { color: '#10B981', tint: 'rgba(16,185,129,0.16)' },
 }
 
 export function categoryMeta(category: string): CategoryMeta {

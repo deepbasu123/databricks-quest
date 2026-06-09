@@ -530,6 +530,144 @@ print("Mission scored: Dashboard Designer")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ### Mission: Genie Explorer (100 pts)
+# MAGIC Ask a question in an AI/BI Genie space (business-user adoption of Genie).
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    user_identity.email AS user_id,
+    'genie_explorer' AS mission_id,
+    'Genie Explorer' AS mission_name,
+    100 AS points_awarded,
+    MIN(event_time) AS completed_at,
+    CAST(MIN(event_time) AS DATE) AS period_start,
+    CAST(MIN(event_time) AS DATE) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.access.audit
+  WHERE service_name = 'aibiGenie'
+    AND action_name IN ('genieStartConversationMessage', 'genieCreateConversationMessage')
+    AND response.status_code = 200
+    AND user_identity.email IS NOT NULL
+    AND user_identity.email != ''
+    AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+  GROUP BY user_identity.email
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: Genie Explorer")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: Dashboard Explorer (75 pts)
+# MAGIC Open and view a published AI/BI dashboard (business-user consumption).
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    user_identity.email AS user_id,
+    'dashboard_viewer' AS mission_id,
+    'Dashboard Explorer' AS mission_name,
+    75 AS points_awarded,
+    MIN(event_time) AS completed_at,
+    CAST(MIN(event_time) AS DATE) AS period_start,
+    CAST(MIN(event_time) AS DATE) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.access.audit
+  WHERE service_name = 'dashboards'
+    AND action_name IN ('getPublishedDashboard', 'getPublishedDashboardEmbedded')
+    AND response.status_code = 200
+    AND user_identity.email IS NOT NULL
+    AND user_identity.email != ''
+    AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+  GROUP BY user_identity.email
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: Dashboard Explorer")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: AI Assistant (100 pts)
+# MAGIC Use the Databricks Assistant (Genie / Genie Code) to write or fix code.
+# MAGIC Sourced from system.access.assistant_events (initiated_by is the user email).
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    initiated_by AS user_id,
+    'genie_code_user' AS mission_id,
+    'AI Assistant' AS mission_name,
+    100 AS points_awarded,
+    MIN(event_time) AS completed_at,
+    CAST(MIN(event_time) AS DATE) AS period_start,
+    CAST(MIN(event_time) AS DATE) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.access.assistant_events
+  WHERE initiated_by IS NOT NULL
+    AND initiated_by LIKE '%@%'
+    AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+  GROUP BY initiated_by
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: AI Assistant")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: Lakebase Builder (250 pts)
+# MAGIC Create your first Lakebase (managed Postgres / OLTP) database instance.
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    user_identity.email AS user_id,
+    'lakebase_builder' AS mission_id,
+    'Lakebase Builder' AS mission_name,
+    250 AS points_awarded,
+    MIN(event_time) AS completed_at,
+    CAST(MIN(event_time) AS DATE) AS period_start,
+    CAST(MIN(event_time) AS DATE) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.access.audit
+  WHERE service_name = 'databaseInstances'
+    AND action_name = 'createDatabaseInstance'
+    AND response.status_code = 200
+    AND user_identity.email IS NOT NULL
+    AND user_identity.email != ''
+    AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+  GROUP BY user_identity.email
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: Lakebase Builder")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ### Mission: Multi-Task Orchestrator (200 pts)
 # MAGIC Create a workflow with 3+ tasks.
 
