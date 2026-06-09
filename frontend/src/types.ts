@@ -30,6 +30,7 @@ export interface Mission {
   description: string
   points: number
   category: string
+  track?: string
   award_type: string
   icon: string
   status: 'available' | 'completed'

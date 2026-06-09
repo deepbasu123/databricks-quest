@@ -73,6 +73,9 @@ export const CATEGORY_META: Record<string, CategoryMeta> = {
   Engagement: { color: '#F43F5E', tint: 'rgba(244,63,94,0.16)' },
   Governance: { color: '#38BDF8', tint: 'rgba(56,189,248,0.16)' },
   Lakebase: { color: '#10B981', tint: 'rgba(16,185,129,0.16)' },
+  // Persona tracks (used as Missions-page tabs)
+  'Business Users': { color: '#00C2D7', tint: 'rgba(0,194,215,0.16)' },
+  Platform: { color: '#F5B72E', tint: 'rgba(245,183,46,0.16)' },
 }
 
 export function categoryMeta(category: string): CategoryMeta {

@@ -15,8 +15,11 @@ export default function Missions() {
   const [selected, setSelected] = useState<Mission | null>(null)
 
   const missions = data?.missions ?? []
-  const categories = useMemo(() => ['all', ...Array.from(new Set(missions.map((m) => m.category)))], [missions])
-  const filtered = filter === 'all' ? missions : missions.filter((m) => m.category === filter)
+  // Tabs are persona "tracks" (Business Users, Lakebase, ...), falling back to
+  // category when a mission has no track. Card colors still use category.
+  const trackOf = (m: Mission) => m.track || m.category
+  const categories = useMemo(() => ['all', ...Array.from(new Set(missions.map(trackOf)))], [missions])
+  const filtered = filter === 'all' ? missions : missions.filter((m) => trackOf(m) === filter)
   const completed = missions.filter((m) => m.status === 'completed').length
   const total = missions.length
   const pointsEarned = missions.filter((m) => m.status === 'completed').reduce((sum, m) => sum + m.points, 0)

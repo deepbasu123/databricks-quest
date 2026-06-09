@@ -668,6 +668,347 @@ print("Mission scored: Lakebase Builder")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ### Mission: Genie Curator (150 pts)
+# MAGIC Add instructions or sample/curated questions to tune a Genie space for a team.
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    user_identity.email AS user_id,
+    'genie_curator' AS mission_id,
+    'Genie Curator' AS mission_name,
+    150 AS points_awarded,
+    MIN(event_time) AS completed_at,
+    CAST(MIN(event_time) AS DATE) AS period_start,
+    CAST(MIN(event_time) AS DATE) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.access.audit
+  WHERE service_name = 'aibiGenie'
+    AND action_name IN ('createInstruction', 'createCuratedQuestion', 'updateSampleQuestions')
+    AND response.status_code = 200
+    AND user_identity.email IS NOT NULL AND user_identity.email != ''
+    AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+  GROUP BY user_identity.email
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: Genie Curator")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: Genie Power User (100 pts, repeatable weekly)
+# MAGIC Ask 10+ Genie questions in a single week.
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    user_identity.email AS user_id,
+    'genie_power_user' AS mission_id,
+    'Genie Power User' AS mission_name,
+    100 AS points_awarded,
+    CAST(MAX(event_time) AS TIMESTAMP) AS completed_at,
+    DATE_TRUNC('WEEK', event_time) AS period_start,
+    DATE_ADD(DATE_TRUNC('WEEK', event_time), 6) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.access.audit
+  WHERE service_name = 'aibiGenie'
+    AND action_name IN ('createConversationMessage', 'genieCreateConversationMessage')
+    AND response.status_code = 200
+    AND user_identity.email IS NOT NULL AND user_identity.email != ''
+    AND event_time >= DATE_SUB(CURRENT_DATE(), 30)
+  GROUP BY user_identity.email, DATE_TRUNC('WEEK', event_time)
+  HAVING COUNT(*) >= 10
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id AND target.period_start = source.period_start
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: Genie Power User")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: Dashboard Publisher (150 pts)
+# MAGIC Publish an AI/BI dashboard so others can use it.
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    user_identity.email AS user_id,
+    'dashboard_publisher' AS mission_id,
+    'Dashboard Publisher' AS mission_name,
+    150 AS points_awarded,
+    MIN(event_time) AS completed_at,
+    CAST(MIN(event_time) AS DATE) AS period_start,
+    CAST(MIN(event_time) AS DATE) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.access.audit
+  WHERE service_name = 'dashboards'
+    AND action_name = 'publishDashboard'
+    AND response.status_code = 200
+    AND user_identity.email IS NOT NULL AND user_identity.email != ''
+    AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+  GROUP BY user_identity.email
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: Dashboard Publisher")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: Dashboard Operator (150 pts)
+# MAGIC Schedule a dashboard delivery or subscription.
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    user_identity.email AS user_id,
+    'dashboard_operator' AS mission_id,
+    'Dashboard Operator' AS mission_name,
+    150 AS points_awarded,
+    MIN(event_time) AS completed_at,
+    CAST(MIN(event_time) AS DATE) AS period_start,
+    CAST(MIN(event_time) AS DATE) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.access.audit
+  WHERE service_name = 'dashboards'
+    AND action_name IN ('createSchedule', 'createSubscription', 'setSubscriptions')
+    AND response.status_code = 200
+    AND user_identity.email IS NOT NULL AND user_identity.email != ''
+    AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+  GROUP BY user_identity.email
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: Dashboard Operator")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: Query Author (75 pts)
+# MAGIC Save a query in the Databricks SQL editor.
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    user_identity.email AS user_id,
+    'query_author' AS mission_id,
+    'Query Author' AS mission_name,
+    75 AS points_awarded,
+    MIN(event_time) AS completed_at,
+    CAST(MIN(event_time) AS DATE) AS period_start,
+    CAST(MIN(event_time) AS DATE) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.access.audit
+  WHERE service_name = 'databrickssql'
+    AND action_name = 'createQuery'
+    AND response.status_code = 200
+    AND user_identity.email IS NOT NULL AND user_identity.email != ''
+    AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+  GROUP BY user_identity.email
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: Query Author")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: App Builder (250 pts)
+# MAGIC Create and deploy a Databricks App.
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    user_identity.email AS user_id,
+    'app_builder' AS mission_id,
+    'App Builder' AS mission_name,
+    250 AS points_awarded,
+    MIN(event_time) AS completed_at,
+    CAST(MIN(event_time) AS DATE) AS period_start,
+    CAST(MIN(event_time) AS DATE) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.access.audit
+  WHERE service_name = 'apps'
+    AND action_name IN ('createApp', 'deployApp')
+    AND response.status_code = 200
+    AND user_identity.email IS NOT NULL AND user_identity.email != ''
+    AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+  GROUP BY user_identity.email
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: App Builder")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: Notebook Author (75 pts)
+# MAGIC Create your first notebook.
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    user_identity.email AS user_id,
+    'notebook_author' AS mission_id,
+    'Notebook Author' AS mission_name,
+    75 AS points_awarded,
+    MIN(event_time) AS completed_at,
+    CAST(MIN(event_time) AS DATE) AS period_start,
+    CAST(MIN(event_time) AS DATE) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.access.audit
+  WHERE service_name = 'notebook'
+    AND action_name = 'createNotebook'
+    AND response.status_code = 200
+    AND user_identity.email IS NOT NULL AND user_identity.email != ''
+    AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+  GROUP BY user_identity.email
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: Notebook Author")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: Lakebase Sync Builder (250 pts)
+# MAGIC Sync a Unity Catalog table into Lakebase (synced table).
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    user_identity.email AS user_id,
+    'lakebase_sync' AS mission_id,
+    'Lakebase Sync Builder' AS mission_name,
+    250 AS points_awarded,
+    MIN(event_time) AS completed_at,
+    CAST(MIN(event_time) AS DATE) AS period_start,
+    CAST(MIN(event_time) AS DATE) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.access.audit
+  WHERE service_name IN ('databaseInstances', 'postgres')
+    AND action_name IN ('createSyncedDatabaseTable', 'createSyncedTable')
+    AND response.status_code = 200
+    AND user_identity.email IS NOT NULL AND user_identity.email != ''
+    AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+  GROUP BY user_identity.email
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: Lakebase Sync Builder")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: Lakebase Database Creator (150 pts)
+# MAGIC Create a Lakebase database or register a Lakebase catalog in Unity Catalog.
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    user_identity.email AS user_id,
+    'lakebase_database' AS mission_id,
+    'Lakebase Database Creator' AS mission_name,
+    150 AS points_awarded,
+    MIN(event_time) AS completed_at,
+    CAST(MIN(event_time) AS DATE) AS period_start,
+    CAST(MIN(event_time) AS DATE) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.access.audit
+  WHERE service_name IN ('databaseInstances', 'postgres')
+    AND action_name IN ('createDatabaseCatalog', 'createDatabase')
+    AND response.status_code = 200
+    AND user_identity.email IS NOT NULL AND user_identity.email != ''
+    AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+  GROUP BY user_identity.email
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: Lakebase Database Creator")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: Lakebase Connector (100 pts)
+# MAGIC Connect to Lakebase from an app or client (generate a database credential).
+
+# COMMAND ----------
+
+spark.sql(f"""
+MERGE INTO {tbl('mission_completions')} AS target
+USING (
+  SELECT
+    user_identity.email AS user_id,
+    'lakebase_connector' AS mission_id,
+    'Lakebase Connector' AS mission_name,
+    100 AS points_awarded,
+    MIN(event_time) AS completed_at,
+    CAST(MIN(event_time) AS DATE) AS period_start,
+    CAST(MIN(event_time) AS DATE) AS period_end,
+    CAST('{NOW}' AS TIMESTAMP) AS scored_at
+  FROM system.access.audit
+  WHERE service_name IN ('databaseInstances', 'postgres')
+    AND action_name = 'generateDatabaseCredential'
+    AND response.status_code = 200
+    AND user_identity.email IS NOT NULL AND user_identity.email != ''
+    AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+  GROUP BY user_identity.email
+) AS source
+ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+print("Mission scored: Lakebase Connector")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ### Mission: Multi-Task Orchestrator (200 pts)
 # MAGIC Create a workflow with 3+ tasks.
 
