@@ -43,14 +43,75 @@ LAKEBASE_PASSWORD = (
     or os.getenv("LAKEBASE_WRITER_TOKEN", "").strip()
 )
 
-# Data backend: "lakebase" (default, Postgres) or "warehouse" (read scored Delta
-# tables through a serverless SQL warehouse — adoption mode only, read-only).
-QUEST_DATA_BACKEND = (os.getenv("QUEST_DATA_BACKEND", "lakebase").strip().lower() or "lakebase")
+# Data backend: "lakebase" (Postgres) or "warehouse" (read scored Delta tables
+# through a serverless SQL warehouse). Both are provisioned at deploy; admins
+# flip the active one at runtime in Admin settings. QUEST_DATA_BACKEND is the
+# deploy-time DEFAULT used until an admin overrides it (persisted in app_settings).
+QUEST_DATA_BACKEND_DEFAULT = (os.getenv("QUEST_DATA_BACKEND", "lakebase").strip().lower() or "lakebase")
+_VALID_BACKENDS = ("lakebase", "warehouse")
+
+# Cache the active backend so we don't read the setting on every query.
+_backend_cache: Dict[str, Any] = {"value": None, "expiry": 0}
+_BACKEND_TTL_SECONDS = 30
+
+
+def _lakebase_rows(query: str, params: Tuple = ()) -> List[Dict[str, Any]]:
+    """Read via Lakebase directly (never the warehouse) — used for app settings
+    so the backend lookup itself can't recurse through routing."""
+    import psycopg2.extras
+    with _lease(autocommit=True) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(query, params)
+            return [dict(r) for r in cur.fetchall()] if cur.description else []
+
+
+def _ensure_app_settings() -> None:
+    with _lease(autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS app_settings "
+                "(key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMP)"
+            )
+
+
+def get_data_backend() -> str:
+    """Active data backend, honoring the admin override (cached), else the deploy
+    default. Falls back to the default if the setting can't be read."""
+    now = time.time()
+    if _backend_cache["value"] and now < _backend_cache["expiry"]:
+        return _backend_cache["value"]
+    value = QUEST_DATA_BACKEND_DEFAULT
+    try:
+        rows = _lakebase_rows("SELECT value FROM app_settings WHERE key = 'data_backend'")
+        if rows and (rows[0].get("value") or "").strip().lower() in _VALID_BACKENDS:
+            value = rows[0]["value"].strip().lower()
+    except Exception:
+        pass  # no settings table / Lakebase unavailable → use the default
+    _backend_cache.update(value=value, expiry=now + _BACKEND_TTL_SECONDS)
+    return value
+
+
+def set_data_backend(value: str) -> str:
+    """Persist the admin's backend choice and refresh the cache. Admin-gated by the caller."""
+    value = (value or "").strip().lower()
+    if value not in _VALID_BACKENDS:
+        raise ValueError(f"backend must be one of {_VALID_BACKENDS}")
+    _ensure_app_settings()
+    with _lease(autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO app_settings (key, value, updated_at) "
+                "VALUES ('data_backend', %s, now()) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+                (value,),
+            )
+    _backend_cache.update(value=value, expiry=time.time() + _BACKEND_TTL_SECONDS)
+    return value
 
 
 def warehouse_backend() -> bool:
-    """True when the app serves adoption data from a SQL warehouse, not Lakebase."""
-    return QUEST_DATA_BACKEND == "warehouse"
+    """True when adoption data is currently served from the SQL warehouse."""
+    return get_data_backend() == "warehouse"
 
 # OAuth tokens are valid ~1h; refresh the cached connection well before expiry.
 _CONN_TTL_SECONDS = 2700  # 45 minutes

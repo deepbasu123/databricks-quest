@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -16,7 +16,7 @@ import {
 } from 'lucide-react'
 import { Bar, BarChart, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import type { AdminListResponse, AdminStats, PipelineStatus } from '../types'
-import { useApi } from '../lib/api'
+import { useApi, fetchJson } from '../lib/api'
 import { QuestCard } from './quest/QuestCard'
 import { EmptyState, ErrorState, Skeleton, SkeletonText } from './quest/States'
 
@@ -84,6 +84,8 @@ export default function AdminPanel() {
           <Clock className="h-5 w-5 text-slate-500" />
         </div>
       </QuestCard>
+
+      <DataBackendToggle />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Kpi icon={Users} label="Total Users" value={s ? s.total_users.toLocaleString() : undefined} accent="#00C2D7" loading={stats.loading && !s} />
@@ -321,5 +323,51 @@ function Kpi({
         {detail && <p className="mt-1 text-xs text-slate-500">{detail}</p>}
       </div>
     </div>
+  )
+}
+
+type BackendInfo = { backend: string; default: string; options: string[]; warehouse_configured: boolean }
+
+function DataBackendToggle() {
+  const [info, setInfo] = useState<BackendInfo | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const load = () => fetchJson<BackendInfo>('/api/admin/data-backend').then(setInfo).catch((e) => setErr(String(e)))
+  useEffect(() => { load() }, [])
+  const switchTo = async (backend: string) => {
+    if (busy || backend === info?.backend) return
+    setBusy(true); setErr(null)
+    try {
+      const res = await fetch('/api/admin/data-backend', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ backend }),
+      })
+      if (!res.ok) { const d = await res.json().catch(() => ({} as any)); throw new Error(d?.error?.message || `HTTP ${res.status}`) }
+      await load()
+    } catch (e: any) { setErr(e?.message || String(e)) } finally { setBusy(false) }
+  }
+  const active = info?.backend
+  return (
+    <QuestCard title="Data Backend" eyebrow="Settings">
+      <p className="text-sm text-slate-400">
+        Where the app reads adoption data. <strong className="text-slate-200">Warehouse</strong> serves from Delta via the SQL
+        warehouse (bypasses Lakebase); <strong className="text-slate-200">Lakebase</strong> serves from Postgres. Changes apply within ~30s.
+      </p>
+      <div className="mt-4 flex gap-2">
+        {(info?.options ?? ['lakebase', 'warehouse']).map((b) => (
+          <button
+            key={b}
+            disabled={busy || (b === 'warehouse' && info != null && !info.warehouse_configured)}
+            onClick={() => switchTo(b)}
+            className={`rounded-xl border px-4 py-2 text-sm font-semibold capitalize transition disabled:opacity-50 ${
+              active === b ? 'border-[#22C55E]/50 bg-[#22C55E]/12 text-white' : 'border-white/10 bg-white/[0.03] text-slate-400 hover:border-white/20 hover:text-slate-200'
+            }`}
+          >
+            {b}{active === b ? ' • active' : ''}
+          </button>
+        ))}
+      </div>
+      {info && !info.warehouse_configured && <p className="mt-2 text-xs text-[#F5B72E]">No SQL warehouse is configured for this deployment.</p>}
+      {err && <p className="mt-2 text-xs text-[#F43F5E]">{err}</p>}
+    </QuestCard>
   )
 }

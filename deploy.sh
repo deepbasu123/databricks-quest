@@ -183,24 +183,27 @@ write_app_yaml() {
     echo "  - \"8000\""
     echo ""
     echo "env:"
+    # Lakebase is always wired (the app reads it by default and stores the
+    # backend toggle there). Emitted whenever a host is known.
+    if [ -n "$lb_host" ]; then
+      echo "  - name: LAKEBASE_HOST"
+      echo "    value: \"$lb_host\""
+      echo "  - name: LAKEBASE_DB"
+      echo "    value: \"$lb_db\""
+    fi
+    # Warehouse data backend: both backends are provisioned; QUEST_DATA_BACKEND is
+    # the DEFAULT (admins flip the active one at runtime in Admin settings).
+    # Catalog/schema set the warehouse session so bare table names resolve.
     if [ "$QUEST_DATA_BACKEND" = "warehouse" ]; then
-      # Warehouse data backend: the app reads scored Delta tables through the SQL
-      # warehouse (no Lakebase). Catalog/schema set the session so bare table
-      # names resolve.
       echo "  - name: QUEST_DATA_BACKEND"
       echo "    value: \"warehouse\""
       echo "  - name: QUEST_CATALOG"
       echo "    value: \"$QUEST_CATALOG\""
       echo "  - name: QUEST_SCHEMA"
       echo "    value: \"$QUEST_SCHEMA\""
-    else
-      echo "  - name: LAKEBASE_HOST"
-      echo "    value: \"$lb_host\""
-      echo "  - name: LAKEBASE_DB"
-      echo "    value: \"$lb_db\""
     fi
-    # SQL warehouse: the data-backend target in warehouse mode, and the
-    # sql_assertion validator target in Event Mode. Emitted whenever known.
+    # SQL warehouse: the warehouse-backend target, and the sql_assertion validator
+    # target in Event Mode. Emitted whenever known.
     [ -n "$WAREHOUSE_ID" ] && { echo "  - name: QUEST_SQL_WAREHOUSE_ID"; echo "    value: \"$WAREHOUSE_ID\""; }
     # Admin allowlist for /api/admin/* (comma-separated emails). When set, the
     # Admin page and its APIs are restricted to these users; absence = open.
@@ -1036,63 +1039,7 @@ fi  # end full deploy app start/deploy
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 6b: Data backend — warehouse (adoption) or Lakebase
 # ══════════════════════════════════════════════════════════════════════════════
-if [ "$QUEST_DATA_BACKEND" = "warehouse" ]; then
-  step "Step 6/8: Warehouse data backend (no Lakebase)"
-  info "App reads scored Delta tables in $QUEST_CATALOG.$QUEST_SCHEMA via warehouse $WAREHOUSE_ID."
-
-  SP_CLIENT_ID=$($CLI apps get "$APP_NAME" $PROFILE_FLAG -o json 2>/dev/null | python3 -c "
-import sys, json
-print(json.load(sys.stdin).get('service_principal_client_id', ''))
-" 2>/dev/null || true)
-
-  if [ -n "$SP_CLIENT_ID" ]; then
-    info "Granting app SP ($SP_CLIENT_ID) read on $QUEST_CATALOG.$QUEST_SCHEMA + CAN_USE on the warehouse..."
-    HOST="${DATABRICKS_HOST:-$WORKSPACE_HOST}" TOKEN="${DATABRICKS_TOKEN:-}" WH="$WAREHOUSE_ID" \
-    SP="$SP_CLIENT_ID" CAT="$QUEST_CATALOG" SCH="$QUEST_SCHEMA" python3 <<'PYEOF' || warn "Some grants may need to be applied manually."
-import os, json, time, urllib.request
-host=os.environ.get("HOST","").rstrip("/"); tok=os.environ.get("TOKEN",""); wh=os.environ["WH"]
-sp=os.environ["SP"]; cat=os.environ["CAT"]; sch=os.environ["SCH"]
-def sql(s):
-    body=json.dumps({"warehouse_id":wh,"statement":s,"wait_timeout":"30s"}).encode()
-    req=urllib.request.Request(host+"/api/2.0/sql/statements",data=body,headers={"Authorization":"Bearer "+tok,"Content-Type":"application/json"})
-    try: d=json.loads(urllib.request.urlopen(req,timeout=60).read())
-    except Exception as e: print("  grant error:",str(e)[:120]); return
-    sid=d.get("statement_id"); st=d.get("status",{}).get("state")
-    while st in ("PENDING","RUNNING") and sid:
-        time.sleep(2)
-        r=urllib.request.Request(host+"/api/2.0/sql/statements/"+sid,headers={"Authorization":"Bearer "+tok})
-        d=json.loads(urllib.request.urlopen(r,timeout=30).read()); st=d.get("status",{}).get("state")
-    if st!="SUCCEEDED": print("  grant warn:",(d.get("status",{}).get("error",{}) or {}).get("message","")[:140])
-for s in [f"GRANT USE CATALOG ON CATALOG `{cat}` TO `{sp}`",
-          f"GRANT USE SCHEMA, SELECT ON SCHEMA `{cat}`.`{sch}` TO `{sp}`"]:
-    sql(s)
-# CAN_USE on the warehouse
-body=json.dumps({"access_control_list":[{"service_principal_name":sp,"permission_level":"CAN_USE"}]}).encode()
-req=urllib.request.Request(host+f"/api/2.0/permissions/warehouses/{wh}",data=body,method="PATCH",
-    headers={"Authorization":"Bearer "+tok,"Content-Type":"application/json"})
-try: urllib.request.urlopen(req,timeout=30); print("  warehouse CAN_USE granted")
-except Exception as e: print("  warehouse perm warn:",str(e)[:120])
-PYEOF
-    success "Service principal granted catalog read + warehouse access"
-  else
-    warn "Could not resolve app service principal — grant catalog/warehouse access manually."
-  fi
-
-  info "Writing app.yaml (warehouse data backend)..."
-  write_app_yaml "" ""
-  if [ "$DEPLOY_MODE" = "full" ]; then
-    $CLI bundle deploy --target "$TARGET" $PROFILE_FLAG \
-      --var "warehouse_id=$WAREHOUSE_ID" --var "quest_catalog=$QUEST_CATALOG" \
-      --var "quest_schema=$QUEST_SCHEMA" --var "lakebase_host=" --var "lakebase_db=" --var "quest_data_backend=$QUEST_DATA_BACKEND" 2>&1 || true
-    APP_SRC="${BUNDLE_USER_PATH:-/Workspace/Users/${USER_EMAIL}/.bundle/${APP_NAME}/${TARGET}/files/app}"
-  else
-    APP_SRC="/Workspace/Users/${USER_EMAIL}/${APP_NAME}/app"
-    $CLI workspace import-dir "${SCRIPT_DIR}/app" "$APP_SRC" --overwrite $PROFILE_FLAG >/dev/null 2>&1 || true
-  fi
-  $CLI apps deploy "$APP_NAME" --source-code-path "$APP_SRC" $PROFILE_FLAG -o json 2>/dev/null || true
-  success "App updated for warehouse data backend"
-
-elif [ -z "$LAKEBASE_HOST" ]; then
+if [ -z "$LAKEBASE_HOST" ]; then
   step "Step 6/8: Provisioning Lakebase"
 
   LB_PROJECT_ID=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
@@ -1228,6 +1175,38 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO \"$SP_CLIENT
     success "Service principal ($SP_CLIENT_ID) granted Lakebase access"
   else
     warn "Could not find app service principal — you may need to grant Lakebase access manually"
+  fi
+
+  # Warehouse data backend: also grant the SP read on the scored Delta tables and
+  # CAN_USE on the warehouse, so an admin can switch the app to warehouse mode.
+  if [ "$QUEST_DATA_BACKEND" = "warehouse" ] && [ -n "$SP_CLIENT_ID" ] && [ -n "$WAREHOUSE_ID" ]; then
+    info "Granting SP ($SP_CLIENT_ID) read on $QUEST_CATALOG.$QUEST_SCHEMA + CAN_USE on warehouse $WAREHOUSE_ID..."
+    HOST="${DATABRICKS_HOST:-$WORKSPACE_HOST}" TOKEN="${DATABRICKS_TOKEN:-}" WH="$WAREHOUSE_ID" \
+    SP="$SP_CLIENT_ID" CAT="$QUEST_CATALOG" SCH="$QUEST_SCHEMA" python3 <<'PYEOF' || warn "Some warehouse grants may need to be applied manually."
+import os, json, time, urllib.request
+host=os.environ.get("HOST","").rstrip("/"); tok=os.environ.get("TOKEN",""); wh=os.environ["WH"]
+sp=os.environ["SP"]; cat=os.environ["CAT"]; sch=os.environ["SCH"]
+def sql(s):
+    body=json.dumps({"warehouse_id":wh,"statement":s,"wait_timeout":"30s"}).encode()
+    req=urllib.request.Request(host+"/api/2.0/sql/statements",data=body,headers={"Authorization":"Bearer "+tok,"Content-Type":"application/json"})
+    try: d=json.loads(urllib.request.urlopen(req,timeout=60).read())
+    except Exception as e: print("  grant error:",str(e)[:120]); return
+    sid=d.get("statement_id"); st=d.get("status",{}).get("state")
+    while st in ("PENDING","RUNNING") and sid:
+        time.sleep(2)
+        r=urllib.request.Request(host+"/api/2.0/sql/statements/"+sid,headers={"Authorization":"Bearer "+tok})
+        d=json.loads(urllib.request.urlopen(r,timeout=30).read()); st=d.get("status",{}).get("state")
+    if st!="SUCCEEDED": print("  grant warn:",(d.get("status",{}).get("error",{}) or {}).get("message","")[:140])
+for s in [f"GRANT USE CATALOG ON CATALOG `{cat}` TO `{sp}`",
+          f"GRANT USE SCHEMA, SELECT ON SCHEMA `{cat}`.`{sch}` TO `{sp}`"]:
+    sql(s)
+body=json.dumps({"access_control_list":[{"service_principal_name":sp,"permission_level":"CAN_USE"}]}).encode()
+req=urllib.request.Request(host+f"/api/2.0/permissions/warehouses/{wh}",data=body,method="PATCH",
+    headers={"Authorization":"Bearer "+tok,"Content-Type":"application/json"})
+try: urllib.request.urlopen(req,timeout=30); print("  warehouse CAN_USE granted")
+except Exception as e: print("  warehouse perm warn:",str(e)[:120])
+PYEOF
+    success "Service principal granted warehouse read access (admins can switch to warehouse mode)"
   fi
 
   # Patch app.yaml with actual Lakebase values (valueFrom doesn't work
