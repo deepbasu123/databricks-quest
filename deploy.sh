@@ -942,6 +942,12 @@ with open('$BUNDLE_FILE', 'w') as f:
 print('OK')
 " || fail "Failed to update databricks.yml"
 
+  # The rewrite below mutates databricks.yml in place. Back it up and restore it
+  # on exit, so a deploy with one --app-name can't leave the file renamed and
+  # corrupt the next deploy that uses a different name (observed: a later deploy
+  # silently re-targeting the previous app).
+  cp "$BUNDLE_FILE" "${BUNDLE_FILE}.deploybak" 2>/dev/null || true
+  trap 'mv -f "${BUNDLE_FILE}.deploybak" "$BUNDLE_FILE" 2>/dev/null || true' EXIT
   # Update app name if customized
   if [ "$APP_NAME" != "databricks-quest" ]; then
     python3 -c "
