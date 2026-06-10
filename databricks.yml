@@ -1,5 +1,5 @@
 bundle:
-  name: databricks-quest
+  name: quest-databricks
 
 sync:
   include:
@@ -22,7 +22,7 @@ variables:
 resources:
   apps:
     databricks_quest:
-      name: databricks-quest
+      name: quest-databricks
       description: "Databricks Quest - Gamification app for platform adoption"
       source_code_path: ./app
       config:
@@ -53,7 +53,7 @@ resources:
             base_parameters:
               quest_catalog: ${var.quest_catalog}
               quest_schema: ${var.quest_schema}
-              app_name: databricks-quest
+              app_name: quest-databricks
               warehouse_id: ${var.warehouse_id}
             source: WORKSPACE
           environment_key: default
@@ -69,7 +69,7 @@ resources:
               quest_schema: ${var.quest_schema}
               lakebase_host: ${var.lakebase_host}
               lakebase_db: ${var.lakebase_db}
-              app_name: databricks-quest
+              app_name: quest-databricks
             source: WORKSPACE
           environment_key: default
       environments:
@@ -85,6 +85,10 @@ targets:
   dev:
     mode: development
     default: true
+    # development mode pauses schedules/triggers by default; override so the
+    # scoring pipeline runs on its 4-hour schedule even in dev deployments.
+    presets:
+      trigger_pause_status: UNPAUSED
 
   prod:
     mode: production
