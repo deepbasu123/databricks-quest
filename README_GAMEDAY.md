@@ -64,6 +64,12 @@ See [`adr/ADR_006_SHARED_LAKEBASE_MULTI_WORKSPACE_FEDERATION.md`](adr/ADR_006_SH
 for why children connect directly to the master's Lakebase over Postgres
 (instead of HTTP between apps).
 
+> **Event Mode requires the Lakebase backend.** The optional SQL warehouse data
+> backend (`--data-backend warehouse`, toggled under Admin -> Data Backend) is
+> **read-only** — it serves adoption reads directly from the scored Delta tables.
+> GameDay writes (team bootstrap, attempts, live scoring) need Lakebase, so keep
+> the active backend on **Lakebase** when running an event.
+
 ### Admin page access (`--admins`)
 
 The **Admin** page (`/api/admin/*`) is gated by an allowlist, independent of

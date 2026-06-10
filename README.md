@@ -63,14 +63,38 @@ cd databricks-quest
 
 The script handles everything: prerequisites check, authentication, warehouse selection, frontend build, Lakebase provisioning, app deployment, scoring pipeline, and data sync. Takes about 15 minutes end to end.
 
+### Data backend (Lakebase or SQL warehouse)
+
+The app reads its scored adoption data from one of two backends, and admins can switch between them live:
+
+- **Lakebase** (default) -- low-latency Postgres read model.
+- **SQL warehouse** -- reads the scored Delta tables directly through a serverless SQL warehouse, bypassing Lakebase.
+
+```bash
+./deploy.sh --data-backend warehouse   # provision BOTH, default to warehouse
+```
+
+With `--data-backend warehouse`, the deploy provisions Lakebase **and** a Small, serverless SQL warehouse (1-hour auto-stop), grants the app service principal access to both, and the 4-hour scoring job warms the warehouse each run. Either way an admin can flip the active backend at runtime under **Admin -> Data Backend**, no redeploy needed.
+
+### Useful flags
+
+| Flag | What it does |
+|------|--------------|
+| `--data-backend warehouse` | Provision both backends; default to the warehouse (drives DBUs). |
+| `--skip-build` | Use the committed prebuilt frontend (no npm / registry access needed). |
+| `--skip-scoring` | Deploy without running the scoring job now (it still runs on schedule). |
+| `--profile <name>` | Use a specific CLI auth profile (recommended in restricted setups). |
+
+> **Prerequisite:** the deploying identity must be able to create the scored-tables schema (`CREATE SCHEMA` on the target catalog, or `CREATE CATALOG`). The deploy runs a pre-flight check and fails fast with the exact `GRANT` if it can't. The 4-hour scoring schedule runs even in dev deployments.
+
 ---
 
 ## What Users See
 
 - **Dashboard** -- Current level, points, streak, badges, and next missions to complete
-- **Missions** -- 30+ missions across Data Engineering, Analytics, AI/ML, Streaming, Consumption, and Engagement
+- **Missions** -- 40+ missions across Data Engineering, Analytics, AI/ML, Streaming, Consumption, Engagement, plus **Business Users** and **Lakebase** tracks (the Missions page has a tab per track)
 - **Leaderboard** -- Top 10 users ranked by points, resets every Saturday. Weekly swag prizes for the top 3.
-- **Admin** -- Pipeline health, user stats, mission completion charts, level distribution
+- **Admin** -- Pipeline health, user stats, mission completion charts, level distribution, and the **Data Backend** toggle (Lakebase / warehouse)
 
 ## Missions
 
@@ -86,15 +110,32 @@ The script handles everything: prerequisites check, authentication, warehouse se
 | Multi-Task Orchestrator | 200 | Create a workflow with 3+ tasks |
 | Liquid Clustering Adopter | 200 | Enable Liquid Clustering on a table |
 
-### Analytics
+### Analytics & Business Users
 | Mission | Points | What To Do |
 |---------|--------|------------|
 | Genie Creator | 200 | Create an AI/BI Genie space |
+| Genie Explorer | 100 | Ask a question in a Genie space |
+| Genie Curator | 150 | Add instructions or sample questions to a Genie space |
+| Genie Power User | 100 | Ask 10+ Genie questions in a week (repeatable) |
+| AI Assistant | 100 | Use the Databricks Assistant (Genie) to write or fix code |
 | Dashboard Designer | 150 | Create a Databricks Dashboard |
+| Dashboard Explorer | 75 | View a published AI/BI dashboard |
+| Dashboard Publisher | 150 | Publish a dashboard for others |
+| Dashboard Operator | 150 | Schedule a dashboard delivery or subscription |
 | Data Explorer | 150 | Execute 50+ SQL queries in a single week (repeatable) |
 | Power Analyst | 200 | Execute 200+ SQL queries in a single week (repeatable) |
+| Query Author | 75 | Save a query in the SQL editor |
 | Alert Creator | 150 | Create a SQL Alert with a schedule |
-| Dashboard Publisher | 200 | Publish a dashboard shared with 3+ viewers |
+| App Builder | 250 | Create and deploy a Databricks App |
+| Notebook Author | 75 | Create your first notebook |
+
+### Lakebase
+| Mission | Points | What To Do |
+|---------|--------|------------|
+| Lakebase Builder | 250 | Create a Lakebase database instance |
+| Lakebase Sync Builder | 250 | Sync a Unity Catalog table into Lakebase |
+| Lakebase Database Creator | 150 | Create a Lakebase database or registered catalog |
+| Lakebase Connector | 100 | Connect to Lakebase from an app or client |
 
 ### AI / ML
 | Mission | Points | What To Do |

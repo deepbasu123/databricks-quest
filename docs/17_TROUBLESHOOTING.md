@@ -143,6 +143,67 @@ Event/GameDay). Start with the health endpoint, then work down by symptom.
   endpoints (`/api/profile`, `/api/missions`, `/api/leaderboard`) should still
   work independently.
 
+### App loads but shows no data ("Not Initialized" / empty admin)
+- The scoring job hasn't produced the scored Delta tables yet, or the sync to the
+  active backend hasn't run. Open **Admin** and check pipeline health, then trigger
+  the scoring job once and wait for it to finish.
+- If the job itself failed, the most common cause is a **catalog permission** gap
+  (next item).
+
+### Catalog permission error during deploy / no tables created
+- The deploying identity (you, or the bundle's run-as service principal) needs to be
+  able to create the scored-tables schema. Symptom: deploy stops at the pre-flight
+  check, or the scoring job fails with a `PERMISSION_DENIED` on `CREATE SCHEMA` /
+  `CREATE TABLE`.
+- Have a metastore admin grant it once:
+  ```sql
+  CREATE CATALOG IF NOT EXISTS quest;
+  GRANT USE CATALOG, CREATE SCHEMA, CREATE TABLE, MODIFY, SELECT ON CATALOG quest TO `<deploying-user-or-SP>`;
+  ```
+- Then re-run with `--catalog quest`. Don't point `--catalog` at `main` unless you've
+  been granted `CREATE SCHEMA` there.
+
+### Scoring schedule appears paused (especially in dev)
+- This was the old DAB `mode: development` behaviour (schedules auto-paused). The
+  bundle now sets `schedule.pause_status: UNPAUSED` explicitly, so the **4-hour
+  schedule runs even in dev** deployments. If you redeployed an older copy, pull the
+  latest, redeploy, and confirm the job's schedule shows **Unpaused** in Workflows.
+
+### `npm` / registry errors during build
+- Use `./deploy.sh --skip-build` to deploy the committed prebuilt frontend. No npm
+  or registry access is required — useful on locked-down or air-gapped machines.
+
+### Terraform download / checksum-signature error
+- Symptom: `error downloading Terraform: unable to verify checksums signature:
+  openpgp: key expired`. This comes from an outdated bundled Terraform in older CLI
+  builds.
+- Fix: upgrade the CLI (`brew upgrade databricks`, or reinstall per the official
+  install guide). If you must keep the old CLI, point it at a locally installed
+  Terraform: `export DATABRICKS_TF_EXEC_PATH=$(which terraform)`.
+
+---
+
+## Data backend (Lakebase vs SQL warehouse)
+
+### Switching backends
+- An admin can flip the active backend at runtime under **Admin -> Data Backend**
+  (Lakebase or warehouse). No redeploy is needed — the setting is stored in the app's
+  `app_settings` table and read on each request (short cache).
+- To make the warehouse backend available at all, deploy with
+  `./deploy.sh --data-backend warehouse`, which provisions **both** Lakebase and a
+  Small serverless SQL warehouse and grants the app access to both.
+
+### Warehouse mode: first request is slow
+- A serverless SQL warehouse with a 1-hour auto-stop will be **cold** if it hasn't
+  been used recently, so the first query after idle takes longer while it starts. The
+  4-hour scoring job warms it on each run; subsequent reads are fast until it
+  auto-stops again.
+
+### Warehouse mode: "write not supported" errors
+- The warehouse backend is **read-only** by design. Any feature that writes (Event
+  Mode bootstrap, manual admin writes) requires the Lakebase backend — switch back to
+  Lakebase under **Admin -> Data Backend** for those operations.
+
 ---
 
 ## Getting more detail
