@@ -25,6 +25,12 @@ All three methods produce the same result: a running Quest app with scored data.
   ```
   If it returns a row, you're good. If you get "table not found", ask your admin to [enable system tables](https://docs.databricks.com/en/administration-guide/system-tables/index.html).
 - **A SQL Warehouse** -- any SQL Warehouse that can access system tables. Most workspaces have a "Starter Warehouse" or "Serverless Starter Warehouse" created by default.
+- **A writable catalog** -- the scoring pipeline writes scored Delta tables, so the deploying identity needs `CREATE SCHEMA` on the target catalog (or `CREATE CATALOG` to make a new one). On governed workspaces this is often locked down; ask a metastore admin to run, once:
+  ```sql
+  CREATE CATALOG IF NOT EXISTS quest;
+  GRANT USE CATALOG, CREATE SCHEMA, CREATE TABLE, MODIFY, SELECT ON CATALOG quest TO `<deploying-user-or-SP>`;
+  ```
+  The deploy runs a pre-flight check and stops with the exact `GRANT` if this is missing, instead of failing later with an empty app. Do **not** point `--catalog` at `main` unless you have been granted `CREATE SCHEMA` there.
 
 **On your local machine:**
 
@@ -94,6 +100,7 @@ If you know your settings ahead of time, skip all prompts:
 | `--schema NAME` | Schema name for Quest tables | `quest` |
 | `--app-name NAME` | Custom app name | `databricks-quest` |
 | `--target TARGET` | Bundle target (`dev` or `prod`) | `dev` |
+| `--data-backend lakebase\|warehouse` | `warehouse` provisions BOTH Lakebase and a Small serverless SQL warehouse (1h auto-stop) and defaults the app to the warehouse. Admins switch at runtime under Admin -> Data Backend. | `lakebase` |
 | `--lakebase-host HOST` | Use existing Lakebase endpoint | Auto-provisioned |
 | `--lakebase-db NAME` | Lakebase database name | `quest_db` |
 | `--skip-build` | Skip frontend build (use existing) | Builds if Node.js available |
