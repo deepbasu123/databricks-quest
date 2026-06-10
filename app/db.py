@@ -43,6 +43,15 @@ LAKEBASE_PASSWORD = (
     or os.getenv("LAKEBASE_WRITER_TOKEN", "").strip()
 )
 
+# Data backend: "lakebase" (default, Postgres) or "warehouse" (read scored Delta
+# tables through a serverless SQL warehouse — adoption mode only, read-only).
+QUEST_DATA_BACKEND = (os.getenv("QUEST_DATA_BACKEND", "lakebase").strip().lower() or "lakebase")
+
+
+def warehouse_backend() -> bool:
+    """True when the app serves adoption data from a SQL warehouse, not Lakebase."""
+    return QUEST_DATA_BACKEND == "warehouse"
+
 # OAuth tokens are valid ~1h; refresh the cached connection well before expiry.
 _CONN_TTL_SECONDS = 2700  # 45 minutes
 _conn_cache: Dict[str, Any] = {"conn": None, "expiry": 0}
@@ -259,6 +268,10 @@ def _lease(autocommit: bool):
 
 def execute_query(query: str, params: Tuple = ()) -> List[Dict[str, Any]]:
     """Run a read query and return a list of JSON-serializable dict rows."""
+    if warehouse_backend():
+        import warehouse_backend as _wh
+        return _wh.query(query, params)
+
     import psycopg2.extras
 
     with _lease(autocommit=True) as conn:
@@ -276,6 +289,11 @@ def execute(query: str, params: Tuple = ()) -> int:
     Mutation callers that need multi-statement atomicity should use
     :func:`transaction` instead.
     """
+    if warehouse_backend():
+        # Warehouse backend is read-only (adoption mode). Writes (e.g. admin
+        # allowlist) are not supported; admins come from QUEST_ADMIN_ALLOWLIST.
+        raise RuntimeError("write not supported on warehouse data backend (read-only)")
+
     with _lease(autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(query, params)

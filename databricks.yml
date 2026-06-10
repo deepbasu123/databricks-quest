@@ -18,6 +18,9 @@ variables:
   lakebase_db:
     description: Lakebase database name
     default: quest_db
+  quest_data_backend:
+    description: Adoption data backend — "lakebase" (default) or "warehouse"
+    default: lakebase
 
 resources:
   apps:
@@ -70,6 +73,19 @@ resources:
               lakebase_host: ${var.lakebase_host}
               lakebase_db: ${var.lakebase_db}
               app_name: quest-databricks
+            source: WORKSPACE
+          environment_key: default
+        # Warehouse data backend: start/warm the serverless SQL warehouse each
+        # cycle so it's running after every 4-hour refresh (and drives DBUs).
+        # No-ops unless quest_data_backend=warehouse. Runs in parallel with sync.
+        - task_key: warm_warehouse
+          depends_on:
+            - task_key: run_scoring
+          notebook_task:
+            notebook_path: ./notebooks/warm_warehouse.py
+            base_parameters:
+              quest_data_backend: ${var.quest_data_backend}
+              warehouse_id: ${var.warehouse_id}
             source: WORKSPACE
           environment_key: default
       environments:
