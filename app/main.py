@@ -709,6 +709,59 @@ async def get_pipeline_status(user: str = Depends(require_admin)):
 
 
 # ---------------------------------------------------------------------------
+# Data backend toggle (admin) — both Lakebase and a SQL warehouse are
+# provisioned; admins switch which one serves adoption data, at runtime.
+# ---------------------------------------------------------------------------
+
+class DataBackendPayload(BaseModel):
+    backend: str
+
+
+@app.get("/api/admin/data-backend")
+async def get_data_backend_setting(user: str = Depends(require_admin)):
+    try:
+        active = db.get_data_backend()
+    except Exception:
+        active = db.QUEST_DATA_BACKEND_DEFAULT
+    return {
+        "backend": active,
+        "default": db.QUEST_DATA_BACKEND_DEFAULT,
+        "options": list(db._VALID_BACKENDS),
+        "warehouse_configured": bool(os.getenv("QUEST_SQL_WAREHOUSE_ID", "").strip()),
+    }
+
+
+@app.post("/api/admin/data-backend")
+async def set_data_backend_setting(payload: DataBackendPayload, user: str = Depends(require_admin)):
+    """Switch the active data backend (lakebase|warehouse). Persisted; takes
+    effect within ~30s (cache TTL). Warehouse mode serves all adoption data from
+    Delta via the SQL warehouse, bypassing Lakebase."""
+    backend = (payload.backend or "").strip().lower()
+    if backend not in db._VALID_BACKENDS:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "INVALID_BACKEND",
+                              "message": f"backend must be one of {list(db._VALID_BACKENDS)}"}},
+        )
+    if backend == "warehouse" and not os.getenv("QUEST_SQL_WAREHOUSE_ID", "").strip():
+        raise HTTPException(
+            status_code=409,
+            detail={"error": {"code": "WAREHOUSE_NOT_CONFIGURED",
+                              "message": "No SQL warehouse is configured for this deployment."}},
+        )
+    try:
+        active = db.set_data_backend(backend)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("set_data_backend failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "BACKEND_WRITE_FAILED",
+                              "message": "Could not persist the backend setting (is Lakebase writable?)."}},
+        )
+    return {"backend": active, "changed_by": user}
+
+
+# ---------------------------------------------------------------------------
 # Admin allowlist management — DB-backed, shared across master/child apps.
 # Always available (not Event-Mode gated), admin-only. The env allowlist is the
 # bootstrap/fallback; quest_admins in Lakebase is the durable source of truth.
