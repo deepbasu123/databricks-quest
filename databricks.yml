@@ -45,7 +45,7 @@ resources:
 
   jobs:
     quest_scoring_pipeline:
-      name: "[Quest] Scoring Pipeline"
+      name: "[Quest] Scoring Pipeline (${bundle.name})"
       description: "Reads system tables, computes missions, points, badges, and leaderboards."
       schedule:
         quartz_cron_expression: "0 0 */4 * * ?"
