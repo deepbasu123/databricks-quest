@@ -651,7 +651,7 @@ for w in whs:
 " 2>/dev/null)
   if [ -z "$WAREHOUSE_ID" ]; then
     WAREHOUSE_ID=$($CLI warehouses create --name "$WH_QUEST_NAME" --cluster-size "Small" \
-      --auto-stop-mins 60 --enable-serverless-compute --warehouse-type PRO \
+      --auto-stop-mins 60 --max-num-clusters 1 --enable-serverless-compute --warehouse-type PRO \
       $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
   fi
   [ -n "$WAREHOUSE_ID" ] || fail "Could not create/find the Quest serverless warehouse '$WH_QUEST_NAME'."

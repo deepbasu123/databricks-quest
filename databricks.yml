@@ -1,5 +1,5 @@
 bundle:
-  name: quest-databricks
+  name: databricks-quest
 
 sync:
   include:
@@ -15,6 +15,7 @@ variables:
     default: quest
   lakebase_host:
     description: Lakebase endpoint host (e.g. ep-xxx.database.us-east-1.cloud.databricks.com)
+    default: ""
   lakebase_db:
     description: Lakebase database name
     default: quest_db
@@ -25,7 +26,7 @@ variables:
 resources:
   apps:
     databricks_quest:
-      name: quest-databricks
+      name: databricks-quest
       description: "Databricks Quest - Gamification app for platform adoption"
       source_code_path: ./app
       config:
@@ -49,6 +50,9 @@ resources:
       schedule:
         quartz_cron_expression: "0 0 */4 * * ?"
         timezone_id: UTC
+        # Run the 4-hour schedule even in dev. Set explicitly on the resource
+        # (development mode rejects an UNPAUSED trigger-pause *preset*).
+        pause_status: UNPAUSED
       tasks:
         - task_key: run_scoring
           notebook_task:
@@ -56,7 +60,7 @@ resources:
             base_parameters:
               quest_catalog: ${var.quest_catalog}
               quest_schema: ${var.quest_schema}
-              app_name: quest-databricks
+              app_name: databricks-quest
               warehouse_id: ${var.warehouse_id}
             source: WORKSPACE
           environment_key: default
@@ -72,7 +76,7 @@ resources:
               quest_schema: ${var.quest_schema}
               lakebase_host: ${var.lakebase_host}
               lakebase_db: ${var.lakebase_db}
-              app_name: quest-databricks
+              app_name: databricks-quest
             source: WORKSPACE
           environment_key: default
         # Warehouse data backend: start/warm the serverless SQL warehouse each
@@ -101,10 +105,6 @@ targets:
   dev:
     mode: development
     default: true
-    # development mode pauses schedules/triggers by default; override so the
-    # scoring pipeline runs on its 4-hour schedule even in dev deployments.
-    presets:
-      trigger_pause_status: UNPAUSED
 
   prod:
     mode: production
