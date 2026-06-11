@@ -1,3 +1,7 @@
+# Placeholder config — deploy.sh regenerates this file (write_app_yaml) with the
+# real Lakebase endpoint, warehouse id, catalog/schema, and backend default for
+# the target workspace. Committed without environment values so a fresh deploy
+# never boots against another workspace's endpoints.
 command:
   - uvicorn
   - main:app
@@ -5,11 +9,3 @@ command:
   - 0.0.0.0
   - --port
   - "8000"
-
-env:
-  - name: LAKEBASE_HOST
-    value: "ep-autumn-star-d2jzw5xc.database.us-east-1.cloud.databricks.com"
-  - name: LAKEBASE_DB
-    value: "quest_db"
-  - name: QUEST_SQL_WAREHOUSE_ID
-    value: "03aad21c886e3333"

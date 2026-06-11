@@ -727,7 +727,7 @@ async def get_data_backend_setting(user: str = Depends(require_admin)):
         "backend": active,
         "default": db.QUEST_DATA_BACKEND_DEFAULT,
         "options": list(db._VALID_BACKENDS),
-        "warehouse_configured": bool(os.getenv("QUEST_SQL_WAREHOUSE_ID", "").strip()),
+        "warehouse_configured": db.warehouse_ready(),
     }
 
 
@@ -743,11 +743,11 @@ async def set_data_backend_setting(payload: DataBackendPayload, user: str = Depe
             detail={"error": {"code": "INVALID_BACKEND",
                               "message": f"backend must be one of {list(db._VALID_BACKENDS)}"}},
         )
-    if backend == "warehouse" and not os.getenv("QUEST_SQL_WAREHOUSE_ID", "").strip():
+    if backend == "warehouse" and not db.warehouse_ready():
         raise HTTPException(
             status_code=409,
             detail={"error": {"code": "WAREHOUSE_NOT_CONFIGURED",
-                              "message": "No SQL warehouse is configured for this deployment."}},
+                              "message": "No SQL warehouse (or QUEST_CATALOG) is configured for this deployment."}},
         )
     try:
         active = db.set_data_backend(backend)
@@ -756,7 +756,7 @@ async def set_data_backend_setting(payload: DataBackendPayload, user: str = Depe
         raise HTTPException(
             status_code=503,
             detail={"error": {"code": "BACKEND_WRITE_FAILED",
-                              "message": "Could not persist the backend setting (is Lakebase writable?)."}},
+                              "message": f"Could not persist the backend setting: {str(exc)[:300]}"}},
         )
     return {"backend": active, "changed_by": user}
 
