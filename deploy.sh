@@ -1056,7 +1056,10 @@ if [ -z "$LAKEBASE_HOST" ]; then
       $PROFILE_FLAG 2>&1 || true
   fi
 
-  # Wait for endpoint to be ACTIVE
+  # Wait for the endpoint to be usable. ACTIVE = running; IDLE = healthy but
+  # auto-suspended (serverless endpoints suspend when nothing is connected).
+  # Both are "ready": the credential + psql connection below wakes an IDLE
+  # endpoint on demand. Only keep waiting through transitional states.
   info "Waiting for Lakebase endpoint to be ready..."
   for i in $(seq 1 60); do
     EP_STATE=$($CLI postgres list-endpoints "projects/$LB_PROJECT_ID/branches/production" \
@@ -1067,14 +1070,14 @@ try:
     print(eps[0].get('status', {}).get('current_state', 'UNKNOWN'))
 except: print('PENDING')
 " 2>/dev/null || echo "PENDING")
-    if [ "$EP_STATE" = "ACTIVE" ]; then
+    if [ "$EP_STATE" = "ACTIVE" ] || [ "$EP_STATE" = "IDLE" ]; then
       break
     fi
     sleep 5
   done
 
-  if [ "$EP_STATE" != "ACTIVE" ]; then
-    fail "Lakebase endpoint did not become ACTIVE (state: $EP_STATE). Check your workspace."
+  if [ "$EP_STATE" != "ACTIVE" ] && [ "$EP_STATE" != "IDLE" ]; then
+    fail "Lakebase endpoint did not become ready (state: $EP_STATE). Check your workspace."
   fi
 
   # Get the endpoint host
