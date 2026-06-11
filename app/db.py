@@ -74,29 +74,64 @@ def _ensure_app_settings() -> None:
             )
 
 
-def get_data_backend() -> str:
-    """Active data backend, honoring the admin override (cached), else the deploy
-    default. Falls back to the default if the setting can't be read."""
-    now = time.time()
-    if _backend_cache["value"] and now < _backend_cache["expiry"]:
-        return _backend_cache["value"]
-    value = QUEST_DATA_BACKEND_DEFAULT
+# ── Backend-setting persistence ──────────────────────────────────────────────
+# The admin's backend choice lives in TWO stores:
+#   1. Delta `app_settings` in {QUEST_CATALOG}.{QUEST_SCHEMA}, read/written via
+#      the SQL warehouse. AUTHORITATIVE whenever a warehouse is configured —
+#      it stays reachable when Lakebase is down, which is exactly when an admin
+#      needs to switch to the warehouse backend (the old Lakebase-only store
+#      locked the escape hatch behind the broken door).
+#   2. Lakebase `app_settings` (public schema). Authoritative only for
+#      Lakebase-only deployments; otherwise a best-effort mirror.
+# Writes when a warehouse is configured go Delta-first and MUST succeed there
+# (a stale Delta row would override any Lakebase-only write on read).
+
+
+def warehouse_ready() -> bool:
+    """True when the warehouse-side store/backend is usable (warehouse + catalog set)."""
+    return bool(
+        os.getenv("QUEST_SQL_WAREHOUSE_ID", "").strip()
+        and os.getenv("QUEST_CATALOG", "").strip()
+    )
+
+
+_DELTA_SETTINGS_DDL = (
+    "CREATE TABLE IF NOT EXISTS app_settings "
+    "(`key` STRING, value STRING, updated_at TIMESTAMP)"
+)
+
+
+def _delta_settings_read() -> Optional[str]:
+    """Read the backend setting from the Delta store. None if absent/invalid."""
+    import warehouse_backend as _wh
+    rows = _wh.query("SELECT value FROM app_settings WHERE `key` = 'data_backend'")
+    if rows:
+        v = (rows[0].get("value") or "").strip().lower()
+        if v in _VALID_BACKENDS:
+            return v
+    return None
+
+
+def _delta_settings_write(value: str) -> None:
+    import warehouse_backend as _wh
     try:
-        rows = _lakebase_rows("SELECT value FROM app_settings WHERE key = 'data_backend'")
-        if rows and (rows[0].get("value") or "").strip().lower() in _VALID_BACKENDS:
-            value = rows[0]["value"].strip().lower()
+        _wh.query(_DELTA_SETTINGS_DDL)
     except Exception:
-        pass  # no settings table / Lakebase unavailable → use the default
-    _backend_cache.update(value=value, expiry=now + _BACKEND_TTL_SECONDS)
-    return value
+        pass  # SP may lack CREATE TABLE; deploy.sh pre-creates the table
+    _wh.query(
+        "MERGE INTO app_settings t USING (SELECT %s AS k, %s AS v) s ON t.`key` = s.k "
+        "WHEN MATCHED THEN UPDATE SET value = s.v, updated_at = current_timestamp() "
+        "WHEN NOT MATCHED THEN INSERT (`key`, value, updated_at) "
+        "VALUES (s.k, s.v, current_timestamp())",
+        ("data_backend", value),
+    )
 
 
-def set_data_backend(value: str) -> str:
-    """Persist the admin's backend choice and refresh the cache. Admin-gated by the caller."""
-    value = (value or "").strip().lower()
-    if value not in _VALID_BACKENDS:
-        raise ValueError(f"backend must be one of {_VALID_BACKENDS}")
-    _ensure_app_settings()
+def _lakebase_settings_write(value: str) -> None:
+    try:
+        _ensure_app_settings()
+    except Exception:
+        pass  # table is pre-created by deploy.sh; the INSERT below is the real test
     with _lease(autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -105,6 +140,57 @@ def set_data_backend(value: str) -> str:
                 "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
                 (value,),
             )
+
+
+def get_data_backend() -> str:
+    """Active data backend, honoring the admin override (cached), else the deploy
+    default. Falls back to the default if no setting can be read."""
+    now = time.time()
+    if _backend_cache["value"] and now < _backend_cache["expiry"]:
+        return _backend_cache["value"]
+    value: Optional[str] = None
+    if warehouse_ready():
+        try:
+            value = _delta_settings_read()
+        except Exception:
+            value = None  # missing table / warehouse hiccup → fall back to Lakebase
+    if value is None:
+        try:
+            rows = _lakebase_rows("SELECT value FROM app_settings WHERE key = 'data_backend'")
+            if rows and (rows[0].get("value") or "").strip().lower() in _VALID_BACKENDS:
+                value = rows[0]["value"].strip().lower()
+        except Exception:
+            pass  # no settings table / Lakebase unavailable
+    if value is None:
+        value = QUEST_DATA_BACKEND_DEFAULT
+    _backend_cache.update(value=value, expiry=now + _BACKEND_TTL_SECONDS)
+    return value
+
+
+def set_data_backend(value: str) -> str:
+    """Persist the admin's backend choice and refresh the cache. Admin-gated by the caller.
+
+    Must work when Lakebase is down/read-only: with a warehouse configured the
+    Delta store is written first (and is required to succeed); the Lakebase row
+    is then mirrored best-effort so a later Lakebase-only readback agrees.
+    """
+    value = (value or "").strip().lower()
+    if value not in _VALID_BACKENDS:
+        raise ValueError(f"backend must be one of {_VALID_BACKENDS}")
+    if warehouse_ready():
+        try:
+            _delta_settings_write(value)
+        except Exception as exc:
+            raise RuntimeError(f"could not write setting via SQL warehouse: {exc}") from exc
+        try:
+            _lakebase_settings_write(value)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Lakebase settings mirror failed (non-fatal): %s", exc)
+    else:
+        try:
+            _lakebase_settings_write(value)
+        except Exception as exc:
+            raise RuntimeError(f"could not write setting to Lakebase: {exc}") from exc
     _backend_cache.update(value=value, expiry=time.time() + _BACKEND_TTL_SECONDS)
     return value
 

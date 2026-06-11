@@ -191,12 +191,14 @@ write_app_yaml() {
       echo "  - name: LAKEBASE_DB"
       echo "    value: \"$lb_db\""
     fi
-    # Warehouse data backend: both backends are provisioned; QUEST_DATA_BACKEND is
-    # the DEFAULT (admins flip the active one at runtime in Admin settings).
-    # Catalog/schema set the warehouse session so bare table names resolve.
-    if [ "$QUEST_DATA_BACKEND" = "warehouse" ]; then
-      echo "  - name: QUEST_DATA_BACKEND"
-      echo "    value: \"warehouse\""
+    # QUEST_DATA_BACKEND is the deploy-time DEFAULT (admins flip the active one
+    # at runtime in Admin settings). Catalog/schema are ALWAYS emitted when known
+    # — not just for warehouse-default deploys — because the runtime toggle
+    # persists its setting in ${QUEST_CATALOG}.${QUEST_SCHEMA}.app_settings via
+    # the warehouse, and must work even when Lakebase is down.
+    echo "  - name: QUEST_DATA_BACKEND"
+    echo "    value: \"$QUEST_DATA_BACKEND\""
+    if [ -n "$QUEST_CATALOG" ]; then
       echo "  - name: QUEST_CATALOG"
       echo "    value: \"$QUEST_CATALOG\""
       echo "  - name: QUEST_SCHEMA"
@@ -577,6 +579,11 @@ try:
     print(d.get('env',{}).get('DATABRICKS_HOST',''))
 except: pass
 " 2>/dev/null || true)
+fi
+
+# Env-var auth (DATABRICKS_HOST/DATABRICKS_TOKEN): trust the host we were given.
+if [ -z "${WORKSPACE_HOST:-}" ] && [ -n "${DATABRICKS_HOST:-}" ]; then
+  WORKSPACE_HOST="$DATABRICKS_HOST"
 fi
 
 # Fallback: try to get host from CLI config
@@ -1129,6 +1136,9 @@ CREATE TABLE IF NOT EXISTS notifications (
   id SERIAL PRIMARY KEY, user_id TEXT, notification_type TEXT, title TEXT,
   message TEXT, mission_id TEXT, points INT, created_at TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMP
+);
 CREATE INDEX IF NOT EXISTS idx_mc_user ON mission_completions(user_id);
 CREATE INDEX IF NOT EXISTS idx_lb_rank ON leaderboard(all_time_rank);
 CREATE INDEX IF NOT EXISTS idx_ups_user ON user_profile_snapshot(user_id);
@@ -1169,10 +1179,17 @@ print(json.load(sys.stdin).get('service_principal_client_id', ''))
       --json "{\"spec\": {\"identity_type\": \"SERVICE_PRINCIPAL\", \"postgres_role\": \"$SP_CLIENT_ID\", \"auth_method\": \"LAKEBASE_OAUTH_V1\", \"membership_roles\": [\"DATABRICKS_SUPERUSER\"]}}" \
       $PROFILE_FLAG 2>/dev/null || true
 
-    # Grant SELECT on all tables
+    # Grant SELECT on all tables, plus the explicit write privileges the app
+    # needs at runtime (app_settings upserts for the backend toggle, and CREATE
+    # so it can make its own tables like quest_admins). These are deliberately
+    # explicit so nothing depends on the DATABRICKS_SUPERUSER membership above,
+    # whose creation is best-effort and has failed silently on customer
+    # workspaces (=> "Could not persist the backend setting").
     PGPASSWORD="$LB_TOKEN" psql "host=$LAKEBASE_HOST port=5432 dbname=$LAKEBASE_DB user=$USER_EMAIL sslmode=require" -c "
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO \"$SP_CLIENT_ID\";
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO \"$SP_CLIENT_ID\";
+GRANT CREATE ON SCHEMA public TO \"$SP_CLIENT_ID\";
+GRANT SELECT, INSERT, UPDATE ON app_settings TO \"$SP_CLIENT_ID\";
 " 2>/dev/null || true
 
     success "Service principal ($SP_CLIENT_ID) granted Lakebase access"
@@ -1180,10 +1197,15 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO \"$SP_CLIENT
     warn "Could not find app service principal — you may need to grant Lakebase access manually"
   fi
 
-  # Warehouse data backend: also grant the SP read on the scored Delta tables and
-  # CAN_USE on the warehouse, so an admin can switch the app to warehouse mode.
-  if [ "$QUEST_DATA_BACKEND" = "warehouse" ] && [ -n "$SP_CLIENT_ID" ] && [ -n "$WAREHOUSE_ID" ]; then
-    info "Granting SP ($SP_CLIENT_ID) read on $QUEST_CATALOG.$QUEST_SCHEMA + CAN_USE on warehouse $WAREHOUSE_ID..."
+  # Warehouse access for the app SP — applied on EVERY deploy with a warehouse
+  # (not only --data-backend warehouse), because the runtime Admin toggle lets
+  # any deployment switch to warehouse mode later. The SP gets read on the
+  # scored Delta tables, MODIFY on the quest schema (so it can upsert the
+  # app_settings backend toggle even when Lakebase is down), and CAN_USE on the
+  # warehouse. The app_settings Delta table is pre-created here as the deploying
+  # user so the SP never needs CREATE TABLE.
+  if [ -n "$SP_CLIENT_ID" ] && [ -n "$WAREHOUSE_ID" ]; then
+    info "Granting SP ($SP_CLIENT_ID) access on $QUEST_CATALOG.$QUEST_SCHEMA + CAN_USE on warehouse $WAREHOUSE_ID..."
     HOST="${DATABRICKS_HOST:-$WORKSPACE_HOST}" TOKEN="${DATABRICKS_TOKEN:-}" WH="$WAREHOUSE_ID" \
     SP="$SP_CLIENT_ID" CAT="$QUEST_CATALOG" SCH="$QUEST_SCHEMA" python3 <<'PYEOF' || warn "Some warehouse grants may need to be applied manually."
 import os, json, time, urllib.request
@@ -1200,8 +1222,10 @@ def sql(s):
         r=urllib.request.Request(host+"/api/2.0/sql/statements/"+sid,headers={"Authorization":"Bearer "+tok})
         d=json.loads(urllib.request.urlopen(r,timeout=30).read()); st=d.get("status",{}).get("state")
     if st!="SUCCEEDED": print("  grant warn:",(d.get("status",{}).get("error",{}) or {}).get("message","")[:140])
-for s in [f"GRANT USE CATALOG ON CATALOG `{cat}` TO `{sp}`",
-          f"GRANT USE SCHEMA, SELECT ON SCHEMA `{cat}`.`{sch}` TO `{sp}`"]:
+for s in [f"CREATE SCHEMA IF NOT EXISTS `{cat}`.`{sch}`",
+          f"CREATE TABLE IF NOT EXISTS `{cat}`.`{sch}`.app_settings (`key` STRING, value STRING, updated_at TIMESTAMP)",
+          f"GRANT USE CATALOG ON CATALOG `{cat}` TO `{sp}`",
+          f"GRANT USE SCHEMA, SELECT, MODIFY ON SCHEMA `{cat}`.`{sch}` TO `{sp}`"]:
     sql(s)
 body=json.dumps({"access_control_list":[{"service_principal_name":sp,"permission_level":"CAN_USE"}]}).encode()
 req=urllib.request.Request(host+f"/api/2.0/permissions/warehouses/{wh}",data=body,method="PATCH",
@@ -1209,7 +1233,7 @@ req=urllib.request.Request(host+f"/api/2.0/permissions/warehouses/{wh}",data=bod
 try: urllib.request.urlopen(req,timeout=30); print("  warehouse CAN_USE granted")
 except Exception as e: print("  warehouse perm warn:",str(e)[:120])
 PYEOF
-    success "Service principal granted warehouse read access (admins can switch to warehouse mode)"
+    success "Service principal granted warehouse + schema access (admins can switch backends at runtime)"
   fi
 
   # Patch app.yaml with actual Lakebase values (valueFrom doesn't work
