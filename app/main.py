@@ -681,6 +681,41 @@ def _empty_profile(user: str) -> dict:
     }
 
 
+CONFIG_SCHEMA_VERSION = 1
+
+
+def build_quest_config() -> Dict[str, Any]:
+    """The single source of truth for client-side gamification reference data.
+
+    Levels (with their ladder order), the consumption→points ratio, and the
+    mission/badge catalogs all live in this backend module; this assembles them
+    into one payload so the frontend stops hardcoding (and drifting from) the
+    level order and thresholds. ``levels`` is ordered highest→lowest — the exact
+    order the leaderboard renders — so a new tier added here flows to the client
+    without a matching frontend edit.
+    """
+    return {
+        "schema_version": CONFIG_SCHEMA_VERSION,
+        "levels": [
+            {"name": name, "threshold": threshold}
+            for name, threshold in LEVEL_THRESHOLDS
+        ],
+        "consumption_points_ratio": CONSUMPTION_POINTS_RATIO,
+        "missions": [m.copy() for m in MISSION_DEFINITIONS],
+        "badges": [b.copy() for b in BADGE_DEFINITIONS],
+    }
+
+
+@app.get("/api/config")
+async def get_config():
+    """Static gamification config — the single source of truth (P2-11).
+
+    Public and event-mode-independent: it's reference data, not user state, so
+    it carries no auth and no DB access and is safe to cache on the client.
+    """
+    return build_quest_config()
+
+
 @app.get("/api/missions")
 async def get_missions(request: Request):
     user = get_user_email(request)
