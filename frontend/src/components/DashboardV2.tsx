@@ -143,7 +143,7 @@ export default function DashboardV2({ profile, notifications, onRefresh, onNavig
         <QuestCard title="Recommended Next Mission" eyebrow="Recommended quest" className="overflow-hidden">
           {recommended ? (
             <div className="relative h-full overflow-hidden rounded-2xl border border-[#FF5F1F]/25 bg-gradient-to-br from-[#2B160F] via-[#151827] to-[#101827] p-5">
-              <div className="absolute inset-0 bg-[url('/assets/backgrounds/quest-topography.svg')] bg-cover bg-center opacity-25" />
+              <div className="absolute inset-0 bg-[url('/assets/backgrounds/quest-topography.jpg')] bg-cover bg-center opacity-25" />
               <div className="relative z-10 max-w-xl">
                 <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#F5B72E]">Recommended Quest</p>
                 <h2 className="mt-2 text-2xl font-bold tracking-tight text-white">{recommended.name}</h2>
