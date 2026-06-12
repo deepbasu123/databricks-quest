@@ -80,8 +80,9 @@ class SolutionOps:
 
     # — helpers —
     def _genie_space_id(self, title: str) -> str:
-        resp = self.w.genie.list_spaces()
-        for space in getattr(resp, "spaces", None) or []:
+        from services.sdk_checks import iter_genie_spaces
+
+        for space in iter_genie_spaces(self.w):
             if (getattr(space, "title", "") or "") == title:
                 return space.space_id
         raise RuntimeError(f"Genie space titled {title!r} not found")

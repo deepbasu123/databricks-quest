@@ -48,7 +48,8 @@ resources:
       CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.returns AS
       SELECT
         CAST(id AS INT) AS return_id,
-        element_at(array('EMEA','AMER','APAC','LATAM'), CAST(id % 4 AS INT) + 1) AS region,
+        element_at(array('EMEA','AMER','APAC','LATAM','EMEA'),
+                   CAST(id % 5 AS INT) + 1) AS region,
         element_at(array('Trail Jacket','Summit Pack','Glacier Tent','Ridge Boots',
                          'Basecamp Stove','Alpine Bottle'), CAST(id % 6 AS INT) + 1) AS product,
         element_at(array('damaged','wrong-size','changed-mind','late-delivery'),
@@ -115,7 +116,10 @@ quests:
               value: 5
         hints:
           - title: "Uploading"
-            body_md: "Catalog → your schema → docs volume → Upload, or databricks fs cp."
+            body_md: >
+              Catalog → your schema → docs volume → Upload, or databricks fs cp.
+              The check can only run once at least one file is staged (an empty
+              volume reports a temporary verification error — stage and resubmit).
             penalty_points: -10
         solutions:
           - workspace_op:

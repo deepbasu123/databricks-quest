@@ -126,11 +126,25 @@ def main() -> int:
                         continue
                     vid = f"{task['slug']}/{v.get('id')}"
                     if pipeline_outputs_pending:
-                        # Downstream of a workspace_op-produced table.
+                        # Downstream of a workspace_op-produced table: only a
+                        # missing-table error is excusable — any other
+                        # statement error is a real pack bug and must FAIL.
                         try:
                             value = run(resolve(v["statement"]))
-                        except RuntimeError:
-                            print(f"  SKIP  {vid} (depends on workspace_op output; full preflight covers it)")
+                        except RuntimeError as exc:
+                            # Excusable only when the missing input is what the
+                            # un-executed workspace_op would have created: a
+                            # missing table, or read_files over a still-empty
+                            # volume (schema inference fails until files land).
+                            err = str(exc)
+                            empty_volume = (
+                                "UNRESOLVED_COLUMN" in err and "read_files" in v["statement"]
+                            )
+                            if "TABLE_OR_VIEW_NOT_FOUND" in err or empty_volume:
+                                print(f"  SKIP  {vid} (depends on workspace_op output; full preflight covers it)")
+                                continue
+                            print(f"  FAIL  {vid} -> {err[:140]}")
+                            failures += 1
                             continue
                     else:
                         value = run(resolve(v["statement"]))

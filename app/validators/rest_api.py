@@ -14,8 +14,10 @@ Safety constraints (by construction, not bolt-ons):
 - Prompts are **host-authored** (from the pack); the player's submission never
   reaches the model in v1 — mirroring the sql_assertion stance that statements
   come from the pack, not players.
-- Clamps: ``max_tokens`` ≤ 512, prompt ≤ 4000 chars, timeout ≤ 60s; the response
-  is truncated in evidence.
+- Clamps: ``max_tokens`` ≤ 512 (chat payloads — agent/Responses endpoints don't
+  accept a token cap in the invocation body and govern output via their own
+  config), prompt ≤ 4000 chars, timeout ≤ 60s enforced at the HTTP layer; the
+  response is truncated in evidence.
 
 Outcome mapping mirrors the ``databricks_sdk`` validator:
 
@@ -141,12 +143,15 @@ class RestAPIValidator(Validator):
         # Injectable for tests; production lazily builds a WorkspaceClient.
         self._client_factory = client_factory
 
-    def _client(self) -> Any:
+    def _client(self, timeout_seconds: int = TIMEOUT_CAP_SECONDS) -> Any:
         if self._client_factory is not None:
             return self._client_factory()
         from databricks.sdk import WorkspaceClient
 
-        return WorkspaceClient()
+        # The clamped timeout is enforced at the HTTP layer — a hanging model
+        # endpoint must not hold the synchronous attempt-submission path for
+        # the SDK's multi-minute default.
+        return WorkspaceClient(http_timeout_seconds=timeout_seconds)
 
     def _query(
         self, client: Any, endpoint: str, prompt: str, max_tokens: int, payload_format: str
@@ -212,7 +217,7 @@ class RestAPIValidator(Validator):
         timeout = max(1, min(int(ctx.timeout_seconds or 30), TIMEOUT_CAP_SECONDS))
 
         try:
-            client = self._client()
+            client = self._client(timeout)
         except Exception as exc:  # noqa: BLE001
             logger.warning("rest_api client unavailable: %s", exc)
             return ValidationOutcome.manual_pending(

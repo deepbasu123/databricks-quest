@@ -147,16 +147,36 @@ def dashboard_published(client: Any, params: Dict[str, Any], ctx: Any) -> CheckR
 
 # ── Genie spaces ─────────────────────────────────────────────────────────────
 
+def iter_genie_spaces(client: Any) -> Iterable[Any]:
+    """Yield every Genie space, following ``next_page_token`` pagination.
+
+    ``list_spaces`` returns one page; a workspace with more spaces than a page
+    would otherwise hide correctly-created team spaces from the checks (and
+    from teardown). Shared by the checks, the workspace executor, and the
+    preflight harness."""
+    genie = getattr(client, "genie", None)
+    if genie is None or not hasattr(genie, "list_spaces"):
+        raise RuntimeError("workspace client exposes no Genie list_spaces API")
+    page_token: Optional[str] = None
+    while True:
+        try:
+            resp = genie.list_spaces(page_token=page_token) if page_token else genie.list_spaces()
+        except TypeError:
+            # Fakes (and older SDKs) without pagination kwargs: single page.
+            resp = genie.list_spaces()
+            page_token = None
+        items = getattr(resp, "spaces", None) or (resp if isinstance(resp, (list, tuple)) else [])
+        for item in items or []:
+            yield item
+        next_token = getattr(resp, "next_page_token", None)
+        if not next_token or next_token == page_token:
+            return
+        page_token = next_token
+
+
 def genie_space_exists(client: Any, params: Dict[str, Any], ctx: Any) -> CheckResult:
     needle = params.get("name_contains")
-    genie = getattr(client, "genie", None)
-    items: Iterable[Any]
-    if genie is not None and hasattr(genie, "list_spaces"):
-        resp = genie.list_spaces()
-        items = getattr(resp, "spaces", None) or (resp if isinstance(resp, (list, tuple)) else [])
-    else:
-        raise RuntimeError("workspace client exposes no Genie list_spaces API")
-    matches = [n for (n, _) in _iter_names(items) if _matches(n, needle)]
+    matches = [n for (n, _) in _iter_names(iter_genie_spaces(client)) if _matches(n, needle)]
     return {
         "found": bool(matches),
         "detail": f"{len(matches)} Genie space(s) match name_contains={needle!r}",
@@ -247,11 +267,7 @@ def _resolve_genie_space_id(client: Any, params: Dict[str, Any]) -> Tuple[str, s
     needle = params.get("name_contains")
     if not needle:
         raise SDKCheckConfigError("check requires param 'space_id' or 'name_contains'")
-    if not hasattr(genie, "list_spaces"):
-        raise RuntimeError("workspace client exposes no Genie list_spaces API")
-    resp = genie.list_spaces()
-    items = getattr(resp, "spaces", None) or (resp if isinstance(resp, (list, tuple)) else [])
-    for name, obj in _iter_names(items):
+    for name, obj in _iter_names(iter_genie_spaces(client)):
         if _matches(name, needle):
             sid = _first_attr(obj, ("space_id", "id"))
             if sid:
@@ -299,6 +315,24 @@ def _count_items(values: List[Any]) -> int:
     return count
 
 
+def _contains_nonempty_string(values: List[Any]) -> bool:
+    """True if any non-empty string exists anywhere within ``values``.
+
+    An empty container (``{"text_instructions": []}``) must NOT count as
+    present — an uncurated space exports exactly that shape."""
+    stack = list(values)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            if node.strip():
+                return True
+        elif isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, (list, tuple)):
+            stack.extend(node)
+    return False
+
+
 def genie_space_curated(client: Any, params: Dict[str, Any], ctx: Any) -> CheckResult:
     try:
         space_id, title = _resolve_genie_space_id(client, params)
@@ -334,10 +368,7 @@ def genie_space_curated(client: Any, params: Dict[str, Any], ctx: Any) -> CheckR
         values = _collect_keys(payload, _GENIE_INSTRUCTION_KEYS)
         if not values:
             raise RuntimeError("serialized space has no recognizable instructions section")
-        has_text = any(
-            (isinstance(v, str) and v.strip()) or (isinstance(v, (list, dict)) and v)
-            for v in values
-        )
+        has_text = _contains_nonempty_string(values)
         evidence["instructions_present"] = has_text
         if not has_text:
             missing.append("instructions")

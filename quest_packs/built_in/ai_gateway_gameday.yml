@@ -231,9 +231,12 @@ quests:
             body_md: "A tight limit + a short loop of ai_query calls gets you a 429 fast."
             penalty_points: -15
         solutions:
+          # PUT replaces the whole gateway config — each step re-states what
+          # earlier tasks configured so re-validation keeps passing.
           - workspace_op:
               op: put_ai_gateway
               endpoint: "quest-${event_slug}-${team_slug}-gw"
+              usage_tracking: true
               rate_limits:
                 - calls: 5
                   key: user
@@ -309,9 +312,15 @@ quests:
               pipeline guarantees the stored output. Use both.
             penalty_points: -15
         solutions:
+          # Cumulative: re-states usage tracking + rate limits (PUT replaces).
           - workspace_op:
               op: put_ai_gateway
               endpoint: "quest-${event_slug}-${team_slug}-gw"
+              usage_tracking: true
+              rate_limits:
+                - calls: 5
+                  key: user
+                  renewal_period: minute
               guardrails:
                 input:
                   safety: true
@@ -398,9 +407,19 @@ quests:
             body_md: "Fallbacks need ≥1 alternative route — discuss with the host what you'd add in production."
             penalty_points: -10
         solutions:
+          # Cumulative: the endpoint's final state carries every configured
+          # feature, so any task can be re-validated at any point.
           - workspace_op:
               op: put_ai_gateway
               endpoint: "quest-${event_slug}-${team_slug}-gw"
+              usage_tracking: true
+              rate_limits:
+                - calls: 5
+                  key: user
+                  renewal_period: minute
+              guardrails:
+                input:
+                  safety: true
               fallbacks: true
       - slug: rest-proof
         title: "Prove the API contract"

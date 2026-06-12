@@ -149,9 +149,11 @@ quests:
         title: "Create your Genie space"
         objective: "A Genie space scoped to your curated model."
         instructions_md: >
-          Create a Genie space whose title includes your team name
-          (`${team_slug}`) scoped to `${team_catalog}.${team_schema}` — at
-          minimum the sales_curated model. Ask it one warm-up question.
+          Create a Genie space titled exactly `${team_slug} sales genie`,
+          scoped to `${team_catalog}.${team_schema}` with BOTH the
+          sales_curated model and the raw orders table (the benchmark includes
+          a returns question that only orders can answer). Ask it one warm-up
+          question.
         success_criteria_md: "A Genie space named for your team exists."
         points: 100
         validation_mode: manual
@@ -162,13 +164,13 @@ quests:
             mode: sync
             check: genie_space_exists
             params:
-              name_contains: "${team_slug}"
+              name_contains: "${team_slug} sales"
           - id: host-confirm-space
             type: manual
             mode: sync
         hints:
           - title: "Where"
-            body_md: "SQL → Genie → New. Add sales_curated as the data source."
+            body_md: "SQL → Genie → New. Add sales_curated AND orders as data sources."
             penalty_points: -10
         solutions:
           - workspace_op:
@@ -176,6 +178,7 @@ quests:
               name: "${team_slug} sales genie"
               tables:
                 - "${team_catalog}.${team_schema}.sales_curated"
+                - "${team_catalog}.${team_schema}.orders"
 
   - slug: curate
     title: "Teach it the business"
@@ -213,7 +216,7 @@ quests:
             mode: sync
             check: genie_space_curated
             params:
-              name_contains: "${team_slug}"
+              name_contains: "${team_slug} sales"
               require_instructions: true
           - id: host-confirm-instructions
             type: manual
@@ -253,7 +256,7 @@ quests:
             mode: sync
             check: genie_space_curated
             params:
-              name_contains: "${team_slug}"
+              name_contains: "${team_slug} sales"
               min_sample_questions: 3
               min_tables: 1
           - id: host-confirm-curation
@@ -395,7 +398,7 @@ quests:
             mode: sync
             check: genie_conversation_started
             params:
-              name_contains: "${team_slug}"
+              name_contains: "${team_slug} sales"
               min_conversations: 1
           - id: api-log-recorded
             type: sql_assertion

@@ -7,8 +7,10 @@ Below is a sample starter pack. It is intentionally small enough for MVP testing
 ```yaml
 schema_version: "1.0"
 pack:
-  slug: ai-bi-intelligence-challenge
-  title: AI/BI Intelligence Challenge
+  # Distinct from the shipped catalog's ai-bi-gameday slug — importing this
+  # worked example must never collide with (or resurrect) a catalog pack.
+  slug: orbit-travel-briefing
+  title: AI/BI Worked Example — Orbit Travel Board Briefing
   version: "0.1.0"
   description: A two-hour GameDay where teams create governed, trusted business intelligence on Databricks.
   audience: [analysts, data_engineers, solution_architects]

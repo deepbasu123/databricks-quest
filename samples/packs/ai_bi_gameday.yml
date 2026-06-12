@@ -207,8 +207,9 @@ quests:
         objective: "Create and publish a dashboard over revenue_by_region."
         instructions_md: >
           Build an AI/BI dashboard with at least one chart of revenue by region,
-          then publish it. Share the link with your host.
-        success_criteria_md: "A published dashboard exists over the team's model."
+          include your team name (`${team_slug}`) in the dashboard title, and
+          publish it. Share the link with your host.
+        success_criteria_md: "A published dashboard named for your team exists."
         points: 100
         validation_mode: manual
         manual_validation_required: true
@@ -218,7 +219,7 @@ quests:
             mode: sync
             check: dashboard_published
             params:
-              name_contains: "revenue"
+              name_contains: "${team_slug}"
           - id: host-confirm-dashboard
             type: manual
             mode: sync
@@ -235,9 +236,10 @@ quests:
         title: "Stand up a Genie space"
         objective: "Create a Genie space scoped to your team's model."
         instructions_md: >
-          Create a Genie space over `${team_catalog}.${team_schema}` and ask it
-          one revenue question. Show the host the answer.
-        success_criteria_md: "A Genie space answers a revenue question over team data."
+          Create a Genie space over `${team_catalog}.${team_schema}` with your
+          team name (`${team_slug}`) in the title, and ask it one revenue
+          question. Show the host the answer.
+        success_criteria_md: "A team-named Genie space answers a revenue question."
         points: 100
         validation_mode: manual
         manual_validation_required: true
@@ -246,6 +248,8 @@ quests:
             type: databricks_sdk
             mode: sync
             check: genie_space_exists
+            params:
+              name_contains: "${team_slug}"
           - id: host-confirm-genie
             type: manual
             mode: sync

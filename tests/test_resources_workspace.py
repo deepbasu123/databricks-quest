@@ -79,8 +79,8 @@ def test_team_scoped_entry_renders_per_team():
         }),
     )
     assert [i["target"] for i in plan] == [
-        "quest-summit-day-team-red-gw",
-        "quest-summit-day-team-blue-gw",
+        "quest-summit-day-team_red-gw",
+        "quest-summit-day-team_blue-gw",
     ]
     assert [i["team_id"] for i in plan] == ["t1", "t2"]
 
@@ -203,13 +203,13 @@ def test_execute_workspace_plan_records_active():
 
 def test_execute_workspace_plan_records_per_item_failure():
     repo = _FakeRepo()
-    execu = _FakeExecutor(fail_targets={"quest-summit-day-team-red-gw"})
+    execu = _FakeExecutor(fail_targets={"quest-summit-day-team_red-gw"})
     svc = ResourceService(repo=repo)
     result = svc.execute_workspace_plan(EVENT, _plan_one(), execu, created_by="host")
     assert result["ok"] is False
     statuses = {r["fqn"]: r["status"] for r in repo.rows}
-    assert statuses["quest-summit-day-team-red-gw"] == "failed"
-    assert statuses["quest-summit-day-team-blue-gw"] == "active"
+    assert statuses["quest-summit-day-team_red-gw"] == "failed"
+    assert statuses["quest-summit-day-team_blue-gw"] == "active"
 
 
 def test_execute_workspace_plan_refuses_blockers():

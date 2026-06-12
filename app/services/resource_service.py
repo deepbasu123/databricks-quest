@@ -209,7 +209,11 @@ def build_workspace_plan(
             scopes = [
                 {
                     "event_slug": event_slug,
-                    "team_slug": ns.sanitize_identifier(t.get("team_name") or str(t.get("team_id"))).replace("_", "-"),
+                    # Must match the validator-variable derivation in
+                    # main._build_validator_variables (sanitize_identifier,
+                    # underscores) — otherwise per-team resource names and the
+                    # names validators resolve at play time diverge.
+                    "team_slug": ns.sanitize_identifier(t.get("team_name") or str(t.get("team_id"))),
                     "team_catalog": t["catalog"],
                     "team_schema": t["schema"],
                     "event_catalog": event_ns["catalog"],
@@ -326,10 +330,36 @@ class SDKWorkspaceExecutor:
                 self._client_cache = WorkspaceClient()
         return self._client_cache
 
+    @staticmethod
+    def _is_already_exists(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return "already exists" in text or "resource_already_exists" in text
+
+    @staticmethod
+    def _is_not_found(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return "not found" in text or "does not exist" in text or "resource_does_not_exist" in text
+
     def execute(self, item: Dict[str, Any]) -> None:
+        """Run one workspace op. Creates are idempotent (an already-existing
+        resource is success — bootstrap must be re-runnable, matching the SQL
+        lane's CREATE IF NOT EXISTS); deletes tolerate missing resources (a
+        failed create or an earlier teardown must not wedge the event)."""
         op, name = item.get("op", ""), item.get("target", "")
         spec = item.get("spec") or {}
         w = self._client()
+        try:
+            self._dispatch(w, op, name, spec)
+        except Exception as exc:  # noqa: BLE001 - classify, then re-raise
+            if op.startswith("create_") and self._is_already_exists(exc):
+                logger.info("workspace op %s: %r already exists — treating as success", op, name)
+                return
+            if op.startswith("delete_") and self._is_not_found(exc):
+                logger.info("workspace op %s: %r already gone — treating as removed", op, name)
+                return
+            raise
+
+    def _dispatch(self, w: Any, op: str, name: str, spec: Dict[str, Any]) -> None:
         if op == "create_lakebase_instance":
             from databricks.sdk.service.database import DatabaseInstance
 
@@ -357,10 +387,13 @@ class SDKWorkspaceExecutor:
         elif op == "delete_serving_endpoint":
             w.serving_endpoints.delete(name)
         elif op == "create_genie_space":
-            # Best-effort: the serialized create payload is workspace-version
-            # dependent. Failure is recorded per-item, never fatal to the plan.
+            # Idempotency: a space with this exact title already recorded means
+            # re-run — skip rather than duplicate (Genie create is not unique
+            # by title).
             import json
 
+            if _find_genie_space_id_by_title(w, name) is not None:
+                return
             serialized = json.dumps({
                 "version": 1,
                 "data_sources": {
@@ -373,16 +406,22 @@ class SDKWorkspaceExecutor:
                 warehouse_id=spec.get("warehouse_id") or os.getenv("QUEST_SQL_WAREHOUSE_ID") or None,
             )
         elif op == "delete_genie_space":
-            # Resolve by exact title within the namespace; trash, don't purge.
-            genie = w.genie
-            resp = genie.list_spaces()
-            for space in getattr(resp, "spaces", None) or []:
-                if (getattr(space, "title", "") or "") == name:
-                    genie.trash_space(space.space_id)
-                    return
-            raise RuntimeError(f"Genie space titled {name!r} not found")
+            # Resolve by exact title; trash, don't purge. Missing = already gone.
+            space_id = _find_genie_space_id_by_title(w, name)
+            if space_id is not None:
+                w.genie.trash_space(space_id)
         else:
             raise RuntimeError(f"Unknown workspace op {op!r}")
+
+
+def _find_genie_space_id_by_title(client: Any, title: str) -> Optional[str]:
+    """Exact-title Genie space lookup, following pagination."""
+    from services.sdk_checks import iter_genie_spaces
+
+    for space in iter_genie_spaces(client):
+        if (getattr(space, "title", "") or "") == title:
+            return getattr(space, "space_id", None)
+    return None
 
 
 class ResourceService:
@@ -429,7 +468,7 @@ class ResourceService:
                 logger.warning("resource statement failed (%s): %s", item.get("op"), exc)
 
             if record and item.get("resource_type") in ("catalog", "schema"):
-                removed = item.get("op") == "drop_schema"
+                removed = str(item.get("op", "")).startswith("drop_")
                 status = (
                     "removed" if (removed and entry["status"] == "ok")
                     else ("active" if entry["status"] == "ok" else "failed")

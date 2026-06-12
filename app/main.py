@@ -2188,6 +2188,10 @@ async def host_bootstrap_resources(
         result = default_resource_service.execute_plan(
             ev, sql_plan, executor, created_by=user
         )
+        # SQL success is recorded separately: the namespaces below describe
+        # schemas the SQL lane just created, so a later workspace-op failure
+        # must not suppress persisting them.
+        result["sql_ok"] = bool(result.get("ok"))
         if ws_plan and result.get("ok"):
             ws_result = default_resource_service.execute_workspace_plan(
                 ev, ws_plan, _workspace_executor(), created_by=user
@@ -2198,7 +2202,7 @@ async def host_bootstrap_resources(
     # Persist each team's resolved namespace so validator-variable resolution
     # and the host resource view see a stable, materialized target (the same
     # value the plan just provisioned), rather than re-deriving it per request.
-    if result.get("ok"):
+    if result.get("sql_ok"):
         try:
             teams = events_repo.list_teams(resolved_event_id)
             for target in ns.team_targets(ev, teams):
@@ -2303,12 +2307,15 @@ async def host_teardown_resources(
         )
 
     sql_plan, ws_plan = _split_plan(plan)
+    # Build the SQL executor BEFORE any destructive workspace op runs: a
+    # missing warehouse must abort the teardown up front, not after
+    # endpoints/instances have already been deleted.
+    executor = _resource_executor()
     ws_result: Dict[str, Any] = {"ok": True, "executed": []}
     if ws_plan:
         ws_result = default_resource_service.execute_workspace_plan(
             ev, ws_plan, _workspace_executor(), created_by=user
         )
-    executor = _resource_executor()
     sql_result = default_resource_service.execute_plan(ev, sql_plan, executor, created_by=user)
     ok = bool(ws_result.get("ok")) and bool(sql_result.get("ok"))
     record_audit(
