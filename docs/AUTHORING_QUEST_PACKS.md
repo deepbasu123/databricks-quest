@@ -89,13 +89,20 @@ the Pydantic models in [`app/models/quest_pack.py`](../app/models/quest_pack.py)
 | Type | Executes? | Required config |
 |---|---|---|
 | `sql_assertion` | ✅ yes | `statement` (read-only `SELECT`/`WITH`), usually an `expect` block |
-| `databricks_sdk` / `workspace_api` | ✅ yes | `check` (one of the registry names below) |
+| `databricks_sdk` / `workspace_api` | ✅ yes | `check` (one of the registry names below) + its required params |
+| `rest_api` | ✅ yes | `endpoint` (serving-endpoint **name**, never a URL) + `prompt`; usually an `expect` block |
 | `manual` | host review | — |
-| `system_table`, `notebook`, `python_code`, `rest_api` | recognised by lint, **not executed yet** | (type-specific) |
 
-> **Do not claim a check executes when it doesn't.** Query the live, executable
-> set at runtime — `GET /api/health` returns `validator_types` and `sdk_checks`.
-> Only `sql_assertion`, `databricks_sdk`/`workspace_api`, and `manual` run today.
+**Every type in the vocabulary executes** — `system_table`, `notebook`, and
+`python_code` were removed because they had no backend (a pack could lint clean
+and silently skip at runtime). System-table use cases are plain `sql_assertion`
+statements against `system.*` tables. The linter now **errors** on any type not
+listed above. Confirm the live set at runtime: `GET /api/health` returns
+`validator_types` and `sdk_checks`.
+
+`rest_api` safety: config keys `url`/`headers`/`auth`/`token` are lint errors —
+the only egress is the workspace API host via the app's own identity; prompts
+are host-authored; `max_tokens` ≤ 512 and timeout ≤ 60s are clamped server-side.
 
 ### `sql_assertion` safety (critical)
 

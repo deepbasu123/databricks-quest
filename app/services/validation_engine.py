@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 from validators import (
     DatabricksSDKValidator,
     ManualValidator,
+    RestAPIValidator,
     SQLAssertionValidator,
     ValidationContext,
     ValidationOutcome,
@@ -43,9 +44,11 @@ class ValidationEngine:
         self,
         sql_executor: Optional[Executor] = None,
         sdk_validator: Optional[Validator] = None,
+        rest_validator: Optional[Validator] = None,
     ):
-        # ``sql_executor``/``sdk_validator`` are injectable for tests; production
-        # passes None and the validators lazily build SDK-backed backends.
+        # ``sql_executor``/``sdk_validator``/``rest_validator`` are injectable
+        # for tests; production passes None and the validators lazily build
+        # SDK-backed backends.
         sdk = sdk_validator or DatabricksSDKValidator()
         self._registry: Dict[str, Validator] = {
             "sql_assertion": SQLAssertionValidator(executor=sql_executor),
@@ -54,6 +57,7 @@ class ValidationEngine:
             # ``workspace_api`` is an alias for the SDK validator (same backend);
             # both names appear across quest packs and docs.
             "workspace_api": sdk,
+            "rest_api": rest_validator or RestAPIValidator(),
         }
 
     def supported_types(self) -> List[str]:

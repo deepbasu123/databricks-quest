@@ -12,15 +12,15 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# Validator types recognised by the authoring format. Execution arrives in the
-# validation engine PR; here it only drives lint warnings for unknown types.
+# Validator types recognised by the authoring format. Every name here has an
+# executable backend registered in services.validation_engine — types without
+# one (system_table, notebook, python_code) were removed so a pack can never
+# lint clean and then silently skip at runtime. system_table use cases are
+# plain sql_assertion statements against system.* tables.
 KNOWN_VALIDATOR_TYPES = {
     "sql_assertion",
     "databricks_sdk",
     "workspace_api",
-    "system_table",
-    "notebook",
-    "python_code",
     "rest_api",
     "manual",
 }

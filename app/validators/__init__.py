@@ -25,6 +25,7 @@ from .base import (
 from .manual import ManualValidator
 from .sql_assertion import SQLAssertionValidator
 from .databricks_sdk import DatabricksSDKValidator
+from .rest_api import RestAPIValidator
 
 __all__ = [
     "ValidationContext",
@@ -34,4 +35,5 @@ __all__ = [
     "ManualValidator",
     "SQLAssertionValidator",
     "DatabricksSDKValidator",
+    "RestAPIValidator",
 ]

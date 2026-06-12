@@ -197,9 +197,12 @@ def lint_manifest_text(manifest_yaml: str) -> LintResult:
                 validator_ids.add(validator.id)
 
                 if validator.type not in KNOWN_VALIDATOR_TYPES:
-                    result.warn(
+                    # An unknown type would SKIP silently at runtime — the
+                    # "stubbed task" failure mode — so it blocks import.
+                    result.error(
                         f"{vloc}.type",
-                        f"Unknown validator type '{validator.type}'. Known types: "
+                        f"Unknown validator type '{validator.type}'. Every type "
+                        "must have an executable backend. Known types: "
                         + ", ".join(sorted(KNOWN_VALIDATOR_TYPES)),
                     )
 
@@ -273,15 +276,37 @@ def _lint_validator_config(result: LintResult, vloc: str, validator: Any) -> Non
             result.error(f"{vloc}.check", "databricks_sdk requires a 'check' name.")
         else:
             _lint_sdk_check(result, vloc, str(check), cfg.get("params") or {})
-    elif vtype == "system_table":
-        if not cfg.get("table"):
-            result.error(f"{vloc}.table", "system_table validator requires 'table'.")
-        if not cfg.get("condition"):
-            result.warn(f"{vloc}.condition", "system_table validator has no 'condition'.")
-    elif vtype == "notebook":
-        if not cfg.get("notebook_path"):
+    elif vtype == "rest_api":
+        from validators.rest_api import FORBIDDEN_CONFIG_KEYS
+
+        for key in FORBIDDEN_CONFIG_KEYS:
+            if key in cfg:
+                result.error(
+                    f"{vloc}.{key}",
+                    f"rest_api config must not contain '{key}' — endpoints are "
+                    "addressed by serving-endpoint name only.",
+                )
+        endpoint = cfg.get("endpoint")
+        if not endpoint:
+            result.error(f"{vloc}.endpoint", "rest_api requires an 'endpoint' name.")
+        else:
+            _check_template_vars(result, f"{vloc}.endpoint", endpoint)
+        prompt = cfg.get("prompt")
+        if not prompt:
+            result.error(f"{vloc}.prompt", "rest_api requires a 'prompt'.")
+        else:
+            _check_template_vars(result, f"{vloc}.prompt", prompt)
+        expect = validator.expect
+        if expect is None:
+            result.warn(
+                f"{vloc}.expect",
+                "rest_api has no 'expect' block; any successful response will pass.",
+            )
+        elif expect.operator and expect.operator not in KNOWN_EXPECT_OPERATORS:
             result.error(
-                f"{vloc}.notebook_path", "notebook validator requires 'notebook_path'."
+                f"{vloc}.expect.operator",
+                f"Unknown operator '{expect.operator}'. Supported: "
+                + ", ".join(sorted(KNOWN_EXPECT_OPERATORS)),
             )
 
 
