@@ -128,6 +128,20 @@ Registry names (from [`app/services/sdk_checks.py`](../app/services/sdk_checks.p
 | `lakebase_synced_table_online` | `table` (3-part UC name) | — |
 | `vector_search_endpoint_exists` | `name` or `name_contains` | `require_online` (default true) |
 | `vector_search_index_ready` | `index` (3-part name) | `min_rows` |
+| `genie_space_curated` | `space_id` or `name_contains` | `require_instructions`, `min_sample_questions`, `min_tables` |
+| `genie_conversation_started` | `space_id` or `name_contains` | `min_conversations` (default 1), `created_after` (e.g. `${event_start}`) |
+| `lakebase_app_connected` | `name` or `name_contains` | `require_running` (default true) |
+| `knowledge_assistant_exists` | `name` or `name_contains` | `require_endpoint` (default true) |
+| `multi_agent_supervisor_exists` | `name` or `name_contains` | `require_endpoint` (default true) |
+
+> **Agent Bricks note:** `knowledge_assistant_exists` / `multi_agent_supervisor_exists`
+> use the workspace's beta tiles REST surface (`/api/2.0/tiles`) — there is no
+> public SDK API for KA/MAS yet. The surface was verified live; if it moves, the
+> checks degrade to host review like any other runtime failure.
+> **Genie conversation visibility:** `genie_conversation_started` lists
+> conversations with `include_all=true`; the app's identity needs visibility into
+> the space (CAN MANAGE, or being in the team's group). If it can't see them, the
+> check degrades to host review.
 
 The linter enforces these contracts: a known check missing a required param is a
 lint **error**; an unknown check name or unused param is a warning. `${…}` slots
