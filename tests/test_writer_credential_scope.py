@@ -53,3 +53,29 @@ def test_writer_can_read_leaderboard_views():
     lines = " ".join(_grant_lines())
     assert "event_leaderboard" in lines
     assert "SELECT" in lines.upper()
+
+
+def test_writer_cannot_write_quest_admins():
+    """P0-5: the shared child writer role must be SELECT-only on quest_admins.
+
+    An INSERT grant let a leaked child credential self-grant global admin. The
+    role may read the allowlist (admins are global) but never write it.
+    """
+    for ln in _grant_lines():
+        if "quest_admins" not in ln:
+            continue
+        grant = ln.upper()
+        m = re.search(r"GRANT\s+(.*?)\s+ON", grant)
+        assert m, f"could not parse privileges from: {ln}"
+        privs = {p.strip() for p in m.group(1).split(",")}
+        assert privs == {"SELECT"}, (
+            f"writer role must be SELECT-only on quest_admins, got {privs}: {ln}"
+        )
+
+
+def test_quest_admins_insert_is_revoked_for_existing_deployments():
+    """The remediation REVOKE INSERT ON quest_admins must be present so
+    deployments that previously received INSERT are downgraded on re-deploy."""
+    with open(DEPLOY_SH, "r", encoding="utf-8") as f:
+        text = f.read().upper()
+    assert "REVOKE INSERT ON QUEST_ADMINS" in text

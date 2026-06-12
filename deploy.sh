@@ -118,9 +118,10 @@ run_gameday_migrations() {
 #   SELECT  on the leaderboard read surface (so children can render the
 #           event-wide leaderboard and locate their own team's rank)
 #   INSERT/UPDATE/SELECT on event_workspaces (for the startup check-in upsert)
-#   SELECT/INSERT on quest_admins (shared admin allowlist — children read it so
-#           admins are global, and admins can ADD admins from a child; removal
-#           requires the master/standalone app — no DELETE for the writer role)
+#   SELECT  on quest_admins (read-only — children read the shared admin
+#           allowlist so admins are global; the writer role gets NO INSERT/
+#           UPDATE/DELETE, so a leaked child credential can never self-grant
+#           admin. Managing admins requires the master/standalone app. [P0-5])
 # No UPDATE/DELETE on facts, no access to secrets. Idempotent: re-running
 # resets the role's password (rotate-per-event) and re-applies grants.
 # Args: <host> <db> <admin_user> <admin_token> <writer_user> <writer_password>
@@ -147,13 +148,16 @@ BEGIN
   EXECUTE format('GRANT INSERT, UPDATE, SELECT ON event_workspaces TO %I', '$esc_writer');
   EXECUTE format('GRANT SELECT ON event_leaderboard, team_scores, teams, participant_identity_map, events, announcements TO %I', '$esc_writer');
   EXECUTE format('GRANT SELECT ON quest_packs, quest_pack_versions, quests, quest_tasks, task_hints, task_validators TO %I', '$esc_writer');
-  -- Shared admin allowlist: children read it (so admins are global) and may
-  -- ADD admins through the app. No DELETE — removing an admin requires the
-  -- master/standalone app (full workspace identity); a leaked child credential
-  -- must never be able to delete. Guarded so a missing table (migrations not
-  -- yet applied) doesn't abort role provisioning.
+  -- Shared admin allowlist: children read it (so admins are global) but MUST
+  -- NOT write it (P0-5). The credential is shared across every attendee
+  -- workspace, so an INSERT grant let a leaked child self-grant global admin.
+  -- Adding/removing admins now requires the master/standalone app (full
+  -- workspace identity). SELECT-only; the REVOKE remediates deployments that
+  -- previously received INSERT. Guarded so a missing table (migrations not yet
+  -- applied) doesn't abort role provisioning.
   IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'quest_admins') THEN
-    EXECUTE format('GRANT SELECT, INSERT ON quest_admins TO %I', '$esc_writer');
+    EXECUTE format('REVOKE INSERT ON quest_admins FROM %I', '$esc_writer');
+    EXECUTE format('GRANT SELECT ON quest_admins TO %I', '$esc_writer');
   END IF;
 END \$\$;
 "; then
@@ -173,6 +177,14 @@ END \$\$;
 write_app_yaml() {
   local lb_host="$1" lb_db="$2"
   local app_yaml="${SCRIPT_DIR:-$(pwd)}/app/app.yaml"
+  # P0-6: the committed app.yaml is an env-free placeholder, so a deploy that
+  # cannot determine the Lakebase endpoint must fail loudly rather than ship an
+  # app that boots with no database wired. Lakebase is always required (the app
+  # reads it by default and stores the backend toggle there).
+  if [ -z "$lb_host" ]; then
+    fail "Lakebase host could not be determined — refusing to write app/app.yaml without it. \
+Pass --lakebase-host (or ensure discovery succeeds) before deploying."
+  fi
   {
     echo "command:"
     echo "  - uvicorn"
