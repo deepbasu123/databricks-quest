@@ -250,6 +250,66 @@ def run(args) -> int:
         backend.close()
 
 
+def apply_with_connection(conn, migrations_dir: str | None = None) -> int:
+    """Apply pending migrations on an already-open connection (in-process).
+
+    Backs the app's self-bootstrap startup hook (master/standalone) so a fresh
+    deploy needs no external migration step — deploying the app is enough. The
+    connection is borrowed from the app's pool and is NOT closed here (the
+    caller owns its lifecycle). Returns the number of migrations newly applied.
+    """
+    migrations = discover_migrations(migrations_dir or THIS_DIR)
+    if not migrations:
+        return 0
+    backend = Psycopg2Backend(conn)
+    backend.ensure_table()
+    applied = backend.applied_versions()
+    newly = 0
+    for version, description, path in migrations:
+        if version in applied:
+            continue
+        backend.apply(version, description, path)
+        newly += 1
+    return newly
+
+
+def provision_event_writer_role(conn, writer: str, password: str) -> None:
+    """Create/refresh the shared INSERT-only event-writer role (master only).
+
+    Mirrors ``deploy.sh``'s ``provision_event_writer_role`` so the master can
+    self-provision the role children use to federate, on boot, instead of an
+    external deploy step. ``writer`` is a fixed role name and ``password`` is a
+    caller-generated token; single quotes are escaped defensively. Executed with
+    no psycopg2 params so the ``%I``/``%L`` in the DO block are sent verbatim.
+    """
+    w = writer.replace("'", "''")
+    p = password.replace("'", "''")
+    sql = f"""
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{w}') THEN
+    EXECUTE format('CREATE ROLE %I WITH LOGIN PASSWORD %L', '{w}', '{p}');
+  ELSE
+    EXECUTE format('ALTER ROLE %I WITH LOGIN PASSWORD %L', '{w}', '{p}');
+  END IF;
+  EXECUTE format('GRANT INSERT ON scoring_events, task_attempts, validation_results, hints_taken TO %I', '{w}');
+  EXECUTE format('GRANT INSERT, UPDATE, SELECT ON event_workspaces TO %I', '{w}');
+  EXECUTE format('GRANT SELECT ON event_leaderboard, team_scores, teams, participant_identity_map, events, announcements TO %I', '{w}');
+  EXECUTE format('GRANT SELECT ON quest_packs, quest_pack_versions, quests, quest_tasks, task_hints, task_validators TO %I', '{w}');
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'quest_admins') THEN
+    EXECUTE format('REVOKE INSERT ON quest_admins FROM %I', '{w}');
+    EXECUTE format('GRANT SELECT ON quest_admins TO %I', '{w}');
+  END IF;
+END $$;
+"""
+    with conn.cursor() as cur:
+        cur.execute(sql)
+    try:
+        conn.commit()
+    except Exception:  # noqa: BLE001 — autocommit connections have nothing to commit
+        pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run Lakebase GameDay migrations")
     parser.add_argument("--lakebase-host", help="Lakebase endpoint host")

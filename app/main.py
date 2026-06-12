@@ -542,6 +542,46 @@ async def _federation_startup() -> None:
 
 
 @app.on_event("startup")
+async def _gameday_bootstrap_startup() -> None:
+    """Self-bootstrap the GameDay schema on boot (master/standalone).
+
+    The deploy mechanism (deploy.sh) historically ran the GameDay migrations and
+    provisioned the event-writer role as external steps. So Control Tower (and
+    any operator) can stand up Quest by *just deploying the app*, the master /
+    standalone — which connect with full workspace identity (DDL rights) — apply
+    the migrations here on boot. Children connect with the INSERT-only writer
+    credential and never own the schema, so they skip this entirely.
+
+    When ``QUEST_EVENT_WRITER_PASSWORD`` is provided, the master also provisions
+    the shared event-writer role children federate through, with that password —
+    the deployer (CT) supplies it so it can wire the same secret into children.
+
+    Best-effort: never blocks startup (the deploy mechanism remains a valid
+    fallback, and a child with no DDL rights simply no-ops).
+    """
+    if not config.event_mode_enabled() or config.QUEST_ROLE == "child":
+        return
+    try:
+        from migrations.run_migrations import (
+            apply_with_connection,
+            provision_event_writer_role,
+        )
+
+        with db._lease(autocommit=True) as conn:
+            applied = apply_with_connection(conn)
+        logger.info("gameday self-bootstrap: %d migration(s) applied", applied)
+
+        if config.is_master():
+            writer_pw = os.getenv("QUEST_EVENT_WRITER_PASSWORD", "").strip()
+            if writer_pw:
+                with db._lease(autocommit=True) as conn:
+                    provision_event_writer_role(conn, "quest_event_writer", writer_pw)
+                logger.info("gameday self-bootstrap: event-writer role provisioned")
+    except Exception as exc:  # noqa: BLE001 — never block startup
+        logger.warning("gameday self-bootstrap skipped: %s", exc)
+
+
+@app.on_event("startup")
 async def _admin_seed_startup() -> None:
     """Seed the shared quest_admins table from the env allowlist.
 
