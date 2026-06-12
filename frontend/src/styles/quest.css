@@ -89,13 +89,13 @@
 }
 
 .quest-topography {
-  background-image: url('/assets/backgrounds/quest-topography.svg');
+  background-image: url('/assets/backgrounds/quest-topography.jpg');
   background-size: cover;
   background-position: center;
 }
 
 .quest-constellation {
-  background-image: url('/assets/backgrounds/quest-constellation.svg');
+  background-image: url('/assets/backgrounds/quest-constellation.jpg');
   background-size: cover;
   background-position: center;
 }
