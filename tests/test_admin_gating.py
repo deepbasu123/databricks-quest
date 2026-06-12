@@ -27,9 +27,27 @@ def _no_db_admins(main_module, monkeypatch):
     main_module._invalidate_admin_cache()
 
 
-def test_open_when_env_and_db_empty(main_module, monkeypatch):
+def test_closed_when_env_and_db_empty(main_module, monkeypatch):
+    # P0-4: fail closed. No admin configured anywhere → deny by default.
     monkeypatch.setattr(main_module, "QUEST_ADMIN_ALLOWLIST", [])
+    monkeypatch.setattr(main_module, "QUEST_ADMIN_OPEN", False)
+    assert main_module.is_admin_user("anyone@corp.com") is False
+
+
+def test_open_escape_hatch_reopens_when_unconfigured(main_module, monkeypatch):
+    # QUEST_ADMIN_OPEN=1 restores the legacy open behaviour for local dev only.
+    monkeypatch.setattr(main_module, "QUEST_ADMIN_ALLOWLIST", [])
+    monkeypatch.setattr(main_module, "QUEST_ADMIN_OPEN", True)
     assert main_module.is_admin_user("anyone@corp.com") is True
+
+
+def test_escape_hatch_ignored_once_admins_exist(main_module, monkeypatch):
+    # The escape hatch only matters when nothing is configured; once an admin
+    # is set, gating is enforced regardless of QUEST_ADMIN_OPEN.
+    monkeypatch.setattr(main_module, "QUEST_ADMIN_ALLOWLIST", ["alice@corp.com"])
+    monkeypatch.setattr(main_module, "QUEST_ADMIN_OPEN", True)
+    assert main_module.is_admin_user("alice@corp.com") is True
+    assert main_module.is_admin_user("mallory@corp.com") is False
 
 
 def test_env_allowlist_restricts(main_module, monkeypatch):
@@ -70,13 +88,14 @@ def test_db_read_failure_falls_back_to_env(main_module, monkeypatch):
 
 def test_cache_invalidation_picks_up_new_db_admin(main_module, monkeypatch):
     monkeypatch.setattr(main_module, "QUEST_ADMIN_ALLOWLIST", [])
+    monkeypatch.setattr(main_module, "QUEST_ADMIN_OPEN", False)
     emails: list[str] = []
     monkeypatch.setattr(main_module.admins_repo, "list_emails", lambda: list(emails))
     main_module._invalidate_admin_cache()
-    assert main_module.is_admin_user("new@corp.com") is True  # nothing configured → open
+    assert main_module.is_admin_user("new@corp.com") is False  # nothing configured → fail-closed
     emails.append("gatekeeper@corp.com")
     main_module._invalidate_admin_cache()
-    assert main_module.is_admin_user("new@corp.com") is False  # now gated
+    assert main_module.is_admin_user("new@corp.com") is False  # still gated
     assert main_module.is_admin_user("gatekeeper@corp.com") is True
 
 
