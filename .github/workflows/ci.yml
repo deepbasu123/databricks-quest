@@ -23,6 +23,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: pip install -r app/requirements.txt pytest
+        # httpx is required by starlette.testclient (TestClient-based tests).
+        run: pip install -r app/requirements.txt pytest httpx
       - name: Run tests
         run: python -m pytest tests/ -q
