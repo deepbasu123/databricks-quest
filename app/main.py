@@ -494,30 +494,43 @@ def require_master_host(request: Request) -> str:
 QUEST_SERVICE_TOKEN = os.getenv("QUEST_SERVICE_TOKEN", "").strip()
 
 
+def _presented_service_token(request: Request) -> str:
+    """Extract the caller's service token from either transport.
+
+    Two transports because a Databricks App sits behind the Apps OAuth proxy,
+    which consumes the ``Authorization`` header for its own auth: a peer app
+    (Control Tower) presents a Databricks OAuth token there to transit the
+    proxy, and rides the Quest service token in the ``X-Quest-Service-Token``
+    header (custom headers pass through). Direct (non-proxied) callers can still
+    use ``Authorization: Bearer``.
+    """
+    header_tok = request.headers.get("X-Quest-Service-Token", "").strip()
+    if header_tok:
+        return header_tok
+    auth = request.headers.get("Authorization", "")
+    return auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+
+
 def _has_valid_service_token(request: Request) -> bool:
-    """True if the request carries the configured bearer service token.
+    """True if the request carries the configured service token (either transport).
 
     Shared by ``require_service_token`` (integration endpoints) and
     ``require_host`` (so the trusted Control Tower service token also confers
     host authority for the event/pack/announcement lifecycle, C2)."""
     if not QUEST_SERVICE_TOKEN:
         return False
-    auth = request.headers.get("Authorization", "")
-    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-    return bool(token) and token == QUEST_SERVICE_TOKEN
+    return _presented_service_token(request) == QUEST_SERVICE_TOKEN
 
 
 def require_service_token(request: Request) -> str:
-    """Authorize a service caller via the shared bearer service token."""
+    """Authorize a service caller via the shared service token."""
     if not QUEST_SERVICE_TOKEN:
         raise HTTPException(
             status_code=503,
             detail={"error": {"code": "INTEGRATION_DISABLED",
                               "message": "Service integration is not configured (set QUEST_SERVICE_TOKEN)."}},
         )
-    auth = request.headers.get("Authorization", "")
-    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-    if token != QUEST_SERVICE_TOKEN:
+    if not _has_valid_service_token(request):
         raise HTTPException(
             status_code=401,
             detail={"error": {"code": "UNAUTHENTICATED",
