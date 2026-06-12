@@ -57,7 +57,13 @@ EVENT_MODE = _resolve_event_mode()
 
 # Identifier of the workspace this app instance runs in. Required for child
 # deployments so federated writes can be attributed back to a workspace.
-QUEST_WORKSPACE_ID = os.getenv("QUEST_WORKSPACE_ID", "").strip()
+# Falls back to DATABRICKS_WORKSPACE_ID, which the Databricks Apps runtime
+# injects into every app — so a child self-identifies without the deployer
+# having to template the per-workspace id into each deployment's env.
+QUEST_WORKSPACE_ID = (
+    os.getenv("QUEST_WORKSPACE_ID", "").strip()
+    or os.getenv("DATABRICKS_WORKSPACE_ID", "").strip()
+)
 
 # The event this deployment is wired to (slug). Children resolve their own team
 # and the overall leaderboard from this.
