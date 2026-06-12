@@ -31,6 +31,23 @@ Python installed, and a running SQL warehouse for Event-Mode resource/SQL steps.
 
 ## Track B — Event Mode (GameDay)
 
+### B0. Run the automated preflight first (step 0 of every event)
+
+```bash
+python scripts/preflight_event.py \
+  --app-url https://<app-host> --pack quest_packs/built_in/<pack>.yml \
+  --warehouse-id <id> --token "$(databricks auth token | jq -r .access_token)"
+```
+
+The harness plays the entire pack as a team would — strict lint, import,
+event + team + join + start, bootstrap (dry-run then execute), every task's
+`solutions` executed for real (SQL on the warehouse, dashboards/Genie/
+pipelines/jobs/gateway via the SDK), attempts submitted over HTTP, outcomes
+asserted against what the pack declares, leaderboard checked, then reset +
+teardown rehearsed. Exit 0 = the pack is winnable on this workspace today.
+The manual steps below remain for UX verification (narrative quality, hints,
+host-console flows) that no harness can judge.
+
 ### B1. Deploy with Event Mode
 
 1. `./deploy.sh --event-mode --admins "<you@corp.com>"`
