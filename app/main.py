@@ -274,6 +274,14 @@ QUEST_ADMIN_ALLOWLIST = [
     e.strip().lower() for e in os.getenv("QUEST_ADMIN_ALLOWLIST", "").split(",") if e.strip()
 ]
 
+# P0-4: admin gating fails CLOSED. When no admin is configured anywhere (empty
+# env allowlist and an empty/unreachable quest_admins table), /api/admin/* deny
+# by default rather than opening to everyone. Set QUEST_ADMIN_OPEN=1 to reopen
+# for local development only — mirrors the QUEST_HOST_OPEN escape hatch above.
+QUEST_ADMIN_OPEN = os.getenv("QUEST_ADMIN_OPEN", "").strip().lower() in {
+    "1", "true", "on", "yes", "enabled", "enable",
+}
+
 admins_repo = AdminsRepository()
 
 # Small TTL cache over the DB admin set so we don't query Lakebase on every
@@ -312,12 +320,13 @@ def admin_emails() -> set:
 def is_admin_user(user: str) -> bool:
     """True if the user may see the Admin page.
 
-    Open only when no admin is configured anywhere (no env allowlist and an
-    empty/unreachable DB table) — preserving local-dev/legacy parity.
+    P0-4: fails CLOSED. When no admin is configured anywhere (empty env
+    allowlist and an empty/unreachable DB table), deny by default; set
+    QUEST_ADMIN_OPEN=1 to reopen for local development only.
     """
     effective = admin_emails()
     if not effective:
-        return True
+        return QUEST_ADMIN_OPEN
     return (user or "").lower() in effective
 
 
@@ -517,13 +526,37 @@ async def health():
         sdk_checks = []
     warehouse_configured = bool(os.getenv("QUEST_SQL_WAREHOUSE_ID", "").strip())
 
+    # P0-4: surface the admin-config posture. With no admin configured, /api/admin/*
+    # is denied to everyone (fail-closed) unless QUEST_ADMIN_OPEN is set.
+    admin_configured = bool(admin_emails())
+
     checks = {
         "lakebase": {"ok": db_ok, "latency_ms": db_latency_ms},
         "migrations": {"ok": bool(migrations), "applied": len(migrations)},
         "validators": {"ok": bool(validator_types), "types": validator_types, "sdk_checks": sdk_checks},
         "scoring": {"ok": db_ok},  # scoring needs the ledger (Lakebase)
         "sql_warehouse": {"ok": warehouse_configured, "configured": warehouse_configured},
+        "admin": {
+            "ok": admin_configured or QUEST_ADMIN_OPEN,
+            "configured": admin_configured,
+            "open": QUEST_ADMIN_OPEN,
+            "warning": (
+                None
+                if admin_configured
+                else (
+                    "no admin configured: /api/admin/* is open to all (QUEST_ADMIN_OPEN=1)"
+                    if QUEST_ADMIN_OPEN
+                    else "no admin configured: /api/admin/* is denied to all (fail-closed)"
+                )
+            ),
+        },
     }
+    if not admin_configured:
+        logger.warning(
+            "no admin configured (env allowlist + quest_admins both empty); "
+            "/api/admin/* %s",
+            "OPEN via QUEST_ADMIN_OPEN" if QUEST_ADMIN_OPEN else "denied (fail-closed)",
+        )
     # Overall status: degraded if the DB is down; healthy otherwise. The
     # warehouse being unset is informational (dry-run still works), not degraded.
     status = "ok" if db_ok else "degraded"
