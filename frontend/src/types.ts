@@ -24,6 +24,30 @@ export interface LevelProgress {
   progress_pct: number
 }
 
+export interface LevelDef {
+  name: string
+  threshold: number
+}
+
+/**
+ * Static gamification config served by `GET /api/config` (P2-11) — the single
+ * source of truth for the level ladder, scoring ratio, and mission/badge
+ * catalogs. `levels` is ordered highest→lowest, so clients derive the level
+ * order from here instead of hardcoding it.
+ */
+export interface QuestConfig {
+  schema_version: number
+  levels: LevelDef[]
+  consumption_points_ratio: number
+  missions: Mission[]
+  badges: Badge[]
+}
+
+/** Level names highest→lowest, derived from the backend config. */
+export function levelOrder(config: QuestConfig): string[] {
+  return config.levels.map((l) => l.name)
+}
+
 export interface Mission {
   id: string
   name: string
