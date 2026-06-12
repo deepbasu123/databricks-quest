@@ -49,3 +49,23 @@ def test_no_token_configured_still_allows_host_user(monkeypatch):
     monkeypatch.setattr(main, "get_user_email", lambda r: "host@x.com")
     monkeypatch.setattr(main, "is_host_user", lambda u, e: True)
     assert main.require_host(_req()) == "host@x.com"
+
+
+def test_service_token_via_custom_header(monkeypatch):
+    """Behind the Apps proxy the token rides X-Quest-Service-Token (Authorization
+    is consumed by the proxy for OAuth)."""
+    monkeypatch.setattr(main, "QUEST_SERVICE_TOKEN", "s3cret")
+    req = types.SimpleNamespace(
+        headers={"Authorization": "Bearer some-databricks-oauth", "X-Quest-Service-Token": "s3cret"},
+        path_params={},
+    )
+    assert main.require_host(req) == "service:control-tower"
+    assert main.require_service_token(req) == "service:control-tower"
+
+
+def test_custom_header_wrong_token_rejected(monkeypatch):
+    monkeypatch.setattr(main, "QUEST_SERVICE_TOKEN", "s3cret")
+    req = types.SimpleNamespace(headers={"X-Quest-Service-Token": "nope"}, path_params={})
+    with pytest.raises(HTTPException) as ei:
+        main.require_service_token(req)
+    assert ei.value.status_code == 401
