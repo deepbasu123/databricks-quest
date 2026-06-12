@@ -1,0 +1,52 @@
+{
+  "schema_version": "1",
+  "_comment": "Machine-readable deploy surface for Databricks Quest. Lets an external orchestrator (e.g. Control Tower) pull this repo, render the config/toggles, and deploy Quest via the Databricks Apps API WITHOUT reimplementing deploy.sh. Keep in sync with app/config.py + deploy.sh; tests/test_deploy_manifest.py guards it.",
+  "app": {
+    "name": "databricks-quest",
+    "source_path": "app",
+    "command": ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+  },
+  "self_bootstrap": {
+    "migrations_on_boot": true,
+    "event_writer_role_on_boot": true,
+    "notes": "master/standalone apply GameDay migrations on startup; master provisions the event-writer role when QUEST_EVENT_WRITER_PASSWORD is set. No external migration step needed."
+  },
+  "packs": {
+    "dirs": ["quest_packs/built_in", "samples/packs"],
+    "glob": "*.yml",
+    "manifest_keys": {
+      "root": "pack",
+      "slug": "slug",
+      "title": "title",
+      "version": "version",
+      "description": "description",
+      "difficulty": "difficulty",
+      "duration_minutes": "duration_minutes"
+    }
+  },
+  "roles": ["standalone", "master", "child"],
+  "config": [
+    {"env": "QUEST_EVENT_MODE", "label": "Event Mode (Game Day)", "type": "bool", "on_value": "on", "default": false, "roles": ["standalone", "master", "child"], "help": "Master kill-switch for Game Day. Off = legacy adoption app (Event APIs 404)."},
+    {"env": "QUEST_ROLE", "label": "Federation role", "type": "enum", "options": ["standalone", "master", "child"], "default": "standalone", "roles": ["standalone", "master", "child"], "help": "standalone = single-workspace gameday; master = owns the shared DB + console; child = federates writes to the master."},
+    {"env": "QUEST_ADMIN_ALLOWLIST", "label": "Admin allowlist", "type": "csv_emails", "roles": ["standalone", "master"], "help": "Emails allowed to see the Admin page (defaults to the deploying user)."},
+    {"env": "QUEST_HOST_ALLOWLIST", "label": "Host allowlist", "type": "csv_emails", "roles": ["standalone", "master"], "help": "Emails allowed to call host endpoints (create/start/freeze events). Fails closed if empty in Event Mode."},
+    {"env": "QUEST_SQL_WAREHOUSE_ID", "label": "SQL warehouse", "type": "warehouse_id", "roles": ["standalone", "master"], "help": "Warehouse the scoring pipeline uses."},
+    {"env": "QUEST_CATALOG", "label": "Unity Catalog", "type": "string", "roles": ["standalone", "master"], "help": "Catalog for Quest scored tables."},
+    {"env": "QUEST_SCHEMA", "label": "Schema", "type": "string", "default": "quest", "roles": ["standalone", "master"], "help": "Schema for Quest scored tables."},
+    {"env": "QUEST_DATA_BACKEND", "label": "Data backend", "type": "enum", "options": ["lakebase", "warehouse"], "default": "lakebase", "roles": ["standalone", "master"], "help": "Adoption data backend: lakebase (Postgres) or warehouse (read Delta via SQL warehouse)."},
+    {"env": "LAKEBASE_HOST", "label": "Lakebase host", "type": "string", "roles": ["standalone", "master", "child"], "help": "Lakebase endpoint host. For a child, this is the MASTER's endpoint."},
+    {"env": "LAKEBASE_DB", "label": "Lakebase database", "type": "string", "default": "quest_db", "roles": ["standalone", "master", "child"], "help": "Lakebase database name."},
+    {"env": "QUEST_EVENT_WRITER_PASSWORD", "label": "Event-writer password", "type": "secret", "roles": ["master"], "help": "Password the master uses to create the shared event-writer role on boot; the deployer passes the same value to children as their writer credential."},
+    {"env": "QUEST_EVENT_SLUG", "label": "Event slug", "type": "string", "roles": ["child"], "help": "The event this child deployment is wired to."},
+    {"env": "QUEST_WORKSPACE_ID", "label": "Workspace id", "type": "string", "roles": ["child"], "help": "Workspace id used to attribute this child's federated writes."},
+    {"env": "LAKEBASE_USER", "label": "Writer role", "type": "string", "default": "quest_event_writer", "roles": ["child"], "help": "INSERT-only writer role name on the master DB."},
+    {"env": "LAKEBASE_PASSWORD", "label": "Writer credential", "type": "secret", "roles": ["child"], "help": "The shared event-writer credential (same value as the master's QUEST_EVENT_WRITER_PASSWORD)."}
+  ],
+  "integration": {
+    "service_token_env": "QUEST_SERVICE_TOKEN",
+    "create_event": {"method": "POST", "path": "/api/host/events", "auth": "host"},
+    "import_pack": {"method": "POST", "path": "/api/host/quest-packs/import", "auth": "host"},
+    "roster_upsert": {"method": "PUT", "path": "/api/integrations/roster/{event_id}", "auth": "service_token"},
+    "completions": {"method": "POST", "path": "/api/integrations/events/{event_id}/completions", "auth": "service_token"}
+  }
+}
