@@ -17,7 +17,7 @@ export const BADGE_CATALOG: BadgeDef[] = [
     name: 'Platform Explorer',
     description: 'Explored core Databricks platform capabilities across multiple product areas.',
     category: 'Foundation',
-    image: '/assets/badges/platform-explorer.svg',
+    image: '/assets/badges/platform-explorer.png',
     requirement: 'Use 4+ distinct Databricks product areas',
   },
   {
@@ -25,7 +25,7 @@ export const BADGE_CATALOG: BadgeDef[] = [
     name: 'Pipeline Craftsman',
     description: 'Built and operated Lakeflow pipelines, jobs, and workflows.',
     category: 'Data Engineering',
-    image: '/assets/badges/pipeline-pioneer.svg',
+    image: '/assets/badges/pipeline-pioneer.png',
     requirement: 'Complete 5 pipeline-related missions',
   },
   {
@@ -33,7 +33,7 @@ export const BADGE_CATALOG: BadgeDef[] = [
     name: 'Consistent Contributor',
     description: 'Maintained a sustained activity streak on the platform.',
     category: 'Engagement',
-    image: '/assets/badges/workflow-runner.svg',
+    image: '/assets/badges/workflow-runner.png',
     requirement: 'Maintain a 14-day activity streak',
   },
   {
@@ -41,7 +41,7 @@ export const BADGE_CATALOG: BadgeDef[] = [
     name: 'AI Pioneer',
     description: 'Pioneered AI/ML workloads — model serving, GenAI, and vector search.',
     category: 'AI / ML',
-    image: '/assets/badges/ai-trailblazer.svg',
+    image: '/assets/badges/ai-trailblazer.png',
     requirement: 'Complete 3 AI/ML missions',
   },
   {
@@ -49,7 +49,7 @@ export const BADGE_CATALOG: BadgeDef[] = [
     name: 'Consumption King',
     description: 'Reached a major lifetime DBU consumption milestone.',
     category: 'Cost & Efficiency',
-    image: '/assets/badges/cost-optimizer.svg',
+    image: '/assets/badges/cost-optimizer.png',
     requirement: 'Reach the 10K DBU Club milestone',
   },
   {
@@ -57,7 +57,7 @@ export const BADGE_CATALOG: BadgeDef[] = [
     name: 'Full Stack',
     description: 'Demonstrated breadth across the full Databricks platform.',
     category: 'Mastery',
-    image: '/assets/badges/databricks-legend.svg',
+    image: '/assets/badges/databricks-legend.png',
     requirement: 'Complete missions in 5+ different categories',
   },
 ]
