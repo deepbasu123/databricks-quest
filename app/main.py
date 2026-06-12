@@ -481,6 +481,32 @@ def require_master_host(request: Request) -> str:
     return require_host(request)
 
 
+# Service-to-service auth for integration endpoints (C2a/C4b). A caller (e.g.
+# Control Tower) presents a bearer service token; this is distinct from the
+# player/host proxy identity. Configure via QUEST_SERVICE_TOKEN; empty disables
+# the integration surface (503) so it is never silently open.
+QUEST_SERVICE_TOKEN = os.getenv("QUEST_SERVICE_TOKEN", "").strip()
+
+
+def require_service_token(request: Request) -> str:
+    """Authorize a service caller via the shared bearer service token."""
+    if not QUEST_SERVICE_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "INTEGRATION_DISABLED",
+                              "message": "Service integration is not configured (set QUEST_SERVICE_TOKEN)."}},
+        )
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if token != QUEST_SERVICE_TOKEN:
+        raise HTTPException(
+            status_code=401,
+            detail={"error": {"code": "UNAUTHENTICATED",
+                              "message": "Invalid or missing service token."}},
+        )
+    return "service:control-tower"
+
+
 quest_packs_repo = QuestPacksRepository()
 events_repo = EventsRepository()
 attempts_repo = AttemptsRepository()
@@ -2164,6 +2190,18 @@ class RosterImportPayload(BaseModel):
     csv: str
 
 
+class AttendeeIdentity(BaseModel):
+    workspace_id: str
+    lab_user_email: str
+    team_name: str
+    display_name: Optional[str] = None
+    real_email: Optional[str] = None
+
+
+class RosterUpsertPayload(BaseModel):
+    attendees: List[AttendeeIdentity]
+
+
 def _resolve_event_or_404(event_id_or_slug: str) -> str:
     """Accept either an event_id or a slug and return the canonical event_id."""
     ev = events_repo.get_event(event_id_or_slug) or events_repo.get_event_by_slug(
@@ -2268,6 +2306,49 @@ async def host_import_roster(
     record_audit(
         action="roster.import",
         actor_user_id=user,
+        event_id=resolved,
+        target_type="event",
+        target_id=resolved,
+        payload={k: result[k] for k in ("rows", "teams_created", "participants_created", "identities_mapped")},
+    )
+    return result
+
+
+@app.put("/api/integrations/roster/{event_id}")
+async def integrations_upsert_roster(
+    event_id: str,
+    body: RosterUpsertPayload,
+    _: None = Depends(require_event_mode),
+    actor: str = Depends(require_service_token),
+):
+    """C2a: idempotent roster upsert for a service caller (Control Tower).
+
+    Accepts structured AttendeeIdentity rows (vs the host CSV import) and reuses
+    the same idempotent importer, so a just-provisioned or replaced attendee is
+    mapped in (near) real time without a human exporting a CSV.
+    """
+    import csv as _csv
+    import io as _io
+
+    resolved = _resolve_event_or_404(event_id)
+    buf = _io.StringIO()
+    writer = _csv.writer(buf)
+    writer.writerow(["workspace_id", "lab_user_email", "team_name", "display_name", "real_email"])
+    for a in body.attendees:
+        writer.writerow([a.workspace_id, a.lab_user_email, a.team_name,
+                         a.display_name or "", a.real_email or ""])
+    try:
+        result = federation_repo.import_roster(resolved, buf.getvalue())
+    except RosterImportError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "ROSTER_INVALID", "message": str(exc)}},
+        )
+    from services import record_audit
+
+    record_audit(
+        action="roster.upsert",
+        actor_user_id=actor,
         event_id=resolved,
         target_type="event",
         target_id=resolved,
