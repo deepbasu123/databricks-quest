@@ -224,3 +224,305 @@ def test_known_checks_lists_registry():
     assert "dashboard_exists_for_team" in names
     assert "table_exists" in names
     assert set(names) == set(SDK_CHECKS.keys())
+
+
+# ── wave-1 checks: serving endpoints / AI Gateway / Lakebase / Vector Search ──
+
+from types import SimpleNamespace
+
+from services.sdk_checks import (
+    KNOWN_PARAMS,
+    REQUIRED_PARAMS,
+    ai_gateway_configured,
+    lakebase_instance_exists,
+    lakebase_synced_table_online,
+    serving_endpoint_exists,
+    vector_search_endpoint_exists,
+    vector_search_index_ready,
+)
+
+
+class _ServingEndpoints:
+    def __init__(self, endpoints):
+        self._endpoints = list(endpoints)
+
+    def list(self):
+        return list(self._endpoints)
+
+    def get(self, name):
+        for ep in self._endpoints:
+            if getattr(ep, "name", None) == name:
+                return ep
+        raise RuntimeError("NOT_FOUND")
+
+
+class _Database:
+    def __init__(self, instances=None, synced=None):
+        self._instances = list(instances or [])
+        self._synced = dict(synced or {})
+
+    def list_database_instances(self):
+        return list(self._instances)
+
+    def get_synced_database_table(self, full_name):
+        if full_name not in self._synced:
+            raise RuntimeError("NOT_FOUND")
+        return self._synced[full_name]
+
+
+class _VSEndpoints:
+    def __init__(self, endpoints):
+        self._endpoints = list(endpoints)
+
+    def list_endpoints(self):
+        return list(self._endpoints)
+
+
+class _VSIndexes:
+    def __init__(self, indexes):
+        self._indexes = dict(indexes)
+
+    def get_index(self, name):
+        if name not in self._indexes:
+            raise RuntimeError("NOT_FOUND")
+        return self._indexes[name]
+
+
+def _endpoint(name, ready="READY", task="llm/v1/chat", ai_gateway=None):
+    return SimpleNamespace(
+        name=name,
+        state=SimpleNamespace(ready=ready),
+        task=task,
+        ai_gateway=ai_gateway,
+    )
+
+
+def _gateway(**features):
+    base = dict(
+        rate_limits=None,
+        guardrails=None,
+        usage_tracking_config=None,
+        inference_table_config=None,
+        fallback_config=None,
+    )
+    base.update(features)
+    return SimpleNamespace(**base)
+
+
+def test_serving_endpoint_exists_ready_filter():
+    client = FakeClient()
+    client.serving_endpoints = _ServingEndpoints(
+        [_endpoint("team-red-gateway", ready="READY"), _endpoint("team-blue-gateway", ready="NOT_READY")]
+    )
+    assert serving_endpoint_exists(client, {"name_contains": "team-red"}, None)["found"]
+    res = serving_endpoint_exists(client, {"name_contains": "team-blue"}, None)
+    assert res["found"] is False
+    # Existence is enough when readiness is waived.
+    assert serving_endpoint_exists(
+        client, {"name_contains": "team-blue", "require_ready": False}, None
+    )["found"]
+
+
+def test_serving_endpoint_exists_task_filter_and_exact_name():
+    client = FakeClient()
+    client.serving_endpoints = _ServingEndpoints(
+        [_endpoint("team-red-gateway", task="llm/v1/embeddings")]
+    )
+    assert serving_endpoint_exists(client, {"name": "team-red-gateway"}, None)["found"]
+    assert not serving_endpoint_exists(
+        client, {"name": "team-red-gateway", "task_contains": "chat"}, None
+    )["found"]
+
+
+def test_serving_endpoint_exists_requires_name_or_contains():
+    with pytest.raises(SDKCheckConfigError):
+        serving_endpoint_exists(FakeClient(), {}, None)
+
+
+def test_ai_gateway_configured_flags():
+    gw = _gateway(
+        rate_limits=[SimpleNamespace(calls=10)],
+        usage_tracking_config=SimpleNamespace(enabled=True),
+    )
+    client = FakeClient()
+    client.serving_endpoints = _ServingEndpoints([_endpoint("team-red-gateway", ai_gateway=gw)])
+    ok = ai_gateway_configured(
+        client,
+        {"name": "team-red-gateway", "require_rate_limits": True, "require_usage_tracking": True},
+        None,
+    )
+    assert ok["found"] is True
+    assert "rate limits" in ok["evidence"]["features_present"]
+    missing = ai_gateway_configured(
+        client, {"name": "team-red-gateway", "require_guardrails": True}, None
+    )
+    assert missing["found"] is False
+    assert missing["evidence"]["missing"] == ["guardrails"]
+
+
+def test_ai_gateway_configured_no_gateway_fails():
+    client = FakeClient()
+    client.serving_endpoints = _ServingEndpoints([_endpoint("plain", ai_gateway=None)])
+    assert ai_gateway_configured(client, {"name": "plain"}, None)["found"] is False
+
+
+def test_ai_gateway_configured_resolves_name_contains():
+    gw = _gateway(guardrails=SimpleNamespace(input=SimpleNamespace(pii=True), output=None))
+    client = FakeClient()
+    client.serving_endpoints = _ServingEndpoints([_endpoint("team-red-gateway", ai_gateway=gw)])
+    res = ai_gateway_configured(client, {"name_contains": "red", "require_guardrails": True}, None)
+    assert res["found"] is True
+
+
+def test_lakebase_instance_exists_state_filter():
+    client = FakeClient()
+    client.database = _Database(
+        instances=[
+            SimpleNamespace(name="team-red", state="AVAILABLE"),
+            SimpleNamespace(name="team-blue", state="STARTING"),
+        ]
+    )
+    assert lakebase_instance_exists(client, {"name_contains": "red"}, None)["found"]
+    assert not lakebase_instance_exists(client, {"name_contains": "blue"}, None)["found"]
+    assert lakebase_instance_exists(
+        client, {"name_contains": "blue", "require_available": False}, None
+    )["found"]
+
+
+def test_lakebase_synced_table_online_states():
+    online = SimpleNamespace(
+        data_synchronization_status=SimpleNamespace(detailed_state="ONLINE_TRIGGERED_UPDATE")
+    )
+    provisioning = SimpleNamespace(
+        data_synchronization_status=SimpleNamespace(detailed_state="PROVISIONING")
+    )
+    client = FakeClient()
+    client.database = _Database(
+        synced={"cat.sch.products": online, "cat.sch.pending": provisioning}
+    )
+    assert lakebase_synced_table_online(client, {"table": "cat.sch.products"}, None)["found"]
+    assert not lakebase_synced_table_online(client, {"table": "cat.sch.pending"}, None)["found"]
+    assert not lakebase_synced_table_online(client, {"table": "cat.sch.absent"}, None)["found"]
+    with pytest.raises(SDKCheckConfigError):
+        lakebase_synced_table_online(client, {}, None)
+
+
+def test_vector_search_endpoint_exists_online_filter():
+    client = FakeClient()
+    client.vector_search_endpoints = _VSEndpoints(
+        [
+            SimpleNamespace(name="event-vs", endpoint_status=SimpleNamespace(state="ONLINE")),
+            SimpleNamespace(name="warming-vs", endpoint_status=SimpleNamespace(state="PROVISIONING")),
+        ]
+    )
+    assert vector_search_endpoint_exists(client, {"name": "event-vs"}, None)["found"]
+    assert not vector_search_endpoint_exists(client, {"name": "warming-vs"}, None)["found"]
+
+
+def test_vector_search_index_ready_min_rows():
+    client = FakeClient()
+    client.vector_search_indexes = _VSIndexes(
+        {
+            "cat.sch.docs_idx": SimpleNamespace(
+                status=SimpleNamespace(ready=True, indexed_row_count=42)
+            )
+        }
+    )
+    assert vector_search_index_ready(client, {"index": "cat.sch.docs_idx"}, None)["found"]
+    assert not vector_search_index_ready(
+        client, {"index": "cat.sch.docs_idx", "min_rows": 100}, None
+    )["found"]
+    assert not vector_search_index_ready(client, {"index": "cat.sch.missing"}, None)["found"]
+
+
+def test_new_checks_route_to_manual_when_surface_missing():
+    # Bare client (no serving_endpoints/database/vector_search attrs) → the
+    # check raises at runtime → validator routes to host review.
+    v = _validator(FakeClient())
+    for check, params in [
+        ("serving_endpoint_exists", {"name": "x"}),
+        ("lakebase_instance_exists", {"name": "x"}),
+        ("lakebase_synced_table_online", {"table": "a.b.c"}),
+        ("vector_search_endpoint_exists", {"name": "x"}),
+        ("vector_search_index_ready", {"index": "a.b.c"}),
+    ]:
+        out = v.validate(_ctx(check, params))
+        assert out.status == MANUAL, check
+
+
+def test_param_contracts_cover_every_check():
+    assert set(KNOWN_PARAMS.keys()) == set(SDK_CHECKS.keys())
+    assert set(REQUIRED_PARAMS.keys()) <= set(SDK_CHECKS.keys())
+
+
+# ── linter enforces the check/param contracts ─────────────────────────────────
+
+
+_PACK_TEMPLATE = """
+schema_version: "1.0"
+pack:
+  slug: lint-probe
+  title: Lint Probe
+  version: 1.0.0
+  owner: pilot@databricks.com
+quests:
+  - slug: q1
+    title: Quest
+    tasks:
+      - slug: t1
+        title: Task
+        objective: Probe
+        points: 100
+        manual_validation_required: true
+        validators:
+          - id: v-manual
+            type: manual
+          - id: v-sdk
+            type: databricks_sdk
+            check: {check}
+            params:
+{params}
+"""
+
+
+def _lint_pack(check, params_yaml="              {}"):
+    from services.quest_pack_linter import lint_manifest_text
+
+    return lint_manifest_text(_PACK_TEMPLATE.format(check=check, params=params_yaml))
+
+
+def test_linter_warns_on_unknown_check():
+    result = _lint_pack("does_not_exist")
+    assert result.ok
+    assert any("Unknown databricks_sdk check" in w["message"] for w in result.warnings)
+
+
+def test_linter_errors_on_missing_required_param():
+    result = _lint_pack("table_exists")
+    assert not result.ok
+    assert any("requires param 'table'" in e["message"] for e in result.errors)
+
+
+def test_linter_errors_on_missing_any_of_params():
+    result = _lint_pack("serving_endpoint_exists")
+    assert not result.ok
+    assert any("requires one of" in e["message"] for e in result.errors)
+
+
+def test_linter_accepts_valid_check_params():
+    result = _lint_pack(
+        "serving_endpoint_exists",
+        '              name_contains: "${team_slug}-gateway"',
+    )
+    assert result.ok, result.errors
+    assert not result.warnings
+
+
+def test_linter_warns_on_unused_param():
+    result = _lint_pack(
+        "table_exists",
+        '              table: "${team_catalog}.${team_schema}.gold"\n'
+        "              bogus: 1",
+    )
+    assert result.ok
+    assert any("does not use param 'bogus'" in w["message"] for w in result.warnings)

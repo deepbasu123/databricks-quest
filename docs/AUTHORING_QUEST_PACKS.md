@@ -113,8 +113,25 @@ is intentionally narrow:
 ### `databricks_sdk` checks (read-only) + the **mandatory manual fallback**
 
 Registry names (from [`app/services/sdk_checks.py`](../app/services/sdk_checks.py)):
-`dashboard_exists_for_team`, `dashboard_published`, `genie_space_exists`,
-`table_exists`, `job_exists_with_schedule`, `pipeline_update_completed`.
+
+| Check | Required params | Optional params |
+|---|---|---|
+| `dashboard_exists_for_team` | — | `name_contains` |
+| `dashboard_published` | — | `name_contains` |
+| `genie_space_exists` | — | `name_contains` |
+| `table_exists` | `table` | — |
+| `job_exists_with_schedule` | — | `name_contains` |
+| `pipeline_update_completed` | — | `name_contains` |
+| `serving_endpoint_exists` | `name` or `name_contains` | `require_ready` (default true), `task_contains` |
+| `ai_gateway_configured` | `name` or `name_contains` | `require_rate_limits`, `require_guardrails`, `require_usage_tracking`, `require_inference_table`, `require_fallbacks` |
+| `lakebase_instance_exists` | `name` or `name_contains` | `require_available` (default true) |
+| `lakebase_synced_table_online` | `table` (3-part UC name) | — |
+| `vector_search_endpoint_exists` | `name` or `name_contains` | `require_online` (default true) |
+| `vector_search_index_ready` | `index` (3-part name) | `min_rows` |
+
+The linter enforces these contracts: a known check missing a required param is a
+lint **error**; an unknown check name or unused param is a warning. `${…}` slots
+in params resolve from the same server-provided variables as `sql_assertion`.
 
 > **Rule: pair every `databricks_sdk` task with a `manual` validator and set
 > `manual_validation_required: true`.** SDK checks degrade to host review if the

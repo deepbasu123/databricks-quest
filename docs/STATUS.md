@@ -4,8 +4,8 @@
 lands. Other docs (the PR plan, the GameDay README, per-doc implementation
 notes) should point here rather than restating overall status.
 
-- **Last updated:** 2026-06-03
-- **Active branch / PR:** `feature/gameday-pilot-readiness` (stacked on `feature/gameday-pr12-hardening-release-docs`)
+- **Last updated:** 2026-06-12
+- **Active branch / PR:** `feature/gameday-pr17-sdk-checks-wave1`
 - **Plan of record:** [`13_PR_ALIGNED_SPRINT_PLAN.md`](13_PR_ALIGNED_SPRINT_PLAN.md)
 - **Pilot readiness:** standalone **and** federated master/child are pilot-ready. See [`20_STATE_OF_NATION.md`](20_STATE_OF_NATION.md) for the closed P0–P3 checklist.
 
@@ -38,6 +38,7 @@ Legend: ✅ landed · 🟡 in progress · ⏳ planned (not started) · ⛔ block
 | PR10 | Security, observability, audit — request-id correlation (`X-Request-ID`) + standard error envelope; structured validation/scoring logs (`services/observability.py`); expanded `/api/health` subsystem checks (lakebase latency, migrations, validators, scoring, warehouse); permission-model docs; SQL-safety & role/scope tests | ✅ landed | `feature/gameday-pr10-security-observability` |
 | PR11 | Field reporting & hunter signaling — post-event report service + `report_service.py` (pure builder + JSON/CSV/Markdown renderers); host endpoints `/host/events/{id}/report` (structured) and `/export?format=json\|csv\|markdown` (downloadable, audited); report covers summary, leaderboard, team×task completion matrix, validation failures, hint usage, blockers, champions/fastest team, and heuristic account follow-ups; CSV guarded against formula injection; host Report UI panel | ✅ landed | `feature/gameday-pr11-reporting` |
 | PR12 | Hardening, release, docs — dual-mode `README.md` (Adoption + Event Mode overview + doc index); troubleshooting guide (`docs/17`); release checklist (`docs/18`); manual E2E test script + load-test guidance (`docs/19`); shared empty/error state polish (Report panel); adoption-mode regression confirmed (218 tests + clean build) | ✅ landed | `feature/gameday-pr12-hardening-release-docs` |
+| PR17 | Strategic-product SDK checks wave 1 — `databricks-sdk` pin 0.55.0 → 0.94.0; six new read-only checks (`serving_endpoint_exists`, `ai_gateway_configured`, `lakebase_instance_exists`, `lakebase_synced_table_online`, `vector_search_endpoint_exists`, `vector_search_index_ready`); `REQUIRED_PARAMS`/`KNOWN_PARAMS` contracts; linter validates check names + required params; check table in `docs/AUTHORING_QUEST_PACKS.md` | 🟡 in progress | `feature/gameday-pr17-sdk-checks-wave1` |
 
 ### Multi-workspace federation (ADR_006)
 
