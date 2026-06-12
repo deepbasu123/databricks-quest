@@ -264,6 +264,16 @@ class SolutionOps:
             time.sleep(20)
         raise RuntimeError("synced table not ONLINE after 15 minutes")
 
+    def upload_volume_files(self, op):
+        """Stage inline text files into a UC volume (doc corpora for KAs)."""
+        import io
+
+        base = str(op["volume_path"]).rstrip("/")
+        for filename, content in (op.get("files") or {}).items():
+            self.w.files.upload(
+                f"{base}/{filename}", io.BytesIO(str(content).encode()), overwrite=True
+            )
+
     def create_serving_endpoint(self, op):
         self.w.api_client.do(
             "POST", "/api/2.0/serving-endpoints",
@@ -320,6 +330,9 @@ def main() -> int:  # noqa: PLR0915 - linear operator script, clarity > splittin
     parser.add_argument("--keep", action="store_true", help="Skip reset/teardown at the end")
     parser.add_argument("--skip-teardown", action="store_true",
                         help="Reset team schemas but keep the event + workspace resources")
+    parser.add_argument("--interactive", action="store_true",
+                        help="Pause on 'human' solution steps so the operator can perform "
+                             "them; without it those tasks are reported NEEDS-HUMAN (exit 2)")
     args = parser.parse_args()
     if not args.token:
         raise SystemExit("Provide --token or set QUEST_APP_TOKEN.")
@@ -395,13 +408,14 @@ def main() -> int:  # noqa: PLR0915 - linear operator script, clarity > splittin
     # 4. play every task: solutions → submit → assert
     quests = app.call("GET", f"/api/events/{event_id}/quests").get("quests", [])
     quest_ids = {q.get("slug"): q.get("quest_id") for q in quests}
-    failures, played = 0, 0
+    failures, played, needs_human = 0, 0, 0
     for quest in pack.get("quests", []):
         detail = app.call("GET", f"/api/events/{event_id}/quests/{quest_ids[quest['slug']]}")
         task_ids = {t.get("slug"): t.get("task_id") for t in detail.get("tasks", [])}
         for task in quest.get("tasks", []):
             label = f"{quest['slug']}/{task['slug']}"
             played += 1
+            deferred_to_human = False
             try:
                 for step in task.get("solutions") or []:
                     if "sql" in step:
@@ -409,9 +423,20 @@ def main() -> int:  # noqa: PLR0915 - linear operator script, clarity > splittin
                     elif "workspace_op" in step:
                         rendered = json.loads(_resolve(json.dumps(step["workspace_op"]), variables))
                         ops.run(rendered)
+                    elif "human" in step:
+                        instruction = _resolve(str(step["human"]), variables)
+                        if args.interactive:
+                            input(f"\n  HUMAN STEP for {label}:\n    {instruction}\n"
+                                  "  Press Enter when done... ")
+                        else:
+                            deferred_to_human = True
+                            print(f"  NEEDS-HUMAN {label} — {instruction[:140]}")
             except Exception as exc:  # noqa: BLE001
                 failures += 1
                 print(f"  FAIL  {label} — solution step error: {str(exc)[:160]}")
+                continue
+            if deferred_to_human:
+                needs_human += 1
                 continue
             attempt = app.call(
                 "POST", f"/api/events/{event_id}/tasks/{task_ids[task['slug']]}/attempts",
@@ -451,8 +476,10 @@ def main() -> int:  # noqa: PLR0915 - linear operator script, clarity > splittin
             if not result.get("ok"):
                 failures += 1
 
-    print(f"\n{'PASS' if failures == 0 else 'FAIL'}: {played} tasks played, {failures} failure(s)")
-    return 1 if failures else 0
+    verdict = "FAIL" if failures else ("NEEDS-HUMAN" if needs_human else "PASS")
+    print(f"\n{verdict}: {played} tasks played, {failures} failure(s), "
+          f"{needs_human} needing a human step (use --interactive to perform them)")
+    return 1 if failures else (2 if needs_human else 0)
 
 
 if __name__ == "__main__":

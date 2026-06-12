@@ -317,7 +317,11 @@ def _lint_solutions(result: LintResult, tloc: str, task: Any) -> None:
     """Validate the host-only ``solutions`` steps when present.
 
     Each step is a mapping with exactly one of ``sql`` (non-empty statement),
-    ``workspace_op`` (mapping with an ``op`` name), or ``skip`` (a reason).
+    ``workspace_op`` (mapping with an ``op`` name), ``skip`` (a reason), or
+    ``human`` (an instruction the preflight operator performs by hand — for
+    artifacts with no stable creation API, e.g. Agent Bricks tiles; the
+    harness pauses on it in --interactive mode and reports NEEDS-HUMAN
+    otherwise, never a silent pass).
     """
     solutions = getattr(task, "solutions", None)
     if solutions is None:
@@ -330,11 +334,11 @@ def _lint_solutions(result: LintResult, tloc: str, task: Any) -> None:
         if not isinstance(step, dict):
             result.error(sloc, "Each solution step must be a mapping.")
             continue
-        kinds = [k for k in ("sql", "workspace_op", "skip") if k in step]
+        kinds = [k for k in ("sql", "workspace_op", "skip", "human") if k in step]
         if len(kinds) != 1:
             result.error(
                 sloc,
-                "Each solution step must have exactly one of: sql, workspace_op, skip.",
+                "Each solution step must have exactly one of: sql, workspace_op, skip, human.",
             )
             continue
         kind = kinds[0]
@@ -351,7 +355,7 @@ def _lint_solutions(result: LintResult, tloc: str, task: Any) -> None:
                     "workspace_op step must be a mapping with an 'op' name.",
                 )
         elif not isinstance(value, str) or not value.strip():
-            result.error(f"{sloc}.skip", "skip step must carry a reason string.")
+            result.error(f"{sloc}.{kind}", f"{kind} step must carry a non-empty string.")
 
 
 def _lint_task_playability(result: LintResult, tloc: str, task: Any) -> None:
