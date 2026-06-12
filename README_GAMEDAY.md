@@ -478,6 +478,22 @@ worked examples in [`samples/packs/`](samples/packs/) (kept byte-identical by
   model net revenue, create + curate a Genie space, pass a deterministic
   10-question accuracy benchmark, and drive it via the Conversation API.
   Advanced. 4 quests / 8 tasks / 975 pts.
+- **AI Gateway GameDay: The Tollbooth** (`ai_gateway_gameday.yml`, built_in
+  only) — govern per-team endpoints: usage tracking, a provable 429, PII
+  masking, fallbacks, and a live REST answer check. Advanced. 4 quests /
+  8 tasks / 900 pts.
+- **Lakebase GameDay: Checkout Line** (`lakebase_roundtrip.yml`, built_in
+  only) — shared Postgres instance, synced catalog, OLTP write path, and a
+  fully automated reverse-ETL integrity proof. Advanced. 4 quests / 8 tasks /
+  950 pts.
+- **Agent Bricks GameDay: The Concierge Desk** (`agent_bricks_gameday.yml`,
+  built_in only) — Knowledge Assistant over a staged corpus, Multi-Agent
+  Supervisor routing docs vs. data, evaluated with a recorded ledger.
+  Advanced. 4 quests / 8 tasks / 900 pts.
+
+The full catalog — progression map, per-pack permissions matrix, operating
+steps, versioning — lives in
+[`quest_packs/built_in/README.md`](quest_packs/built_in/README.md).
 
 Authoring-time check: `python scripts/verify_pack_sql.py <pack> --warehouse-id
 <id> --catalog <writable_catalog>` runs a pack's seeds, SQL solutions, and SQL
