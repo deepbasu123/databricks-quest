@@ -95,6 +95,30 @@ Event/GameDay). Start with the health endpoint, then work down by symptom.
   check each team's `team_catalog`/`team_schema` and the event's
   `config_json.resource_namespace`.
 
+- **A `databricks_sdk`/`rest_api` check keeps returning `manual` (pending host
+  review) when you expected auto-grading** — the check ran into a runtime
+  problem and degraded by design. Look at `validation_results.private_message`
+  in the host attempts inspector; the usual cause is a missing grant for the
+  **app service principal**: serving-endpoint CAN_VIEW (gateway checks), Genie
+  space visibility (curation/conversation checks), Database API reads
+  (Lakebase checks), or the beta tiles surface (Agent Bricks checks). The
+  per-pack permissions matrix lives in
+  [`quest_packs/built_in/README.md`](../quest_packs/built_in/README.md). A
+  *spike* of manual outcomes mid-event is the #1 signal a permission is wrong —
+  fix the grant and have teams resubmit; nothing is lost.
+
+- **Bootstrap refused with `RESOURCE_CAP_EXCEEDED` / `OUTSIDE_NAMESPACE`
+  blockers** — the workspace-resource plan is fail-closed: names must start
+  with the event prefix `quest-<slug>-` and stay within the per-type caps
+  (1 Lakebase instance, 1 vector search endpoint, 32 serving endpoints). Fix
+  the pack's `resources.workspace` templates; nothing executed.
+
+- **`rest_api` tasks slow under load** — every submit invokes the team's
+  model. The per-attempt rate limit (`app/rate_limit.py`) is the throttle;
+  for shared endpoints also set a gateway rate limit so one team's resubmit
+  loop can't starve the model. Budget model latency × concurrent submits when
+  sizing the event.
+
 ---
 
 ## Multi-workspace federation

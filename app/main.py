@@ -1060,12 +1060,17 @@ async def remove_admin(email: str, user: str = Depends(require_admin)):
 
 class QuestPackPayload(BaseModel):
     manifest_yaml: str
+    strict: bool = False
 
 
 @app.post("/api/host/quest-packs/lint")
 async def host_lint_quest_pack(body: QuestPackPayload, user: str = Depends(require_host)):
-    """Lint a quest pack manifest without persisting anything."""
-    return quest_pack_loader.lint_text(body.manifest_yaml)
+    """Lint a quest pack manifest without persisting anything.
+
+    ``strict: true`` applies the playability gate (solutions present on auto
+    tasks, manual fallbacks paired, unknown check names are errors).
+    """
+    return quest_pack_loader.lint_text(body.manifest_yaml, strict=body.strict)
 
 
 @app.post("/api/host/quest-packs/import")
@@ -2107,7 +2112,30 @@ def _build_resource_plan(ev: Dict[str, Any], action: str) -> List[Dict[str, Any]
     teams = events_repo.list_teams(ev["event_id"])
     if action == "reset":
         return rsvc.build_reset_plan(ev, teams)
-    return rsvc.build_bootstrap_plan(ev, teams, _pack_resources(ev))
+    if action == "teardown":
+        registry = resources_repo.list_for_event(ev["event_id"])
+        return (
+            rsvc.build_workspace_teardown_plan(ev, registry)
+            + rsvc.build_reset_plan(ev, teams)
+            + rsvc.build_catalog_teardown_plan(ev, teams)
+        )
+    resources = _pack_resources(ev)
+    return rsvc.build_bootstrap_plan(ev, teams, resources) + rsvc.build_workspace_plan(
+        ev, teams, resources
+    )
+
+
+def _split_plan(plan: List[Dict[str, Any]]):
+    """Split a mixed plan into (sql_items, workspace_items) by ``kind``."""
+    sql_items = [i for i in plan if i.get("kind", "sql") != "workspace"]
+    ws_items = [i for i in plan if i.get("kind") == "workspace"]
+    return sql_items, ws_items
+
+
+def _workspace_executor():
+    from services.resource_service import SDKWorkspaceExecutor
+
+    return SDKWorkspaceExecutor()
 
 
 @app.get("/api/host/events/{event_id}/resources")
@@ -2142,7 +2170,7 @@ async def host_plan_resources(
     """
     resolved_event_id = _resolve_event_or_404(event_id)
     ev = _event_for_resources(resolved_event_id)
-    action = body.action if body.action in ("bootstrap", "reset") else "bootstrap"
+    action = body.action if body.action in ("bootstrap", "reset", "teardown") else "bootstrap"
     try:
         plan = _build_resource_plan(ev, action)
     except ns.NamespaceError as exc:
@@ -2189,15 +2217,32 @@ async def host_bootstrap_resources(
     except ns.NamespaceError as exc:
         raise HTTPException(status_code=400, detail={"error": {"code": exc.code, "message": str(exc)}})
 
-    executor = _resource_executor()
-    result = default_resource_service.execute_plan(
-        ev, plan, executor, created_by=user
-    )
+    sql_plan, ws_plan = _split_plan(plan)
+    # Any blocker (SQL or workspace) refuses the whole bootstrap before
+    # anything runs — same fail-closed stance as PR08.
+    all_blockers = rsvc.plan_blockers(plan)
+    if all_blockers:
+        result: Dict[str, Any] = {"ok": False, "executed": [], "blockers": all_blockers}
+    else:
+        executor = _resource_executor()
+        result = default_resource_service.execute_plan(
+            ev, sql_plan, executor, created_by=user
+        )
+        # SQL success is recorded separately: the namespaces below describe
+        # schemas the SQL lane just created, so a later workspace-op failure
+        # must not suppress persisting them.
+        result["sql_ok"] = bool(result.get("ok"))
+        if ws_plan and result.get("ok"):
+            ws_result = default_resource_service.execute_workspace_plan(
+                ev, ws_plan, _workspace_executor(), created_by=user
+            )
+            result["workspace"] = ws_result
+            result["ok"] = result["ok"] and ws_result["ok"]
 
     # Persist each team's resolved namespace so validator-variable resolution
     # and the host resource view see a stable, materialized target (the same
     # value the plan just provisioned), rather than re-deriving it per request.
-    if result.get("ok"):
+    if result.get("sql_ok"):
         try:
             teams = events_repo.list_teams(resolved_event_id)
             for target in ns.team_targets(ev, teams):
@@ -2262,6 +2307,69 @@ async def host_reset_resources(
         payload={"ok": result["ok"], "dropped": len(plan)},
     )
     return {"action": "reset", **result}
+
+
+@app.post("/api/host/events/{event_id}/resources/teardown")
+async def host_teardown_resources(
+    event_id: str, body: ResourceResetPayload, user: str = Depends(require_host)
+):
+    """Whole-event teardown: registry-recorded workspace resources, every team
+    schema, then the event's own catalog. Requires ``confirm: true``.
+
+    Deletion is doubly gated — workspace resources must be registry-recorded
+    AND namespace-prefixed; the catalog is the namespace-computed one only.
+    Any out-of-namespace target refuses the entire plan."""
+    resolved_event_id = _resolve_event_or_404(event_id)
+    ev = _event_for_resources(resolved_event_id)
+    if not body.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "CONFIRM_REQUIRED",
+                              "message": "Teardown is destructive — resend with confirm=true."}},
+        )
+    try:
+        plan = _build_resource_plan(ev, "teardown")
+    except ns.NamespaceError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"code": exc.code, "message": str(exc)}})
+
+    blockers = rsvc.plan_blockers(plan)
+    if blockers:
+        record_audit(
+            action="resources.teardown.refused", actor_user_id=user, event_id=resolved_event_id,
+            target_type="event", target_id=resolved_event_id,
+            payload={"blockers": [b.get("target") for b in blockers]},
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={"error": {"code": "OUTSIDE_NAMESPACE",
+                              "message": "Teardown refused: a target is outside the event namespace.",
+                              "blockers": blockers}},
+        )
+
+    sql_plan, ws_plan = _split_plan(plan)
+    # Build the SQL executor BEFORE any destructive workspace op runs: a
+    # missing warehouse must abort the teardown up front, not after
+    # endpoints/instances have already been deleted.
+    executor = _resource_executor()
+    ws_result: Dict[str, Any] = {"ok": True, "executed": []}
+    if ws_plan:
+        ws_result = default_resource_service.execute_workspace_plan(
+            ev, ws_plan, _workspace_executor(), created_by=user
+        )
+    sql_result = default_resource_service.execute_plan(ev, sql_plan, executor, created_by=user)
+    ok = bool(ws_result.get("ok")) and bool(sql_result.get("ok"))
+    record_audit(
+        action="resources.teardown", actor_user_id=user, event_id=resolved_event_id,
+        target_type="event", target_id=resolved_event_id,
+        payload={"ok": ok, "workspace_items": len(ws_plan), "sql_items": len(sql_plan)},
+    )
+    return {
+        "action": "teardown",
+        "ok": ok,
+        "workspace": ws_result,
+        "executed": sql_result.get("executed", []),
+        "blockers": [],
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -1,138 +1,304 @@
 schema_version: "1.0"
+
 pack:
-  slug: ai-bi-intelligence-challenge
-  title: AI/BI Intelligence Challenge
-  version: "0.1.0"
-  description: A two-hour GameDay where teams create governed, trusted business intelligence on Databricks.
-  audience: [analysts, data_engineers, solution_architects]
+  slug: ai-bi-gameday
+  title: "AI/BI GameDay"
+  version: "1.1.0"
+  description: >
+    A hands-on GameDay where teams stand up a governed analytics layer, build an
+    AI/BI dashboard, and put a Genie space in front of it. Designed to run on a
+    serverless SQL warehouse with per-team Unity Catalog schemas provisioned by
+    the host (PR08 resource bootstrap).
+  audience: ["solution-engineers", "data-analysts", "customer-workshops"]
   duration_minutes: 120
   difficulty: intermediate
-  owner: databricks-field
+  owner: field-enablement
 
 scenario:
-  title: Orbit Travel Board Briefing
-  narrative_md: |
-    Orbit Travel's leadership team needs a trusted view of bookings, margin, and customer segments.
-    Data is scattered and quality is questionable. Your team must build a governed foundation and
-    produce an executive-ready intelligence layer before the board meeting.
+  setup: >
+    Northwind Outfitters just landed their raw sales feed in the lakehouse. Each
+    team owns a Unity Catalog schema (${team_catalog}.${team_schema}) and must
+    turn the raw feed into trustworthy revenue insight that a sales leader can
+    self-serve through AI/BI and Genie.
 
 learning_objectives:
-  - Build governed Delta tables
-  - Create useful analytical outputs
-  - Validate quality and lineage
-  - Create an AI/BI experience
+  - "Land and model data into a governed Unity Catalog schema."
+  - "Write deterministic, auditable SQL aggregations."
+  - "Publish an AI/BI dashboard and a Genie space over team-owned data."
+  - "Reason about metric definitions and data quality."
 
 capabilities_required:
-  - unity_catalog
-  - sql_warehouse
-  - dashboards
+  - "Serverless SQL warehouse"
+  - "Unity Catalog schema per team"
+  - "AI/BI dashboards"
+  - "Genie spaces"
 
+# These statements run per team during host bootstrap (PR08). They reference
+# only the team's own schema via the server-resolved template variables, so the
+# namespace guard keeps every team isolated. The feed is deterministically
+# generated (no rand()) — 200 orders across 4 regions and 6 products — so the
+# revenue model is non-trivial and validator outcomes are stable.
 resources:
-  team_namespace:
-    catalog_template: "${event_catalog}"
-    schema_template: "team_${team_slug}"
-  seed_data:
-    - name: bookings_raw
-      type: csv
-      target: "${team_catalog}.${team_schema}.bookings_raw"
+  seed_sql:
+    - >
+      CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.raw_sales AS
+      SELECT
+        CAST(id AS INT) AS order_id,
+        element_at(array('EMEA','AMER','APAC','LATAM'), CAST(id % 4 AS INT) + 1) AS region,
+        element_at(array('Trail Jacket','Summit Pack','Glacier Tent','Ridge Boots',
+                         'Basecamp Stove','Alpine Bottle'), CAST(id % 6 AS INT) + 1) AS product,
+        CAST(20 + (id * 37) % 480 AS DOUBLE) + 0.99 AS amount,
+        timestampadd(HOUR, -CAST(id % 72 AS INT), current_timestamp()) AS order_ts
+      FROM range(200)
 
 scoring_defaults:
-  max_attempts_without_penalty: 3
-  attempt_penalty_after_max: -5
-  hints_enabled: true
+  base_points: 100
+  first_blood_bonus: 25
 
 quests:
-  - slug: q1-foundation
-    title: Build the Governed Foundation
-    category: governance
-    difficulty: beginner
-    narrative_md: |
-      The business does not trust the raw booking data. Create a governed foundation.
-    unlock_rule:
-      type: always
+  - slug: warm-up
+    title: "Warm-up: connect and orient"
+    category: foundations
+    difficulty: easy
+    base_points: 100
+    sort_order: 1
+    narrative_md: >
+      Before the race begins, make sure your team can reach the warehouse and
+      that your schema (${team_catalog}.${team_schema}) is ready.
+    facilitator_notes: >
+      The connectivity check is warehouse-independent (SELECT 1) so it passes for
+      every team regardless of bootstrap. Use it to confirm the warehouse binding
+      before you start the timed quests.
     tasks:
-      - slug: create-bronze-table
-        title: Create bookings bronze table
-        objective: Create a managed Delta table named `bookings_bronze` in your team schema.
-        instructions_md: |
-          Use your assigned team schema and create a managed Delta table `bookings_bronze`
-          from the seeded `bookings_raw` data.
-        success_criteria_md: |
-          The table exists and contains at least 1,000 rows.
-        points: 100
+      - slug: connectivity-check
+        title: "Confirm warehouse connectivity"
+        objective: "Prove your team can execute SQL on the event warehouse."
+        instructions_md: >
+          Run the warm-up check. This simply confirms your warehouse is reachable.
+        success_criteria_md: "A trivial query returns 1."
+        points: 25
+        validation_mode: auto
         validators:
-          - id: bronze-row-count
+          - id: connectivity
             type: sql_assertion
             mode: sync
-            statement: |
-              SELECT COUNT(*) AS cnt
-              FROM ${team_catalog}.${team_schema}.bookings_bronze
-            expect:
-              operator: ">="
-              value: 1000
-            timeout_seconds: 15
-        hints:
-          - title: Start with raw data
-            penalty_points: -10
-            body_md: Look for `bookings_raw` in your team schema.
-
-      - slug: silver-quality
-        title: Remove invalid bookings
-        objective: Create `bookings_silver` with invalid booking/customer records removed.
-        points: 150
-        validators:
-          - id: no-null-keys
-            type: sql_assertion
-            mode: sync
-            statement: |
-              SELECT COUNT(*) AS invalid_rows
-              FROM ${team_catalog}.${team_schema}.bookings_silver
-              WHERE booking_id IS NULL OR customer_id IS NULL
+            statement: "SELECT 1"
             expect:
               operator: "="
-              value: 0
-
-  - slug: q2-business-output
-    title: Create the Executive Metric Layer
-    category: analytics
-    difficulty: intermediate
-    unlock_rule:
-      type: quest_completed
-      quest_slug: q1-foundation
-    tasks:
-      - slug: margin-summary
-        title: Build a margin summary table
-        objective: Create `margin_summary_gold` with margin by region and product family.
-        points: 200
+              value: 1
+        hints:
+          - title: "Stuck?"
+            body_md: "Ask your host which warehouse is bound to the event."
+            penalty_points: -5
+        solutions:
+          - skip: "Validator is self-contained (SELECT 1); no setup action needed."
+      - slug: schema-ready
+        title: "Verify your team schema exists"
+        objective: "Confirm the host has bootstrapped your team's schema."
+        instructions_md: >
+          Your team works inside `${team_catalog}.${team_schema}`. Verify the raw
+          feed landed.
+        success_criteria_md: "The raw_sales table has at least 150 rows."
+        points: 75
+        validation_mode: auto
         validators:
-          - id: margin-summary-exists
+          - id: raw-rows-present
             type: sql_assertion
             mode: sync
-            statement: |
-              SELECT COUNT(*) AS cnt
-              FROM ${team_catalog}.${team_schema}.margin_summary_gold
+            statement: "SELECT count(*) FROM ${team_catalog}.${team_schema}.raw_sales"
             expect:
               operator: ">="
-              value: 10
+              value: 150
+        hints:
+          - title: "No rows?"
+            body_md: "Ask the host to run resource bootstrap for your event."
+            penalty_points: -10
+        solutions:
+          - skip: "raw_sales is created by host bootstrap (resources.seed_sql)."
 
-  - slug: q3-ai-bi
-    title: Deliver the Intelligence Experience
-    category: ai_bi
+  - slug: build-the-model
+    title: "Build the trusted model"
+    category: modeling
     difficulty: intermediate
+    base_points: 200
+    sort_order: 2
+    unlock_rule:
+      type: quest_completed
+      quest_slug: warm-up
+    narrative_md: >
+      Turn the raw feed into a clean revenue model the whole team can rely on.
+    facilitator_notes: >
+      Teams should create a curated table or view named `revenue_by_region` in
+      their own schema. The SQL validators only read from the team schema.
     tasks:
-      - slug: dashboard-created
-        title: Create an executive dashboard
-        objective: Create a Databricks dashboard over your gold table.
-        points: 200
+      - slug: curate-revenue
+        title: "Create revenue_by_region"
+        objective: "Aggregate raw sales into revenue per region."
+        instructions_md: >
+          Create a table or view `${team_catalog}.${team_schema}.revenue_by_region`
+          with one row per region and a `total_amount` column.
+        success_criteria_md: "revenue_by_region exists and has at least one region."
+        points: 100
+        validation_mode: auto
         validators:
-          - id: dashboard-created
+          - id: revenue-rows
+            type: sql_assertion
+            mode: sync
+            statement: "SELECT count(*) FROM ${team_catalog}.${team_schema}.revenue_by_region"
+            expect:
+              operator: ">="
+              value: 1
+        hints:
+          - title: "Pattern"
+            body_md: "GROUP BY region and SUM(amount) AS total_amount."
+            penalty_points: -10
+        solutions:
+          - sql: >
+              CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.revenue_by_region AS
+              SELECT region, sum(amount) AS total_amount
+              FROM ${team_catalog}.${team_schema}.raw_sales
+              GROUP BY region
+      - slug: reconcile-total
+        title: "Reconcile total revenue"
+        objective: "Your model's total must match the raw feed."
+        instructions_md: >
+          The sum of `total_amount` in revenue_by_region must equal the sum of
+          `amount` in raw_sales.
+        success_criteria_md: "Totals reconcile exactly."
+        points: 100
+        validation_mode: auto
+        validators:
+          - id: totals-match
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT
+                (SELECT round(sum(total_amount),2) FROM ${team_catalog}.${team_schema}.revenue_by_region)
+                = (SELECT round(sum(amount),2) FROM ${team_catalog}.${team_schema}.raw_sales)
+            expect:
+              operator: is_true
+        hints:
+          - title: "Off by a bit?"
+            body_md: "Watch for filters that drop rows from your aggregation."
+            penalty_points: -15
+        solutions:
+          - skip: "Follows from the curate-revenue solution (no rows filtered)."
+
+  - slug: ship-ai-bi
+    title: "Ship AI/BI + Genie"
+    category: presentation
+    difficulty: intermediate
+    base_points: 200
+    sort_order: 3
+    unlock_rule:
+      type: quest_completed
+      quest_slug: build-the-model
+    narrative_md: >
+      Put a self-serve experience in front of your trusted model: an AI/BI
+      dashboard and a Genie space a sales leader could actually use.
+    facilitator_notes: >
+      The dashboard and Genie tasks pair executable databricks_sdk checks with
+      host review: the SDK check auto-grades when the workspace client can run,
+      and the host confirms the work regardless. The final Genie task is fully
+      automated — the recorded answer must reconcile with the team's model.
+    tasks:
+      - slug: publish-dashboard
+        title: "Publish an AI/BI dashboard"
+        objective: "Create and publish a dashboard over revenue_by_region."
+        instructions_md: >
+          Build an AI/BI dashboard with at least one chart of revenue by region,
+          include your team name (`${team_slug}`) in the dashboard title, and
+          publish it. Share the link with your host.
+        success_criteria_md: "A published dashboard named for your team exists."
+        points: 100
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: dashboard-exists
             type: databricks_sdk
             mode: sync
-            check: dashboard_exists_for_team
+            check: dashboard_published
             params:
               name_contains: "${team_slug}"
-              created_after: "${event_start}"
+          - id: host-confirm-dashboard
+            type: manual
+            mode: sync
         hints:
-          - title: Dashboard hint
-            penalty_points: -20
-            body_md: Build the dashboard from the Databricks SQL editor or dashboard experience and include your team slug in the name.
+          - title: "Where to start"
+            body_md: "Use the SQL editor result's 'Create dashboard' action."
+            penalty_points: -10
+        solutions:
+          - workspace_op:
+              op: publish_dashboard
+              name: "${team_slug} revenue by region"
+              dataset_sql: "SELECT * FROM ${team_catalog}.${team_schema}.revenue_by_region"
+      - slug: stand-up-genie
+        title: "Stand up a Genie space"
+        objective: "Create a Genie space scoped to your team's model."
+        instructions_md: >
+          Create a Genie space over `${team_catalog}.${team_schema}` with your
+          team name (`${team_slug}`) in the title, and ask it one revenue
+          question. Show the host the answer.
+        success_criteria_md: "A team-named Genie space answers a revenue question."
+        points: 100
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: genie-exists
+            type: databricks_sdk
+            mode: sync
+            check: genie_space_exists
+            params:
+              name_contains: "${team_slug}"
+          - id: host-confirm-genie
+            type: manual
+            mode: sync
+        hints:
+          - title: "Scope it"
+            body_md: "Point the Genie space at your team schema only."
+            penalty_points: -10
+        solutions:
+          - workspace_op:
+              op: create_genie_space
+              name: "${team_slug} revenue genie"
+              tables:
+                - "${team_catalog}.${team_schema}.revenue_by_region"
+      - slug: genie-first-answer
+        title: "Prove the Genie's first answer"
+        objective: "Show the Genie answers a revenue question correctly."
+        instructions_md: >
+          Ask your Genie space for total revenue in one region of your choice.
+          Record what it told you into
+          `${team_catalog}.${team_schema}.genie_answer_check` with columns
+          `region STRING, total_amount DOUBLE`. The recorded answer must match
+          your revenue_by_region model exactly.
+        success_criteria_md: >
+          genie_answer_check contains at least one row that reconciles with
+          revenue_by_region.
+        points: 50
+        validation_mode: auto
+        validators:
+          - id: genie-answer-reconciles
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) FROM ${team_catalog}.${team_schema}.genie_answer_check g
+              JOIN ${team_catalog}.${team_schema}.revenue_by_region r
+                ON g.region = r.region
+               AND round(g.total_amount, 2) = round(r.total_amount, 2)
+            expect:
+              operator: ">="
+              value: 1
+        hints:
+          - title: "Wrong number?"
+            body_md: >
+              A mismatch is a curation gap, not a trick: check whether the Genie
+              summed the right column, then re-ask. CREATE OR REPLACE TABLE
+              genie_answer_check AS SELECT ... to record the answer.
+            penalty_points: -10
+        solutions:
+          - sql: >
+              CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.genie_answer_check AS
+              SELECT region, total_amount
+              FROM ${team_catalog}.${team_schema}.revenue_by_region
+              ORDER BY total_amount DESC LIMIT 1

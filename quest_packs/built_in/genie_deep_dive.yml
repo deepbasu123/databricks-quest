@@ -1,0 +1,447 @@
+schema_version: "1.0"
+
+pack:
+  slug: genie-deep-dive
+  title: "Genie Deep Dive: Teach the Genie"
+  version: "1.0.0"
+  description: >
+    An advanced GameDay where teams stand up an AI/BI Genie space over their
+    own curated model, teach it the business through instructions and sample
+    questions, prove its accuracy against a seeded 10-question benchmark, and
+    wire it into a workflow through the Conversation API. Recommended after
+    ai-bi-gameday. Teams need permission to create Genie spaces; the app
+    identity needs visibility into team spaces for the curation checks
+    (otherwise those checks route to host review).
+  audience: ["solution-engineers", "analytics-engineers", "ai-bi-champions"]
+  duration_minutes: 150
+  difficulty: advanced
+  owner: field-enablement
+
+scenario:
+  setup: >
+    Northwind Outfitters' execs loved your dashboard — so much that they fired
+    their report backlog and hired the Genie instead. Problem: the Genie keeps
+    confusing revenue with list price and thinks APAC is a product. You are the
+    new Genie trainers. Model the domain, curate the space, and pass the exec
+    pop quiz: by end of session the Genie must answer at least 8 of the 10
+    benchmark questions correctly — and answer one through the API.
+
+learning_objectives:
+  - "Model a curated semantic layer (net_revenue) for natural-language analytics."
+  - "Create and scope a Genie space to governed team data."
+  - "Curate instructions and sample questions, and measure their effect."
+  - "Benchmark Genie answer accuracy against a deterministic answer key."
+  - "Operate Genie programmatically via the Conversation API."
+
+capabilities_required:
+  - "Serverless SQL warehouse"
+  - "Unity Catalog schema per team"
+  - "AI/BI Genie spaces (create + curate per team)"
+  - "Genie Conversation API access"
+
+# Deterministic Northwind model (no rand()): 500 orders with discounts and
+# returns, plus a benchmark answer key COMPUTED FROM the seeded data — so the
+# quiz is checkable no matter when the event runs. The key is intentionally
+# visible to players: the skill being scored is curation, not trivia.
+resources:
+  seed_sql:
+    - >
+      CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.orders AS
+      SELECT
+        CAST(id AS INT) AS order_id,
+        element_at(array('EMEA','AMER','APAC','LATAM'), CAST(id % 4 AS INT) + 1) AS region,
+        element_at(array('Trail Jacket','Summit Pack','Glacier Tent','Ridge Boots',
+                         'Basecamp Stove','Alpine Bottle'), CAST(id % 6 AS INT) + 1) AS product,
+        CAST(1 + id % 5 AS INT) AS quantity,
+        CAST(20 + (id * 37) % 180 AS DOUBLE) + 0.99 AS unit_price,
+        CAST(id % 4 AS DOUBLE) / 20.0 AS discount,
+        (id % 11 = 0) AS returned,
+        timestampadd(HOUR, -CAST(id % 168 AS INT), current_timestamp()) AS order_ts
+      FROM range(500)
+    - >
+      CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.benchmark_questions AS
+      WITH net AS (
+        SELECT region, product,
+               quantity * unit_price * (1 - discount) AS net_revenue
+        FROM ${team_catalog}.${team_schema}.orders
+        WHERE NOT returned
+      )
+      SELECT 1 AS question_id,
+             'What is total net revenue for EMEA?' AS question,
+             round(sum(CASE WHEN region = 'EMEA' THEN net_revenue END), 2) AS expected_value
+      FROM net
+      UNION ALL SELECT 2, 'What is total net revenue for AMER?',
+             round(sum(CASE WHEN region = 'AMER' THEN net_revenue END), 2) FROM net
+      UNION ALL SELECT 3, 'What is total net revenue for APAC?',
+             round(sum(CASE WHEN region = 'APAC' THEN net_revenue END), 2) FROM net
+      UNION ALL SELECT 4, 'What is total net revenue for LATAM?',
+             round(sum(CASE WHEN region = 'LATAM' THEN net_revenue END), 2) FROM net
+      UNION ALL SELECT 5, 'What is total net revenue across all regions?',
+             round(sum(net_revenue), 2) FROM net
+      UNION ALL SELECT 6, 'How many non-returned orders are there?',
+             CAST(count(*) AS DOUBLE) FROM net
+      UNION ALL SELECT 7, 'How many distinct products have been sold (excluding returns)?',
+             CAST(count(DISTINCT product) AS DOUBLE) FROM net
+      UNION ALL SELECT 8, 'What is the highest single-region net revenue?',
+             (SELECT round(max(r), 2)
+              FROM (SELECT sum(net_revenue) AS r FROM net GROUP BY region))
+      UNION ALL SELECT 9, 'What is the average net revenue per non-returned order?',
+             round(avg(net_revenue), 2) FROM net
+      UNION ALL SELECT 10, 'How many orders were returned?',
+             (SELECT CAST(count(*) AS DOUBLE)
+              FROM ${team_catalog}.${team_schema}.orders WHERE returned)
+
+scoring_defaults:
+  base_points: 100
+  first_blood_bonus: 25
+
+quests:
+  - slug: stand-it-up
+    title: "A Genie of your own"
+    category: foundations
+    difficulty: intermediate
+    base_points: 175
+    sort_order: 1
+    narrative_md: >
+      A Genie is only as good as the model underneath it. Define net_revenue
+      once, correctly, then give the Genie a home scoped to your team's data.
+    facilitator_notes: >
+      net_revenue = quantity * unit_price * (1 - discount), excluding returned
+      orders — write this on the board; it is the definition everything else
+      reconciles against. Teams need Genie space create permission. The space
+      check matches on the team slug in the title — enforce the naming
+      convention at kickoff.
+    tasks:
+      - slug: model-the-domain
+        title: "Create the sales_curated model"
+        objective: "One governed definition of net revenue."
+        instructions_md: >
+          Create `${team_catalog}.${team_schema}.sales_curated` (view or table)
+          over orders with a `net_revenue` column: quantity × unit_price ×
+          (1 − discount), excluding returned orders. It must reconcile exactly
+          with the raw feed.
+        success_criteria_md: "sales_curated reconciles with orders to the cent."
+        points: 75
+        validation_mode: auto
+        validators:
+          - id: model-reconciles
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT
+                (SELECT round(sum(net_revenue), 2) FROM ${team_catalog}.${team_schema}.sales_curated)
+                = (SELECT round(sum(quantity * unit_price * (1 - discount)), 2)
+                   FROM ${team_catalog}.${team_schema}.orders WHERE NOT returned)
+            expect:
+              operator: is_true
+        hints:
+          - title: "Off by a few cents?"
+            body_md: "Round once at the end, not per row; exclude returned orders."
+            penalty_points: -10
+        solutions:
+          - sql: >
+              CREATE OR REPLACE VIEW ${team_catalog}.${team_schema}.sales_curated AS
+              SELECT order_id, region, product, order_ts,
+                     quantity * unit_price * (1 - discount) AS net_revenue
+              FROM ${team_catalog}.${team_schema}.orders
+              WHERE NOT returned
+      - slug: create-space
+        title: "Create your Genie space"
+        objective: "A Genie space scoped to your curated model."
+        instructions_md: >
+          Create a Genie space titled exactly `${team_slug} sales genie`,
+          scoped to `${team_catalog}.${team_schema}` with BOTH the
+          sales_curated model and the raw orders table (the benchmark includes
+          a returns question that only orders can answer). Ask it one warm-up
+          question.
+        success_criteria_md: "A Genie space named for your team exists."
+        points: 100
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: space-exists
+            type: databricks_sdk
+            mode: sync
+            check: genie_space_exists
+            params:
+              name_contains: "${team_slug} sales"
+          - id: host-confirm-space
+            type: manual
+            mode: sync
+        hints:
+          - title: "Where"
+            body_md: "SQL → Genie → New. Add sales_curated AND orders as data sources."
+            penalty_points: -10
+        solutions:
+          - workspace_op:
+              op: create_genie_space
+              name: "${team_slug} sales genie"
+              tables:
+                - "${team_catalog}.${team_schema}.sales_curated"
+                - "${team_catalog}.${team_schema}.orders"
+
+  - slug: curate
+    title: "Teach it the business"
+    category: curation
+    difficulty: advanced
+    base_points: 250
+    sort_order: 2
+    unlock_rule:
+      type: quest_completed
+      quest_slug: stand-it-up
+    narrative_md: >
+      Out of the box the Genie guesses. Curated, it knows. Give it the
+      net_revenue definition as an instruction and seed it with the questions
+      your execs actually ask.
+    facilitator_notes: >
+      The curation checks read the space's serialized export through the app
+      identity; if the app can't see a team's space they route to host review —
+      have teams demo their curation panel in that case. Budget ~20 minutes of
+      iteration here; it pays off in the benchmark quest.
+    tasks:
+      - slug: add-instructions
+        title: "Add the net_revenue instruction"
+        objective: "The Genie must know what revenue means here."
+        instructions_md: >
+          In your space's curation panel, add a general instruction that defines
+          net revenue (quantity × unit_price × (1 − discount), excluding
+          returns) and tells the Genie to prefer sales_curated.
+        success_criteria_md: "The space has non-empty instructions."
+        points: 125
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: space-instructed
+            type: databricks_sdk
+            mode: sync
+            check: genie_space_curated
+            params:
+              name_contains: "${team_slug} sales"
+              require_instructions: true
+          - id: host-confirm-instructions
+            type: manual
+            mode: sync
+        hints:
+          - title: "What to write"
+            body_md: >
+              State the formula, name the column, and say which table to use.
+              Instructions are read on every question — short and precise wins.
+            penalty_points: -15
+        solutions:
+          - workspace_op:
+              op: curate_genie_space
+              name: "${team_slug} sales genie"
+              instructions: >
+                Net revenue means quantity * unit_price * (1 - discount),
+                excluding returned orders. Always use sales_curated and its
+                net_revenue column for revenue questions.
+              sample_questions:
+                - "What is total net revenue for EMEA?"
+                - "What is total net revenue across all regions?"
+                - "How many orders were returned?"
+      - slug: seed-sample-questions
+        title: "Seed the exec questions"
+        objective: "At least three curated sample questions on team data."
+        instructions_md: >
+          Add at least three sample questions to your space (start from the
+          benchmark list — that's what the execs will ask) and confirm the
+          space is scoped to your sales_curated model.
+        success_criteria_md: "≥3 sample questions and ≥1 scoped table."
+        points: 125
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: space-curated
+            type: databricks_sdk
+            mode: sync
+            check: genie_space_curated
+            params:
+              name_contains: "${team_slug} sales"
+              min_sample_questions: 3
+              min_tables: 1
+          - id: host-confirm-curation
+            type: manual
+            mode: sync
+        hints:
+          - title: "Pick wisely"
+            body_md: "Sample questions teach phrasing; pick ones whose SQL you can verify."
+            penalty_points: -10
+        solutions:
+          - skip: "Sample questions are set by the curate_genie_space step above."
+
+  - slug: benchmark
+    title: "The pop quiz"
+    category: proof
+    difficulty: advanced
+    base_points: 300
+    sort_order: 3
+    unlock_rule:
+      type: quest_completed
+      quest_slug: curate
+    narrative_md: >
+      Time to grade the Genie. The answer key is on the table — literally:
+      benchmark_questions holds 10 questions with expected values computed from
+      your data. Ask the Genie each one and record what it said. 8 out of 10
+      passes. Wrong answers are curation gaps: fix the space and re-ask.
+    facilitator_notes: >
+      The validator joins recorded answers to the answer key — teams cannot
+      pass by marking answers correct, the numbers must match to the cent.
+      The key being visible is intentional (the skill is curation, not
+      trivia): say so out loud, and watch for teams typing expected values in
+      without asking the Genie — the host spot-check (ask a team to re-run one
+      question live) keeps it honest.
+    tasks:
+      - slug: run-benchmark
+        title: "Run the 10-question benchmark"
+        objective: "The Genie answers at least 8 of 10 correctly."
+        instructions_md: >
+          Ask your Genie each question in
+          `${team_catalog}.${team_schema}.benchmark_questions` and record its
+          numeric answers into
+          `${team_catalog}.${team_schema}.genie_benchmark_results`
+          (`question_id INT, genie_answer DOUBLE`). At least 8 must match the
+          expected values exactly (to 2 decimal places).
+        success_criteria_md: "≥8 of 10 recorded answers match the key."
+        points: 200
+        validation_mode: auto
+        validators:
+          - id: benchmark-accuracy
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) FROM ${team_catalog}.${team_schema}.genie_benchmark_results r
+              JOIN ${team_catalog}.${team_schema}.benchmark_questions q
+                ON r.question_id = q.question_id
+               AND round(r.genie_answer, 2) = round(q.expected_value, 2)
+            expect:
+              operator: ">="
+              value: 8
+        hints:
+          - title: "Genie got it wrong?"
+            body_md: >
+              That's the exercise: the miss is a curation gap. Add an
+              instruction or a sample question that fixes the phrasing, then
+              re-ask. Don't fight the model — teach it.
+            penalty_points: -20
+        solutions:
+          - sql: >
+              CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.genie_benchmark_results AS
+              SELECT question_id, expected_value AS genie_answer
+              FROM ${team_catalog}.${team_schema}.benchmark_questions
+      - slug: fix-the-misses
+        title: "Perfect score"
+        objective: "All 10 answers match after re-curation."
+        instructions_md: >
+          Close the gaps: after improving your curation, re-ask the missed
+          questions and update genie_benchmark_results until all 10 match.
+        success_criteria_md: "10 of 10 recorded answers match the key."
+        points: 100
+        validation_mode: auto
+        validators:
+          - id: benchmark-perfect
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) FROM ${team_catalog}.${team_schema}.genie_benchmark_results r
+              JOIN ${team_catalog}.${team_schema}.benchmark_questions q
+                ON r.question_id = q.question_id
+               AND round(r.genie_answer, 2) = round(q.expected_value, 2)
+            expect:
+              operator: ">="
+              value: 10
+        hints:
+          - title: "The stubborn one"
+            body_md: >
+              Aggregation questions (averages, counts) usually miss because of
+              the returns filter — make the instruction explicit about it.
+            penalty_points: -10
+        solutions:
+          - skip: "The run-benchmark solution records all 10 matching answers."
+
+  - slug: operationalize
+    title: "Genie as an API"
+    category: operations
+    difficulty: advanced
+    base_points: 250
+    sort_order: 4
+    unlock_rule:
+      type: quest_completed
+      quest_slug: benchmark
+    narrative_md: >
+      The execs don't live in the Genie UI — their tools do. Prove the space
+      works as infrastructure: start a conversation through the Conversation
+      API and land the exchange in a table.
+    facilitator_notes: >
+      Teams call the Genie Conversation API (start-conversation + poll for the
+      answer) with their own identity — point them at the API docs in the
+      workspace. The conversation check needs the app identity to see the
+      space's conversations; it degrades to host review otherwise. The usage
+      review is a conversation about monitoring, not a checkbox.
+    tasks:
+      - slug: conversation-api
+        title: "Ask through the Conversation API"
+        objective: "One programmatic question, answered and logged."
+        instructions_md: >
+          Using the Genie Conversation API, start a conversation in your space
+          with one of the benchmark questions. Record the exchange into
+          `${team_catalog}.${team_schema}.genie_api_log`
+          (`asked_at TIMESTAMP, question STRING, answer STRING`).
+        success_criteria_md: >
+          The space shows at least one conversation and genie_api_log has the
+          exchange.
+        points: 150
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: conversation-started
+            type: databricks_sdk
+            mode: sync
+            check: genie_conversation_started
+            params:
+              name_contains: "${team_slug} sales"
+              min_conversations: 1
+          - id: api-log-recorded
+            type: sql_assertion
+            mode: sync
+            statement: "SELECT count(*) FROM ${team_catalog}.${team_schema}.genie_api_log"
+            expect:
+              operator: ">="
+              value: 1
+          - id: host-confirm-api
+            type: manual
+            mode: sync
+        hints:
+          - title: "API shape"
+            body_md: >
+              POST /api/2.0/genie/spaces/{space_id}/start-conversation, then
+              poll the message until COMPLETED and read the result attachment.
+            penalty_points: -15
+        solutions:
+          - workspace_op:
+              op: start_genie_conversation
+              space_name: "${team_slug} sales genie"
+              question: "What is total net revenue across all regions?"
+          - sql: >
+              CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.genie_api_log AS
+              SELECT current_timestamp() AS asked_at,
+                     'What is total net revenue across all regions?' AS question,
+                     'recorded by preflight' AS answer
+      - slug: usage-review
+        title: "Show the host it's monitored"
+        objective: "Demonstrate space history and one improvement you made."
+        instructions_md: >
+          Walk the host through your space's monitoring/history view: the
+          questions asked, one answer you improved through curation, and how
+          you'd keep grading the Genie after the event.
+        success_criteria_md: "Host approves the usage walkthrough."
+        points: 100
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: host-confirm-usage
+            type: manual
+            mode: sync
+        hints:
+          - title: "Talking points"
+            body_md: "History view, the before/after of one curation fix, ongoing benchmark cadence."
+            penalty_points: -5

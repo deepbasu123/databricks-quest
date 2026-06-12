@@ -89,8 +89,22 @@ def _check_template_vars(result: LintResult, loc: str, text: Optional[str]) -> N
             )
 
 
-def lint_manifest_text(manifest_yaml: str) -> LintResult:
-    """Lint a raw YAML manifest string and return a :class:`LintResult`."""
+# Validator types whose outcome is machine-decided (everything except manual).
+AUTO_VALIDATOR_TYPES = {"sql_assertion", "databricks_sdk", "workspace_api", "rest_api"}
+# Types that degrade to host review at runtime and therefore must pair with an
+# explicit manual fallback (the rule the authoring guide has always stated).
+FALLBACK_REQUIRED_TYPES = {"databricks_sdk", "workspace_api", "rest_api"}
+
+
+def lint_manifest_text(manifest_yaml: str, strict: bool = False) -> LintResult:
+    """Lint a raw YAML manifest string and return a :class:`LintResult`.
+
+    ``strict`` adds the **playability gate** used for shipped packs and CI:
+    every task must be provably playable end-to-end — auto validators carry
+    machine-executable ``solutions``, SDK/REST validators pair with a manual
+    fallback, manual-only tasks declare ``manual_validation_required``, and an
+    unknown ``databricks_sdk`` check name becomes an error instead of a warning.
+    """
     result = LintResult()
 
     # ── Pass 1: YAML syntax ──────────────────────────────────────────────────
@@ -197,9 +211,12 @@ def lint_manifest_text(manifest_yaml: str) -> LintResult:
                 validator_ids.add(validator.id)
 
                 if validator.type not in KNOWN_VALIDATOR_TYPES:
-                    result.warn(
+                    # An unknown type would SKIP silently at runtime — the
+                    # "stubbed task" failure mode — so it blocks import.
+                    result.error(
                         f"{vloc}.type",
-                        f"Unknown validator type '{validator.type}'. Known types: "
+                        f"Unknown validator type '{validator.type}'. Every type "
+                        "must have an executable backend. Known types: "
                         + ", ".join(sorted(KNOWN_VALIDATOR_TYPES)),
                     )
 
@@ -209,7 +226,7 @@ def lint_manifest_text(manifest_yaml: str) -> LintResult:
                         f"Validator mode must be 'sync' or 'async', got '{validator.mode}'.",
                     )
 
-                _lint_validator_config(result, vloc, validator)
+                _lint_validator_config(result, vloc, validator, strict=strict)
 
             for hi, hint in enumerate(task.hints):
                 hloc = f"{tloc}.hints[{hi}]"
@@ -219,6 +236,12 @@ def lint_manifest_text(manifest_yaml: str) -> LintResult:
                         "penalty_points is usually <= 0 (a penalty). "
                         f"Got {hint.penalty_points}.",
                     )
+
+            _lint_solutions(result, tloc, task)
+            if strict:
+                _lint_task_playability(result, tloc, task)
+
+    _lint_workspace_resources(result, manifest)
 
     # Unlock-rule references must point at real quest slugs.
     for qi, quest in enumerate(manifest.quests):
@@ -244,7 +267,134 @@ def lint_manifest_text(manifest_yaml: str) -> LintResult:
     return result
 
 
-def _lint_validator_config(result: LintResult, vloc: str, validator: Any) -> None:
+def _lint_workspace_resources(result: LintResult, manifest: Any) -> None:
+    """Validate optional ``resources.workspace`` entries (provisioned by PR21).
+
+    Each entry: ``type`` (known workspace resource type), ``name`` (template
+    that must carry the event slug so the rendered name passes the namespace
+    prefix guard; ``${team_slug}`` makes it per-team), optional ``spec``."""
+    resources = manifest.resources if isinstance(manifest.resources, dict) else None
+    if not resources:
+        return
+    entries = resources.get("workspace")
+    if entries is None:
+        return
+    from services.resource_service import KNOWN_WORKSPACE_RESOURCE_TYPES
+
+    if not isinstance(entries, list):
+        result.error("resources.workspace", "resources.workspace must be a list.")
+        return
+    for i, entry in enumerate(entries):
+        loc = f"resources.workspace[{i}]"
+        if not isinstance(entry, dict):
+            result.error(loc, "Each workspace resource must be a mapping.")
+            continue
+        rtype = str(entry.get("type") or "").strip()
+        if rtype not in KNOWN_WORKSPACE_RESOURCE_TYPES:
+            result.error(
+                f"{loc}.type",
+                f"Unknown workspace resource type '{rtype}'. Known: "
+                + ", ".join(sorted(KNOWN_WORKSPACE_RESOURCE_TYPES)),
+            )
+        name = str(entry.get("name") or "")
+        if not name.strip():
+            result.error(f"{loc}.name", "Workspace resource requires a 'name' template.")
+        elif "${event_slug}" not in name:
+            result.error(
+                f"{loc}.name",
+                "Workspace resource names must include '${event_slug}' (e.g. "
+                "'quest-${event_slug}-${team_slug}-gateway') so the rendered "
+                "name passes the event namespace prefix guard.",
+            )
+        else:
+            _check_template_vars(result, f"{loc}.name", name)
+        spec = entry.get("spec")
+        if spec is not None and not isinstance(spec, dict):
+            result.error(f"{loc}.spec", "Workspace resource 'spec' must be a mapping.")
+
+
+def _lint_solutions(result: LintResult, tloc: str, task: Any) -> None:
+    """Validate the host-only ``solutions`` steps when present.
+
+    Each step is a mapping with exactly one of ``sql`` (non-empty statement),
+    ``workspace_op`` (mapping with an ``op`` name), ``skip`` (a reason), or
+    ``human`` (an instruction the preflight operator performs by hand — for
+    artifacts with no stable creation API, e.g. Agent Bricks tiles; the
+    harness pauses on it in --interactive mode and reports NEEDS-HUMAN
+    otherwise, never a silent pass).
+    """
+    solutions = getattr(task, "solutions", None)
+    if solutions is None:
+        return
+    if not isinstance(solutions, list) or not solutions:
+        result.error(f"{tloc}.solutions", "solutions must be a non-empty list of steps.")
+        return
+    for si, step in enumerate(solutions):
+        sloc = f"{tloc}.solutions[{si}]"
+        if not isinstance(step, dict):
+            result.error(sloc, "Each solution step must be a mapping.")
+            continue
+        kinds = [k for k in ("sql", "workspace_op", "skip", "human") if k in step]
+        if len(kinds) != 1:
+            result.error(
+                sloc,
+                "Each solution step must have exactly one of: sql, workspace_op, skip, human.",
+            )
+            continue
+        kind = kinds[0]
+        value = step[kind]
+        if kind == "sql":
+            if not isinstance(value, str) or not value.strip():
+                result.error(f"{sloc}.sql", "sql step must be a non-empty statement.")
+            else:
+                _check_template_vars(result, f"{sloc}.sql", value)
+        elif kind == "workspace_op":
+            if not isinstance(value, dict) or not str(value.get("op") or "").strip():
+                result.error(
+                    f"{sloc}.workspace_op",
+                    "workspace_op step must be a mapping with an 'op' name.",
+                )
+        elif not isinstance(value, str) or not value.strip():
+            result.error(f"{sloc}.{kind}", f"{kind} step must carry a non-empty string.")
+
+
+def _lint_task_playability(result: LintResult, tloc: str, task: Any) -> None:
+    """Strict-mode playability gate for one task (shipped packs + CI)."""
+    types = [v.type for v in task.validators]
+    auto_types = [t for t in types if t in AUTO_VALIDATOR_TYPES]
+    has_manual = "manual" in types
+
+    # SDK/REST validators degrade to host review at runtime → the pack must
+    # declare that path explicitly (manual fallback + the review flag).
+    if any(t in FALLBACK_REQUIRED_TYPES for t in types):
+        if not has_manual or not task.manual_validation_required:
+            result.error(
+                f"{tloc}.validators",
+                "Strict: databricks_sdk/workspace_api/rest_api validators must "
+                "pair with a manual validator and manual_validation_required: true.",
+            )
+
+    # Manual-only tasks must say so — review queues key off the flag.
+    if not auto_types and not task.manual_validation_required:
+        result.error(
+            f"{tloc}.manual_validation_required",
+            "Strict: a task with no auto validators must set "
+            "manual_validation_required: true.",
+        )
+
+    # Machine playability: every auto-validated task ships executable solutions
+    # so the operator preflight can play it end-to-end.
+    if auto_types and not getattr(task, "solutions", None):
+        result.error(
+            f"{tloc}.solutions",
+            "Strict: tasks with auto validators must carry 'solutions' steps "
+            "(sql / workspace_op / skip) for the preflight harness.",
+        )
+
+
+def _lint_validator_config(
+    result: LintResult, vloc: str, validator: Any, strict: bool = False
+) -> None:
     """Type-specific validator checks."""
     vtype = validator.type
     cfg = validator.config()
@@ -272,32 +422,58 @@ def _lint_validator_config(result: LintResult, vloc: str, validator: Any) -> Non
         if not check:
             result.error(f"{vloc}.check", "databricks_sdk requires a 'check' name.")
         else:
-            _lint_sdk_check(result, vloc, str(check), cfg.get("params") or {})
-    elif vtype == "system_table":
-        if not cfg.get("table"):
-            result.error(f"{vloc}.table", "system_table validator requires 'table'.")
-        if not cfg.get("condition"):
-            result.warn(f"{vloc}.condition", "system_table validator has no 'condition'.")
-    elif vtype == "notebook":
-        if not cfg.get("notebook_path"):
+            _lint_sdk_check(result, vloc, str(check), cfg.get("params") or {}, strict=strict)
+    elif vtype == "rest_api":
+        from validators.rest_api import FORBIDDEN_CONFIG_KEYS
+
+        for key in FORBIDDEN_CONFIG_KEYS:
+            if key in cfg:
+                result.error(
+                    f"{vloc}.{key}",
+                    f"rest_api config must not contain '{key}' — endpoints are "
+                    "addressed by serving-endpoint name only.",
+                )
+        endpoint = cfg.get("endpoint")
+        if not endpoint:
+            result.error(f"{vloc}.endpoint", "rest_api requires an 'endpoint' name.")
+        else:
+            _check_template_vars(result, f"{vloc}.endpoint", endpoint)
+        prompt = cfg.get("prompt")
+        if not prompt:
+            result.error(f"{vloc}.prompt", "rest_api requires a 'prompt'.")
+        else:
+            _check_template_vars(result, f"{vloc}.prompt", prompt)
+        expect = validator.expect
+        if expect is None:
+            result.warn(
+                f"{vloc}.expect",
+                "rest_api has no 'expect' block; any successful response will pass.",
+            )
+        elif expect.operator and expect.operator not in KNOWN_EXPECT_OPERATORS:
             result.error(
-                f"{vloc}.notebook_path", "notebook validator requires 'notebook_path'."
+                f"{vloc}.expect.operator",
+                f"Unknown operator '{expect.operator}'. Supported: "
+                + ", ".join(sorted(KNOWN_EXPECT_OPERATORS)),
             )
 
 
 def _lint_sdk_check(
-    result: LintResult, vloc: str, check: str, params: Any
+    result: LintResult, vloc: str, check: str, params: Any, strict: bool = False
 ) -> None:
     """Validate a ``databricks_sdk`` check name and its params against the
     registry contracts in :mod:`services.sdk_checks`."""
     from services.sdk_checks import KNOWN_PARAMS, REQUIRED_PARAMS, known_checks
 
     if check not in known_checks():
-        result.warn(
-            f"{vloc}.check",
+        message = (
             f"Unknown databricks_sdk check '{check}'. Known checks: "
-            + ", ".join(known_checks()),
+            + ", ".join(known_checks())
         )
+        # Strict: an unknown check is a config error at runtime — block import.
+        if strict:
+            result.error(f"{vloc}.check", message)
+        else:
+            result.warn(f"{vloc}.check", message)
         return
 
     if not isinstance(params, dict):

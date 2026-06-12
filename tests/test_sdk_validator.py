@@ -455,6 +455,168 @@ def test_param_contracts_cover_every_check():
     assert set(REQUIRED_PARAMS.keys()) <= set(SDK_CHECKS.keys())
 
 
+# ── wave-2 checks: Genie curation/conversations, Apps, Agent Bricks tiles ────
+
+import json as _json
+
+from services.sdk_checks import (
+    genie_conversation_started,
+    genie_space_curated,
+    knowledge_assistant_exists,
+    lakebase_app_connected,
+    multi_agent_supervisor_exists,
+)
+
+# Serialized-space payload shape verified against a live export (SDK 0.94).
+_SERIALIZED_SPACE = _json.dumps(
+    {
+        "version": 1,
+        "instructions": {"text_instructions": [{"id": "1", "content": "Revenue means net_revenue."}]},
+        "config": {"sample_questions": [{"id": "q1", "question": "Revenue by region?"}, {"id": "q2", "question": "Top product?"}]},
+        "data_sources": {"tables": [{"identifier": "cat.sch.orders"}]},
+    }
+)
+
+
+class _Genie:
+    def __init__(self, spaces=None, serialized=None, conversations=None):
+        self._spaces = spaces or []
+        self._serialized = serialized
+        self._conversations = conversations or []
+
+    def list_spaces(self):
+        return SimpleNamespace(spaces=self._spaces)
+
+    def get_space(self, space_id, include_serialized_space=None):
+        return SimpleNamespace(space_id=space_id, serialized_space=self._serialized)
+
+    def list_conversations(self, space_id, include_all=None):
+        return SimpleNamespace(conversations=self._conversations)
+
+
+def _genie_client(serialized=_SERIALIZED_SPACE, conversations=None):
+    client = FakeClient()
+    client.genie = _Genie(
+        spaces=[SimpleNamespace(title="Team Red Genie", space_id="s-1")],
+        serialized=serialized,
+        conversations=conversations or [],
+    )
+    return client
+
+
+def test_genie_space_curated_meets_bar():
+    res = genie_space_curated(
+        _genie_client(),
+        {"name_contains": "Team Red", "require_instructions": True, "min_sample_questions": 2, "min_tables": 1},
+        None,
+    )
+    assert res["found"] is True
+    assert res["evidence"]["sample_questions"] == 2
+
+
+def test_genie_space_curated_below_bar_fails():
+    res = genie_space_curated(
+        _genie_client(),
+        {"name_contains": "Team Red", "min_sample_questions": 5},
+        None,
+    )
+    assert res["found"] is False
+    assert "sample questions (2/5)" in res["detail"]
+
+
+def test_genie_space_curated_unrecognized_payload_routes_to_manual():
+    client = _genie_client(serialized=_json.dumps({"version": 1, "mystery": []}))
+    v = _validator(client)
+    out = v.validate(
+        _ctx("genie_space_curated", {"name_contains": "Team Red", "require_instructions": True})
+    )
+    assert out.status == MANUAL
+
+
+def test_genie_space_curated_no_match_fails():
+    res = genie_space_curated(_genie_client(), {"name_contains": "Blue"}, None)
+    assert res["found"] is False
+
+
+def test_genie_conversation_started_counts_and_filters():
+    convs = [
+        SimpleNamespace(conversation_id="c1", created_timestamp=1_700_000_000_000),
+        SimpleNamespace(conversation_id="c2", created_timestamp=1_900_000_000_000),
+    ]
+    client = _genie_client(conversations=convs)
+    assert genie_conversation_started(client, {"name_contains": "Team Red"}, None)["found"]
+    res = genie_conversation_started(
+        client,
+        {"name_contains": "Team Red", "created_after": "2026-01-01T00:00:00+00:00", "min_conversations": 2},
+        None,
+    )
+    assert res["found"] is False  # only c2 is after the cutoff
+    assert res["evidence"]["conversations"] == 1
+
+
+def test_lakebase_app_connected_requires_database_resource():
+    client = FakeClient()
+    client.apps = SimpleNamespace(
+        list=lambda: [
+            SimpleNamespace(
+                name="team-red-app",
+                resources=[SimpleNamespace(database=SimpleNamespace(instance_name="pg"))],
+                compute_status=SimpleNamespace(state="ACTIVE"),
+            ),
+            SimpleNamespace(name="team-blue-app", resources=[], compute_status=SimpleNamespace(state="ACTIVE")),
+        ]
+    )
+    assert lakebase_app_connected(client, {"name_contains": "red"}, None)["found"]
+    assert not lakebase_app_connected(client, {"name_contains": "blue"}, None)["found"]
+
+
+class _TilesAPIClient:
+    def __init__(self, tiles):
+        self._tiles = tiles
+
+    def do(self, method, path):
+        assert method == "GET" and path == "/api/2.0/tiles"
+        return {"tiles": self._tiles}
+
+
+def _tiles_client(tiles):
+    client = FakeClient()
+    client.api_client = _TilesAPIClient(tiles)
+    return client
+
+
+# Tile shape verified live against the beta /api/2.0/tiles surface.
+_TILES = [
+    {"tile_id": "ka-1", "name": "team-red-ka", "tile_type": "KA", "serving_endpoint_name": "ka-1-endpoint"},
+    {"tile_id": "mas-1", "name": "team-red-concierge", "tile_type": "MAS", "serving_endpoint_name": "mas-1-endpoint"},
+    {"tile_id": "ka-2", "name": "draft-ka", "tile_type": "KA", "serving_endpoint_name": ""},
+]
+
+
+def test_knowledge_assistant_exists_filters_type_and_endpoint():
+    client = _tiles_client(_TILES)
+    assert knowledge_assistant_exists(client, {"name_contains": "team-red"}, None)["found"]
+    # MAS tile does not satisfy the KA check even though the name matches.
+    assert not knowledge_assistant_exists(client, {"name": "team-red-concierge"}, None)["found"]
+    # Tile without a serving endpoint fails unless require_endpoint is waived.
+    assert not knowledge_assistant_exists(client, {"name": "draft-ka"}, None)["found"]
+    assert knowledge_assistant_exists(client, {"name": "draft-ka", "require_endpoint": False}, None)["found"]
+
+
+def test_multi_agent_supervisor_exists():
+    client = _tiles_client(_TILES)
+    assert multi_agent_supervisor_exists(client, {"name_contains": "concierge"}, None)["found"]
+    assert not multi_agent_supervisor_exists(client, {"name_contains": "ka"}, None)["found"]
+
+
+def test_agent_bricks_unrecognized_payload_routes_to_manual():
+    client = FakeClient()
+    client.api_client = SimpleNamespace(do=lambda m, p: {"unexpected": True})
+    v = _validator(client)
+    out = v.validate(_ctx("knowledge_assistant_exists", {"name_contains": "x"}))
+    assert out.status == MANUAL
+
+
 # ── linter enforces the check/param contracts ─────────────────────────────────
 
 

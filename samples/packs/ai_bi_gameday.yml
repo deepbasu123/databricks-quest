@@ -3,7 +3,7 @@ schema_version: "1.0"
 pack:
   slug: ai-bi-gameday
   title: "AI/BI GameDay"
-  version: "1.0.0"
+  version: "1.1.0"
   description: >
     A hands-on GameDay where teams stand up a governed analytics layer, build an
     AI/BI dashboard, and put a Genie space in front of it. Designed to run on a
@@ -35,17 +35,21 @@ capabilities_required:
 
 # These statements run per team during host bootstrap (PR08). They reference
 # only the team's own schema via the server-resolved template variables, so the
-# namespace guard keeps every team isolated.
+# namespace guard keeps every team isolated. The feed is deterministically
+# generated (no rand()) — 200 orders across 4 regions and 6 products — so the
+# revenue model is non-trivial and validator outcomes are stable.
 resources:
   seed_sql:
     - >
-      CREATE TABLE IF NOT EXISTS ${team_catalog}.${team_schema}.raw_sales
-      (order_id INT, region STRING, product STRING, amount DOUBLE, order_ts TIMESTAMP)
-    - >
-      INSERT INTO ${team_catalog}.${team_schema}.raw_sales VALUES
-      (1, 'EMEA', 'Trail Jacket', 220.0, current_timestamp()),
-      (2, 'AMER', 'Summit Pack', 140.0, current_timestamp()),
-      (3, 'APAC', 'Trail Jacket', 220.0, current_timestamp())
+      CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.raw_sales AS
+      SELECT
+        CAST(id AS INT) AS order_id,
+        element_at(array('EMEA','AMER','APAC','LATAM'), CAST(id % 4 AS INT) + 1) AS region,
+        element_at(array('Trail Jacket','Summit Pack','Glacier Tent','Ridge Boots',
+                         'Basecamp Stove','Alpine Bottle'), CAST(id % 6 AS INT) + 1) AS product,
+        CAST(20 + (id * 37) % 480 AS DOUBLE) + 0.99 AS amount,
+        timestampadd(HOUR, -CAST(id % 72 AS INT), current_timestamp()) AS order_ts
+      FROM range(200)
 
 scoring_defaults:
   base_points: 100
@@ -86,13 +90,15 @@ quests:
           - title: "Stuck?"
             body_md: "Ask your host which warehouse is bound to the event."
             penalty_points: -5
+        solutions:
+          - skip: "Validator is self-contained (SELECT 1); no setup action needed."
       - slug: schema-ready
         title: "Verify your team schema exists"
         objective: "Confirm the host has bootstrapped your team's schema."
         instructions_md: >
           Your team works inside `${team_catalog}.${team_schema}`. Verify the raw
           feed landed.
-        success_criteria_md: "The raw_sales table has at least one row."
+        success_criteria_md: "The raw_sales table has at least 150 rows."
         points: 75
         validation_mode: auto
         validators:
@@ -102,11 +108,13 @@ quests:
             statement: "SELECT count(*) FROM ${team_catalog}.${team_schema}.raw_sales"
             expect:
               operator: ">="
-              value: 1
+              value: 150
         hints:
           - title: "No rows?"
             body_md: "Ask the host to run resource bootstrap for your event."
             penalty_points: -10
+        solutions:
+          - skip: "raw_sales is created by host bootstrap (resources.seed_sql)."
 
   - slug: build-the-model
     title: "Build the trusted model"
@@ -144,6 +152,12 @@ quests:
           - title: "Pattern"
             body_md: "GROUP BY region and SUM(amount) AS total_amount."
             penalty_points: -10
+        solutions:
+          - sql: >
+              CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.revenue_by_region AS
+              SELECT region, sum(amount) AS total_amount
+              FROM ${team_catalog}.${team_schema}.raw_sales
+              GROUP BY region
       - slug: reconcile-total
         title: "Reconcile total revenue"
         objective: "Your model's total must match the raw feed."
@@ -167,6 +181,8 @@ quests:
           - title: "Off by a bit?"
             body_md: "Watch for filters that drop rows from your aggregation."
             penalty_points: -15
+        solutions:
+          - skip: "Follows from the curate-revenue solution (no rows filtered)."
 
   - slug: ship-ai-bi
     title: "Ship AI/BI + Genie"
@@ -181,17 +197,19 @@ quests:
       Put a self-serve experience in front of your trusted model: an AI/BI
       dashboard and a Genie space a sales leader could actually use.
     facilitator_notes: >
-      The dashboard and Genie tasks are host-reviewed: teams show their work and
-      the host approves. The databricks_sdk validators document the intended
-      automated checks for when an SDK validator ships.
+      The dashboard and Genie tasks pair executable databricks_sdk checks with
+      host review: the SDK check auto-grades when the workspace client can run,
+      and the host confirms the work regardless. The final Genie task is fully
+      automated — the recorded answer must reconcile with the team's model.
     tasks:
       - slug: publish-dashboard
         title: "Publish an AI/BI dashboard"
         objective: "Create and publish a dashboard over revenue_by_region."
         instructions_md: >
           Build an AI/BI dashboard with at least one chart of revenue by region,
-          then publish it. Share the link with your host.
-        success_criteria_md: "A published dashboard exists over the team's model."
+          include your team name (`${team_slug}`) in the dashboard title, and
+          publish it. Share the link with your host.
+        success_criteria_md: "A published dashboard named for your team exists."
         points: 100
         validation_mode: manual
         manual_validation_required: true
@@ -201,7 +219,7 @@ quests:
             mode: sync
             check: dashboard_published
             params:
-              name_contains: "revenue"
+              name_contains: "${team_slug}"
           - id: host-confirm-dashboard
             type: manual
             mode: sync
@@ -209,13 +227,19 @@ quests:
           - title: "Where to start"
             body_md: "Use the SQL editor result's 'Create dashboard' action."
             penalty_points: -10
+        solutions:
+          - workspace_op:
+              op: publish_dashboard
+              name: "${team_slug} revenue by region"
+              dataset_sql: "SELECT * FROM ${team_catalog}.${team_schema}.revenue_by_region"
       - slug: stand-up-genie
         title: "Stand up a Genie space"
         objective: "Create a Genie space scoped to your team's model."
         instructions_md: >
-          Create a Genie space over `${team_catalog}.${team_schema}` and ask it
-          one revenue question. Show the host the answer.
-        success_criteria_md: "A Genie space answers a revenue question over team data."
+          Create a Genie space over `${team_catalog}.${team_schema}` with your
+          team name (`${team_slug}`) in the title, and ask it one revenue
+          question. Show the host the answer.
+        success_criteria_md: "A team-named Genie space answers a revenue question."
         points: 100
         validation_mode: manual
         manual_validation_required: true
@@ -224,6 +248,8 @@ quests:
             type: databricks_sdk
             mode: sync
             check: genie_space_exists
+            params:
+              name_contains: "${team_slug}"
           - id: host-confirm-genie
             type: manual
             mode: sync
@@ -231,3 +257,48 @@ quests:
           - title: "Scope it"
             body_md: "Point the Genie space at your team schema only."
             penalty_points: -10
+        solutions:
+          - workspace_op:
+              op: create_genie_space
+              name: "${team_slug} revenue genie"
+              tables:
+                - "${team_catalog}.${team_schema}.revenue_by_region"
+      - slug: genie-first-answer
+        title: "Prove the Genie's first answer"
+        objective: "Show the Genie answers a revenue question correctly."
+        instructions_md: >
+          Ask your Genie space for total revenue in one region of your choice.
+          Record what it told you into
+          `${team_catalog}.${team_schema}.genie_answer_check` with columns
+          `region STRING, total_amount DOUBLE`. The recorded answer must match
+          your revenue_by_region model exactly.
+        success_criteria_md: >
+          genie_answer_check contains at least one row that reconciles with
+          revenue_by_region.
+        points: 50
+        validation_mode: auto
+        validators:
+          - id: genie-answer-reconciles
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) FROM ${team_catalog}.${team_schema}.genie_answer_check g
+              JOIN ${team_catalog}.${team_schema}.revenue_by_region r
+                ON g.region = r.region
+               AND round(g.total_amount, 2) = round(r.total_amount, 2)
+            expect:
+              operator: ">="
+              value: 1
+        hints:
+          - title: "Wrong number?"
+            body_md: >
+              A mismatch is a curation gap, not a trick: check whether the Genie
+              summed the right column, then re-ask. CREATE OR REPLACE TABLE
+              genie_answer_check AS SELECT ... to record the answer.
+            penalty_points: -10
+        solutions:
+          - sql: >
+              CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.genie_answer_check AS
+              SELECT region, total_amount
+              FROM ${team_catalog}.${team_schema}.revenue_by_region
+              ORDER BY total_amount DESC LIMIT 1

@@ -7,8 +7,10 @@ Below is a sample starter pack. It is intentionally small enough for MVP testing
 ```yaml
 schema_version: "1.0"
 pack:
-  slug: ai-bi-intelligence-challenge
-  title: AI/BI Intelligence Challenge
+  # Distinct from the shipped catalog's ai-bi-gameday slug — importing this
+  # worked example must never collide with (or resurrect) a catalog pack.
+  slug: orbit-travel-briefing
+  title: AI/BI Worked Example — Orbit Travel Board Briefing
   version: "0.1.0"
   description: A two-hour GameDay where teams create governed, trusted business intelligence on Databricks.
   audience: [analysts, data_engineers, solution_architects]
@@ -25,10 +27,22 @@ resources:
   team_namespace:
     catalog_template: "${event_catalog}"
     schema_template: "team_${team_slug}"
-  seed_data:
-    - name: bookings_raw
-      type: csv
-      target: "${team_catalog}.${team_schema}.bookings_raw"
+  # seed_sql is the ONLY seed mechanism the host bootstrap executes (PR08).
+  # Generate deterministic data with range() — no rand(), no file uploads — so
+  # validator thresholds hold on every bootstrap. The NULL keys are deliberate:
+  # the silver quality task must remove them.
+  seed_sql:
+    - >
+      CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.bookings_raw AS
+      SELECT
+        CASE WHEN id % 17 = 0 THEN NULL ELSE CAST(id AS INT) END AS booking_id,
+        CASE WHEN id % 23 = 0 THEN NULL ELSE CAST(1000 + id % 300 AS INT) END AS customer_id,
+        element_at(array('EMEA','AMER','APAC','LATAM'), CAST(id % 4 AS INT) + 1) AS region,
+        element_at(array('flights','hotels','packages'), CAST(id % 3 AS INT) + 1) AS product_family,
+        CAST(50 + (id * 31) % 900 AS DOUBLE) AS gross_amount,
+        CAST(5 + (id * 13) % 200 AS DOUBLE) AS margin_amount,
+        date_add(current_date(), -CAST(id % 60 AS INT)) AS booking_date
+      FROM range(1200)
 
 quests:
   - slug: q1-foundation
@@ -123,6 +137,10 @@ quests:
         title: Create an executive dashboard
         objective: Create a Databricks dashboard over your gold table.
         points: 200
+        # Rule: every databricks_sdk validator pairs with a manual fallback and
+        # manual_validation_required: true — the SDK check auto-grades when it
+        # can run and the host reviews when it can't.
+        manual_validation_required: true
         validators:
           - id: dashboard-created
             type: databricks_sdk
@@ -130,7 +148,9 @@ quests:
             check: dashboard_exists_for_team
             params:
               name_contains: "${team_slug}"
-              created_after: "${event_start}"
+          - id: host-confirm-dashboard
+            type: manual
+            mode: sync
         hints:
           - title: Dashboard hint
             penalty_points: -20

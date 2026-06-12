@@ -2,7 +2,11 @@
 """Lint a quest pack manifest locally (no server, no database).
 
 Usage:
-    python scripts/lint_quest_pack.py [path/to/pack.yml] [--json]
+    python scripts/lint_quest_pack.py [path/to/pack.yml] [--json] [--strict]
+
+``--strict`` applies the playability gate used for shipped packs and CI: auto
+validators must carry ``solutions``, SDK/REST validators must pair with a
+manual fallback, and unknown check names become errors.
 
 Defaults to the built-in sample pack. Exits non-zero if there are lint errors,
 so it can be used in CI. This validates the same rules the
@@ -28,12 +32,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Lint a quest pack manifest")
     parser.add_argument("path", nargs="?", default=DEFAULT_PACK, help="Manifest YAML path")
     parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    parser.add_argument(
+        "--strict", action="store_true", help="Apply the strict playability gate"
+    )
     args = parser.parse_args()
 
     with open(args.path, "r", encoding="utf-8") as fh:
         text = fh.read()
 
-    result = lint_manifest_text(text)
+    result = lint_manifest_text(text, strict=args.strict)
     out = result.to_dict()
     if result.manifest is not None:
         out["content_hash"] = compute_content_hash(result.manifest)

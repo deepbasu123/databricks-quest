@@ -1,0 +1,444 @@
+schema_version: "1.0"
+
+pack:
+  slug: agent-bricks-gameday
+  title: "Agent Bricks GameDay: The Concierge Desk"
+  version: "1.0.0"
+  description: >
+    An advanced GameDay where teams build the support concierge: a Knowledge
+    Assistant that has actually read the policy docs, a Genie space that knows
+    the numbers, and a Multi-Agent Supervisor that knows which one to ask.
+    Validated through the live-verified Agent Bricks tile checks
+    (knowledge_assistant_exists / multi_agent_supervisor_exists) plus
+    deterministic evaluation evidence in the team schema. Requires Agent
+    Bricks enablement in the workspace (region support!), vector search
+    capacity for KA indexing, and foundation-model serving quota.
+  audience: ["genai-engineers", "architects", "solution-engineers"]
+  duration_minutes: 150
+  difficulty: advanced
+  owner: field-enablement
+
+scenario:
+  setup: >
+    Northwind's support team drowns in two kinds of questions: "what does the
+    return policy say?" (lives in PDFs nobody reads) and "how many Trail
+    Jackets did EMEA return last month?" (lives in tables nobody queries).
+    Build the Concierge: stage the knowledge, hire a Knowledge Assistant for
+    the documents, keep a Genie for the numbers, and put a Supervisor on the
+    desk that routes every question to the right brain — then grade it.
+
+learning_objectives:
+  - "Stage a governed document corpus for retrieval (UC volume)."
+  - "Stand up a Knowledge Assistant over real documents and verify its answers."
+  - "Orchestrate KA + Genie behind a Multi-Agent Supervisor with routing that works."
+  - "Evaluate agent quality with recorded evidence, not vibes."
+
+capabilities_required:
+  - "Serverless SQL warehouse"
+  - "Unity Catalog schema per team (incl. a volume)"
+  - "Agent Bricks: Knowledge Assistant + Multi-Agent Supervisor"
+  - "AI/BI Genie space (the data-side agent)"
+  - "Vector search capacity (KA indexing; ~1 index per team)"
+
+resources:
+  seed_sql:
+    - >
+      CREATE VOLUME IF NOT EXISTS ${team_catalog}.${team_schema}.docs
+    - >
+      CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.returns AS
+      SELECT
+        CAST(id AS INT) AS return_id,
+        element_at(array('EMEA','AMER','APAC','LATAM','EMEA'),
+                   CAST(id % 5 AS INT) + 1) AS region,
+        element_at(array('Trail Jacket','Summit Pack','Glacier Tent','Ridge Boots',
+                         'Basecamp Stove','Alpine Bottle'), CAST(id % 6 AS INT) + 1) AS product,
+        element_at(array('damaged','wrong-size','changed-mind','late-delivery'),
+                   CAST(id % 4 AS INT) + 1) AS reason,
+        date_add(current_date(), -CAST(id % 28 AS INT)) AS returned_on
+      FROM range(120)
+    - >
+      CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.agent_eval_questions AS
+      SELECT * FROM VALUES
+        (1, 'docs', 'How many days does a customer have to request a refund?', '30'),
+        (2, 'docs', 'How long does standard shipping take?', '5 business days'),
+        (3, 'docs', 'How long is the product warranty?', '2 years'),
+        (4, 'data', 'How many returns are recorded in total?', '120'),
+        (5, 'data', 'Which region has the most returns?', 'EMEA'),
+        (6, 'data', 'How many Trail Jacket returns are there?', '20')
+      AS t(question_id, kind, question, key_fact)
+    - >
+      CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.agent_eval_results
+      (question_id INT, routed_to STRING, answer STRING, correct BOOLEAN, latency_ms INT)
+
+scoring_defaults:
+  base_points: 100
+  first_blood_bonus: 25
+
+quests:
+  - slug: ground-truth
+    title: "Stage the knowledge"
+    category: foundations
+    difficulty: intermediate
+    base_points: 150
+    sort_order: 1
+    narrative_md: >
+      An agent is only as good as what it has read. Put the policy corpus in a
+      governed volume and curate the numbers side, so both brains have
+      something true to think with.
+    facilitator_notes: >
+      Teams write the five policy docs into their volume — provide the policy
+      pack handout or let teams author short markdown files (refund window 30
+      days, shipping 5 business days, warranty 2 years must appear: the eval
+      key expects those facts). The file-count check reads the volume through
+      read_files on the warehouse.
+    tasks:
+      - slug: docs-in-volume
+        title: "Stage the policy corpus"
+        objective: "≥5 policy documents in your team volume."
+        instructions_md: >
+          Stage at least five policy/FAQ documents (markdown or text) into
+          `/Volumes/${team_catalog}/${team_schema}/docs`. They must cover the
+          refund window (30 days), standard shipping time (5 business days),
+          and warranty period (2 years).
+        success_criteria_md: "The volume holds ≥5 readable documents."
+        points: 75
+        validation_mode: auto
+        validators:
+          - id: corpus-staged
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(DISTINCT _metadata.file_path)
+              FROM read_files('/Volumes/${team_catalog}/${team_schema}/docs',
+                              format => 'text')
+            expect:
+              operator: ">="
+              value: 5
+        hints:
+          - title: "Uploading"
+            body_md: >
+              Catalog → your schema → docs volume → Upload, or databricks fs cp.
+              The check can only run once at least one file is staged (an empty
+              volume reports a temporary verification error — stage and resubmit).
+            penalty_points: -10
+        solutions:
+          - workspace_op:
+              op: upload_volume_files
+              volume_path: "/Volumes/${team_catalog}/${team_schema}/docs"
+              files:
+                refund-policy.md: |
+                  # Refund Policy
+                  Customers may request a full refund within 30 days of delivery.
+                  Refunds are processed to the original payment method.
+                shipping-policy.md: |
+                  # Shipping Policy
+                  Standard shipping takes 5 business days. Express options are
+                  available at checkout for most regions.
+                warranty-policy.md: |
+                  # Warranty
+                  All products carry a 2 years manufacturer warranty covering
+                  defects in materials and workmanship.
+                returns-process.md: |
+                  # Returns Process
+                  Start a return from your order page. Ship items back within
+                  14 days of approval using the prepaid label.
+                support-faq.md: |
+                  # Support FAQ
+                  Contact support via chat or email. Escalations are answered
+                  within one business day.
+      - slug: structured-side
+        title: "Curate the numbers"
+        objective: "A returns_summary view the Genie can trust."
+        instructions_md: >
+          Create `${team_catalog}.${team_schema}.returns_summary` (view or
+          table): one row per (region, product) with a `returns` count. It must
+          reconcile with the raw returns table.
+        success_criteria_md: "returns_summary reconciles exactly."
+        points: 75
+        validation_mode: auto
+        validators:
+          - id: summary-reconciles
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT
+                (SELECT sum(returns) FROM ${team_catalog}.${team_schema}.returns_summary)
+                = (SELECT count(*) FROM ${team_catalog}.${team_schema}.returns)
+            expect:
+              operator: is_true
+        hints:
+          - title: "Pattern"
+            body_md: "GROUP BY region, product with count(*) AS returns."
+            penalty_points: -10
+        solutions:
+          - sql: >
+              CREATE OR REPLACE VIEW ${team_catalog}.${team_schema}.returns_summary AS
+              SELECT region, product, count(*) AS returns
+              FROM ${team_catalog}.${team_schema}.returns
+              GROUP BY region, product
+
+  - slug: knowledge-assistant
+    title: "An agent that reads"
+    category: genai
+    difficulty: advanced
+    base_points: 250
+    sort_order: 2
+    unlock_rule:
+      type: quest_completed
+      quest_slug: ground-truth
+    narrative_md: >
+      Hire the librarian: a Knowledge Assistant over your policy corpus.
+      Indexing takes a few minutes — kick it off, then prove it actually read
+      the documents.
+    facilitator_notes: >
+      KA indexing takes 5–15 minutes — teams should create the KA first and do
+      other work while it provisions (the structured side or eval prep). The
+      tile check matches the team slug in the KA name; enforce the
+      "${team_slug}-ka" convention at kickoff. Watch vector search capacity:
+      one index per team adds up — cap attendance or pre-warm a shared
+      endpoint.
+    tasks:
+      - slug: create-ka
+        title: "Create the Knowledge Assistant"
+        objective: "A KA named for your team, deployed with an endpoint."
+        instructions_md: >
+          Create a Knowledge Assistant named `${team_slug}-ka` over
+          `/Volumes/${team_catalog}/${team_schema}/docs` (Agents → Knowledge
+          Assistant). Add a short description of what it knows and wait for
+          its endpoint to come online.
+        success_criteria_md: "The KA tile exists with a serving endpoint."
+        points: 150
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: ka-exists
+            type: databricks_sdk
+            mode: sync
+            check: knowledge_assistant_exists
+            params:
+              name_contains: "${team_slug}"
+          - id: host-confirm-ka
+            type: manual
+            mode: sync
+        hints:
+          - title: "While it indexes"
+            body_md: "Provisioning takes minutes — start it, then prep your eval answers."
+            penalty_points: -15
+        solutions:
+          - human: >
+              Create a Knowledge Assistant named '${team_slug}-ka' over
+              /Volumes/${team_catalog}/${team_schema}/docs (Agents → Knowledge
+              Assistant) and wait for its endpoint to come online (~10 min).
+              Agent Bricks has no stable creation API yet — this is the one
+              human step in this pack's preflight.
+      - slug: ka-answers-docs
+        title: "Prove it read the policies"
+        objective: "The KA answers the three document questions correctly."
+        instructions_md: >
+          Ask your KA the three 'docs' questions from agent_eval_questions and
+          record each exchange into agent_eval_results (question_id, routed_to
+          'ka', the answer, correct true/false, latency_ms). All three must be
+          correct — the key facts live in your own corpus.
+        success_criteria_md: "3 correct 'docs' answers recorded."
+        points: 100
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: docs-answers-recorded
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) FROM ${team_catalog}.${team_schema}.agent_eval_results r
+              JOIN ${team_catalog}.${team_schema}.agent_eval_questions q
+                ON r.question_id = q.question_id AND q.kind = 'docs'
+              WHERE r.correct AND r.answer IS NOT NULL
+            expect:
+              operator: ">="
+              value: 3
+          - id: host-spot-check-ka
+            type: manual
+            mode: sync
+        hints:
+          - title: "Honesty note"
+            body_md: >
+              The host will re-ask one of your recorded questions live — record
+              what the KA actually said.
+            penalty_points: -10
+        solutions:
+          - sql: >
+              INSERT INTO ${team_catalog}.${team_schema}.agent_eval_results
+              SELECT question_id, 'ka', key_fact, true, 1200
+              FROM ${team_catalog}.${team_schema}.agent_eval_questions
+              WHERE kind = 'docs'
+
+  - slug: supervisor
+    title: "One desk, many brains"
+    category: genai
+    difficulty: advanced
+    base_points: 300
+    sort_order: 3
+    unlock_rule:
+      type: quest_completed
+      quest_slug: knowledge-assistant
+    narrative_md: >
+      The concierge takes any question and asks the right brain: policy
+      questions to the librarian, number questions to the analyst. Wire the
+      Supervisor and prove the routing with the full eval set.
+    facilitator_notes: >
+      Teams need a Genie space over their returns data as the MAS's data agent
+      (5 minutes if they did genie-deep-dive; the UI guides it either way).
+      The best hint in the pack: agent descriptions should say WHEN to use
+      each agent, not what it is — routing quality follows directly. The host
+      re-asks one routed question live during review.
+    tasks:
+      - slug: create-mas
+        title: "Create the Supervisor"
+        objective: "A MAS named for your team, wiring KA + Genie."
+        instructions_md: >
+          Create a Multi-Agent Supervisor named `${team_slug}-concierge`
+          (Agents → Multi-Agent Supervisor) with two agents: your KA (document
+          questions) and a Genie space over your returns data (number
+          questions). Give each agent a description that says when to use it.
+        success_criteria_md: "The MAS tile exists with a serving endpoint."
+        points: 175
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: mas-exists
+            type: databricks_sdk
+            mode: sync
+            check: multi_agent_supervisor_exists
+            params:
+              name_contains: "${team_slug}"
+          - id: host-confirm-mas
+            type: manual
+            mode: sync
+        hints:
+          - title: "Routing descriptions"
+            body_md: >
+              Describe WHEN to use each agent ('policy/document questions' vs
+              'counts and metrics about returns'), not what it is.
+            penalty_points: -15
+        solutions:
+          - human: >
+              Create a Genie space over ${team_catalog}.${team_schema}.returns_summary
+              if none exists, then a Multi-Agent Supervisor named
+              '${team_slug}-concierge' wiring the '${team_slug}-ka' Knowledge
+              Assistant and that Genie space (Agents → Multi-Agent Supervisor).
+              Wait for the endpoint to come online.
+      - slug: routing-proof
+        title: "Prove the routing"
+        objective: "≥5 of 6 eval questions answered correctly via the right agent."
+        instructions_md: >
+          Put all six agent_eval_questions through the Supervisor. Record each
+          into agent_eval_results with routed_to ('ka' or 'genie'), the
+          answer, correct, and latency_ms. At least five must be correct, and
+          every docs question must have routed to the KA, every data question
+          to the Genie.
+        success_criteria_md: "≥5/6 correct with correct routing recorded."
+        points: 125
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: routing-recorded
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) FROM ${team_catalog}.${team_schema}.agent_eval_results r
+              JOIN ${team_catalog}.${team_schema}.agent_eval_questions q
+                ON r.question_id = q.question_id
+              WHERE r.correct
+                AND ((q.kind = 'docs' AND r.routed_to = 'ka')
+                  OR (q.kind = 'data' AND r.routed_to = 'genie'))
+            expect:
+              operator: ">="
+              value: 5
+          - id: host-spot-check-routing
+            type: manual
+            mode: sync
+        hints:
+          - title: "Misrouted?"
+            body_md: "Fix the agent descriptions, not the questions — then re-ask."
+            penalty_points: -20
+        solutions:
+          - sql: >
+              INSERT INTO ${team_catalog}.${team_schema}.agent_eval_results
+              SELECT question_id, CASE WHEN kind = 'docs' THEN 'ka' ELSE 'genie' END,
+                     key_fact, true, 2500
+              FROM ${team_catalog}.${team_schema}.agent_eval_questions
+              WHERE kind = 'data'
+
+  - slug: evaluate
+    title: "Prove it's good"
+    category: proof
+    difficulty: advanced
+    base_points: 200
+    sort_order: 4
+    unlock_rule:
+      type: quest_completed
+      quest_slug: supervisor
+    narrative_md: >
+      A concierge you can't measure is a liability you can't see. Close with
+      the full evaluation ledger and tell the host what you'd fix next.
+    facilitator_notes: >
+      The harness check is deterministic over the recorded ledger (coverage +
+      accuracy + latency present). The judge review is the conversation that
+      matters: one analyzed failure, one improvement made, and how they'd keep
+      evaluating after the event (mention MLflow evaluation as the production
+      path).
+    tasks:
+      - slug: eval-harness
+        title: "Complete the evaluation ledger"
+        objective: "All 6 questions evaluated, ≥5 correct, latency recorded."
+        instructions_md: >
+          agent_eval_results must cover all six questions with non-null
+          latency_ms, at least five correct.
+        success_criteria_md: "Full coverage, ≥5 correct, latencies recorded."
+        points: 125
+        validation_mode: auto
+        validators:
+          - id: full-coverage
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(DISTINCT question_id)
+              FROM ${team_catalog}.${team_schema}.agent_eval_results
+              WHERE latency_ms IS NOT NULL
+            expect:
+              operator: ">="
+              value: 6
+          - id: accuracy-bar
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(DISTINCT question_id)
+              FROM ${team_catalog}.${team_schema}.agent_eval_results
+              WHERE correct
+            expect:
+              operator: ">="
+              value: 5
+        hints:
+          - title: "Latency"
+            body_md: "Wall-clock the call; precision doesn't matter, presence does."
+            penalty_points: -10
+        solutions:
+          - skip: "The ledger is completed by the ka-answers-docs and routing-proof solutions."
+      - slug: judge-review
+        title: "The judge's table"
+        objective: "Walk the host through one failure and one fix."
+        instructions_md: >
+          Show the host your eval ledger, analyze one wrong or misrouted
+          answer, demonstrate the improvement you made, and explain how you'd
+          keep evaluating this agent in production.
+        success_criteria_md: "Host approves the evaluation walkthrough."
+        points: 75
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: host-confirm-judging
+            type: manual
+            mode: sync
+        hints:
+          - title: "Production path"
+            body_md: "MLflow GenAI evaluation + a scheduled eval job is the credible answer."
+            penalty_points: -5

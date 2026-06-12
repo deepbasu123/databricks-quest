@@ -20,6 +20,8 @@ tests inject a fake.
 from __future__ import annotations
 
 import logging
+import os
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 from services import namespace as ns
@@ -121,6 +123,307 @@ def plan_blockers(plan: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [i for i in plan if not i.get("within_namespace", False)]
 
 
+# ── Workspace resources (PR21) ───────────────────────────────────────────────
+#
+# ``resources.workspace`` entries in a pack request non-SQL resources the host
+# bootstrap should provision: Lakebase instances, vector search endpoints,
+# serving endpoints, Genie spaces. Templates resolve event/team slots; rendered
+# names must pass the namespace prefix guard. Caps are a cost guardrail.
+
+KNOWN_WORKSPACE_RESOURCE_TYPES = {
+    "lakebase_instance",
+    "vector_search_endpoint",
+    "serving_endpoint",
+    "genie_space",
+}
+
+WORKSPACE_CAPS = {
+    "lakebase_instance": 1,
+    "vector_search_endpoint": 1,
+    "serving_endpoint": 32,
+    "genie_space": 64,
+}
+
+_WS_SLOT_RE = re.compile(r"\$\{([a-zA-Z_]+)\}")
+
+
+def _render_workspace_value(value: Any, variables: Dict[str, str]) -> Any:
+    """Resolve ``${...}`` slots in strings (recursively for dicts/lists).
+
+    Unknown slots raise — a workspace resource may never carry an unresolved
+    (and therefore unguarded) name fragment."""
+    if isinstance(value, str):
+        def _sub(m):
+            slot = m.group(1)
+            if slot not in variables:
+                raise ns.NamespaceError(
+                    f"Unknown template slot ${{{slot}}} in workspace resource.",
+                    code="BAD_RESOURCE_SLOT",
+                )
+            return variables[slot]
+        return _WS_SLOT_RE.sub(_sub, value)
+    if isinstance(value, dict):
+        return {k: _render_workspace_value(v, variables) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_render_workspace_value(v, variables) for v in value]
+    return value
+
+
+def _workspace_entries(resources: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not isinstance(resources, dict):
+        return []
+    raw = resources.get("workspace") or []
+    return [e for e in raw if isinstance(e, dict)]
+
+
+def build_workspace_plan(
+    event: Dict[str, Any],
+    teams: List[Dict[str, Any]],
+    resources: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Plan the workspace resources a pack requests.
+
+    Entries whose ``name`` template references ``${team_slug}``/``${team_*}``
+    render once per team; others render once for the event. Every rendered name
+    passes :func:`ns.assert_resource_name_in_namespace` or the item becomes a
+    blocker. Type caps produce blockers too — never silent truncation.
+    """
+    items: List[Dict[str, Any]] = []
+    entries = _workspace_entries(resources)
+    if not entries:
+        return items
+
+    event_slug = str(event.get("slug") or event.get("event_id") or "event")
+    targets = ns.team_targets(event, teams)
+    event_ns = ns.event_namespace(event)
+    type_counts: Dict[str, int] = {}
+
+    for entry in entries:
+        rtype = str(entry.get("type") or "").strip()
+        name_template = str(entry.get("name") or "").strip()
+        spec = entry.get("spec") if isinstance(entry.get("spec"), dict) else {}
+        per_team = "${team_" in name_template
+
+        scopes: List[Dict[str, str]]
+        if per_team:
+            scopes = [
+                {
+                    "event_slug": event_slug,
+                    # Must match the validator-variable derivation in
+                    # main._build_validator_variables (sanitize_identifier,
+                    # underscores) — otherwise per-team resource names and the
+                    # names validators resolve at play time diverge.
+                    "team_slug": ns.sanitize_identifier(t.get("team_name") or str(t.get("team_id"))),
+                    "team_catalog": t["catalog"],
+                    "team_schema": t["schema"],
+                    "event_catalog": event_ns["catalog"],
+                    "team_id": t.get("team_id"),
+                }
+                for t in targets
+            ]
+        else:
+            scopes = [{
+                "event_slug": event_slug,
+                "event_catalog": event_ns["catalog"],
+                "team_id": None,
+            }]
+
+        for scope in scopes:
+            team_id = scope.pop("team_id", None)
+            item = ResourcePlanItem(
+                op=f"create_{rtype}", kind="workspace",
+                resource_type=rtype, team_id=team_id,
+            )
+            try:
+                if rtype not in KNOWN_WORKSPACE_RESOURCE_TYPES:
+                    raise ns.NamespaceError(
+                        f"Unknown workspace resource type {rtype!r}.",
+                        code="UNKNOWN_RESOURCE_TYPE",
+                    )
+                name = _render_workspace_value(name_template, scope)
+                ns.assert_resource_name_in_namespace(name, event)
+                type_counts[rtype] = type_counts.get(rtype, 0) + 1
+                cap = WORKSPACE_CAPS.get(rtype)
+                if cap is not None and type_counts[rtype] > cap:
+                    raise ns.NamespaceError(
+                        f"Plan requests more than {cap} {rtype} resource(s) — "
+                        "split the event or raise the cap deliberately.",
+                        code="RESOURCE_CAP_EXCEEDED",
+                    )
+                item["target"] = name
+                item["spec"] = _render_workspace_value(spec, scope)
+                item["within_namespace"] = True
+            except ns.NamespaceError as exc:
+                item["target"] = name_template
+                item["within_namespace"] = False
+                item["error"] = str(exc)
+            items.append(item)
+    return items
+
+
+def build_workspace_teardown_plan(
+    event: Dict[str, Any], registry_rows: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Plan deletion of the event's registry-recorded workspace resources.
+
+    Deletion is doubly gated: the resource must be **recorded in the event's
+    registry** (we never enumerate the workspace for things to delete) and its
+    name must still pass the namespace prefix guard."""
+    items: List[Dict[str, Any]] = []
+    for row in registry_rows:
+        rtype = row.get("resource_type")
+        if rtype not in KNOWN_WORKSPACE_RESOURCE_TYPES:
+            continue
+        if row.get("status") == "removed":
+            continue
+        name = row.get("fqn") or ""
+        item = ResourcePlanItem(
+            op=f"delete_{rtype}", kind="workspace",
+            resource_type=rtype, target=name, team_id=row.get("team_id"),
+        )
+        try:
+            ns.assert_resource_name_in_namespace(name, event)
+            item["within_namespace"] = True
+        except ns.NamespaceError as exc:
+            item["within_namespace"] = False
+            item["error"] = str(exc)
+        items.append(item)
+    return items
+
+
+def build_catalog_teardown_plan(
+    event: Dict[str, Any], teams: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """The final teardown step: drop the event's own catalog.
+
+    Only the namespace-computed catalog, never a host-typed name; the reserved
+    list is enforced inside :func:`ns.event_namespace`."""
+    catalog = ns.event_namespace(event)["catalog"]
+    return [ResourcePlanItem(
+        op="drop_catalog", kind="sql", resource_type="catalog", target=catalog,
+        sql=f"DROP CATALOG IF EXISTS {catalog} CASCADE",
+        within_namespace=True,
+    )]
+
+
+class SDKWorkspaceExecutor:
+    """Create/delete workspace resources via the Databricks SDK.
+
+    Duck-typed and injectable (tests pass a fake with the same ``execute``
+    signature). Each op either succeeds or raises; the service records the
+    outcome per item. Lakebase/VS creates are fire-and-forget (no ``_and_wait``)
+    so a bootstrap over many teams isn't serialized on provisioning time —
+    readiness is what the SDK *checks* verify during play.
+    """
+
+    def __init__(self, client_factory: Optional[Callable[[], Any]] = None):
+        self._client_factory = client_factory
+        self._client_cache: Any = None
+
+    def _client(self) -> Any:
+        if self._client_cache is None:
+            if self._client_factory is not None:
+                self._client_cache = self._client_factory()
+            else:
+                from databricks.sdk import WorkspaceClient
+
+                self._client_cache = WorkspaceClient()
+        return self._client_cache
+
+    @staticmethod
+    def _is_already_exists(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return "already exists" in text or "resource_already_exists" in text
+
+    @staticmethod
+    def _is_not_found(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return "not found" in text or "does not exist" in text or "resource_does_not_exist" in text
+
+    def execute(self, item: Dict[str, Any]) -> None:
+        """Run one workspace op. Creates are idempotent (an already-existing
+        resource is success — bootstrap must be re-runnable, matching the SQL
+        lane's CREATE IF NOT EXISTS); deletes tolerate missing resources (a
+        failed create or an earlier teardown must not wedge the event)."""
+        op, name = item.get("op", ""), item.get("target", "")
+        spec = item.get("spec") or {}
+        w = self._client()
+        try:
+            self._dispatch(w, op, name, spec)
+        except Exception as exc:  # noqa: BLE001 - classify, then re-raise
+            if op.startswith("create_") and self._is_already_exists(exc):
+                logger.info("workspace op %s: %r already exists — treating as success", op, name)
+                return
+            if op.startswith("delete_") and self._is_not_found(exc):
+                logger.info("workspace op %s: %r already gone — treating as removed", op, name)
+                return
+            raise
+
+    def _dispatch(self, w: Any, op: str, name: str, spec: Dict[str, Any]) -> None:
+        if op == "create_lakebase_instance":
+            from databricks.sdk.service.database import DatabaseInstance
+
+            w.database.create_database_instance(
+                DatabaseInstance(name=name, capacity=str(spec.get("capacity") or "CU_1"))
+            )
+        elif op == "delete_lakebase_instance":
+            w.database.delete_database_instance(name)
+        elif op == "create_vector_search_endpoint":
+            from databricks.sdk.service.vectorsearch import EndpointType
+
+            w.vector_search_endpoints.create_endpoint(
+                name=name,
+                endpoint_type=EndpointType(str(spec.get("endpoint_type") or "STANDARD")),
+            )
+        elif op == "delete_vector_search_endpoint":
+            w.vector_search_endpoints.delete_endpoint(name)
+        elif op == "create_serving_endpoint":
+            # Raw REST keeps the spec passthrough simple (the SDK dataclasses
+            # for serving configs are deep); spec is the endpoint's `config`.
+            w.api_client.do(
+                "POST", "/api/2.0/serving-endpoints",
+                body={"name": name, "config": spec.get("config") or spec},
+            )
+        elif op == "delete_serving_endpoint":
+            w.serving_endpoints.delete(name)
+        elif op == "create_genie_space":
+            # Idempotency: a space with this exact title already recorded means
+            # re-run — skip rather than duplicate (Genie create is not unique
+            # by title).
+            import json
+
+            if _find_genie_space_id_by_title(w, name) is not None:
+                return
+            serialized = json.dumps({
+                "version": 1,
+                "data_sources": {
+                    "tables": [{"identifier": t} for t in (spec.get("tables") or [])]
+                },
+            })
+            w.genie.create_space(
+                serialized_space=serialized,
+                title=name,
+                warehouse_id=spec.get("warehouse_id") or os.getenv("QUEST_SQL_WAREHOUSE_ID") or None,
+            )
+        elif op == "delete_genie_space":
+            # Resolve by exact title; trash, don't purge. Missing = already gone.
+            space_id = _find_genie_space_id_by_title(w, name)
+            if space_id is not None:
+                w.genie.trash_space(space_id)
+        else:
+            raise RuntimeError(f"Unknown workspace op {op!r}")
+
+
+def _find_genie_space_id_by_title(client: Any, title: str) -> Optional[str]:
+    """Exact-title Genie space lookup, following pagination."""
+    from services.sdk_checks import iter_genie_spaces
+
+    for space in iter_genie_spaces(client):
+        if (getattr(space, "title", "") or "") == title:
+            return getattr(space, "space_id", None)
+    return None
+
+
 class ResourceService:
     def __init__(self, repo=None):
         # Lazy import keeps namespace/plan tests free of any DB dependency.
@@ -165,7 +468,59 @@ class ResourceService:
                 logger.warning("resource statement failed (%s): %s", item.get("op"), exc)
 
             if record and item.get("resource_type") in ("catalog", "schema"):
-                removed = item.get("op") == "drop_schema"
+                removed = str(item.get("op", "")).startswith("drop_")
+                status = (
+                    "removed" if (removed and entry["status"] == "ok")
+                    else ("active" if entry["status"] == "ok" else "failed")
+                )
+                self._repo.upsert(
+                    event_id=event_id,
+                    fqn=item["target"],
+                    resource_type=item["resource_type"],
+                    status=status,
+                    team_id=item.get("team_id"),
+                    message=entry.get("error"),
+                    created_by=created_by,
+                )
+            executed.append(entry)
+        return {"ok": all_ok, "executed": executed, "blockers": []}
+
+    def execute_workspace_plan(
+        self,
+        event: Dict[str, Any],
+        plan: List[Dict[str, Any]],
+        workspace_executor: Any,
+        *,
+        created_by: Optional[str] = None,
+        record: bool = True,
+    ) -> Dict[str, Any]:
+        """Run workspace-resource plan items in order, recording each outcome.
+
+        Same refusal semantics as :meth:`execute_plan`: any blocker stops the
+        whole plan before anything executes. Per-item failures are recorded
+        (status ``failed``) and don't abort later items — a half-provisioned
+        event is visible in the registry, not hidden."""
+        blockers = plan_blockers(plan)
+        if blockers:
+            return {"ok": False, "executed": [], "blockers": blockers}
+
+        event_id = event.get("event_id")
+        executed: List[Dict[str, Any]] = []
+        all_ok = True
+        for item in plan:
+            entry = dict(item)
+            entry.pop("spec", None)  # specs can be bulky; keep responses lean
+            try:
+                workspace_executor.execute(item)
+                entry["status"] = "ok"
+            except Exception as exc:  # noqa: BLE001 - capture per-item failure
+                all_ok = False
+                entry["status"] = "error"
+                entry["error"] = str(exc)
+                logger.warning("workspace resource op failed (%s): %s", item.get("op"), exc)
+
+            if record:
+                removed = str(item.get("op", "")).startswith("delete_")
                 status = (
                     "removed" if (removed and entry["status"] == "ok")
                     else ("active" if entry["status"] == "ok" else "failed")

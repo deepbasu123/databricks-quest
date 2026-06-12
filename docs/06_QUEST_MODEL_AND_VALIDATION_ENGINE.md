@@ -201,93 +201,56 @@ validators:
     check: job_exists_with_schedule
     mode: sync
     params:
-      name_pattern: "${team_prefix}-daily-ingest"
-      trigger_type: "CRON"
+      name_contains: "${team_slug}"
 ```
 
-### 3. System table validator
+### 3. System-table checks (via `sql_assertion`)
 
-Queries system tables to verify platform activity.
+System-table verification is plain `sql_assertion` against `system.*` tables —
+a dedicated `system_table` type was removed because it had no executable
+backend (the silent-skip failure mode the strict linter now blocks).
 
 Use cases:
 
-- query was run after event start
-- job ran successfully
-- pipeline update completed
-- model serving endpoint was invoked
-- team consumed specific DBU product type
+- query was run after event start (`system.query.history`)
+- pipeline update completed (`system.lakeflow.pipeline_update_timeline`)
+- team consumed a specific DBU product type (`system.billing.usage`)
 
 Example:
 
 ```yaml
 validators:
-  - id: validate_pipeline_run
-    type: system_table
-    table: system.lakeflow.pipeline_update_timeline
-    mode: async
-    lookback: event_window
-    condition: |
-      result_state = 'COMPLETED'
-      AND run_as_user_name IN (${team_members})
-      AND period_start_time >= ${event_start}
+  - id: validate-pipeline-run
+    type: sql_assertion
+    mode: sync
+    statement: |
+      SELECT count(*) FROM system.lakeflow.pipeline_update_timeline
+      WHERE result_state = 'COMPLETED'
+        AND run_as_user_name IN (${team_members})
+        AND period_start_time >= '${event_start}'
+    expect:
+      operator: ">="
+      value: 1
 ```
 
-### 4. Notebook validator
+> The `notebook` and `python_code` validator types were likewise removed from
+> the vocabulary — every type that lints must execute. Their use cases (custom
+> logic, artifact checks) are covered by `sql_assertion` evidence tables,
+> `databricks_sdk` checks, `rest_api`, or `manual` host review.
 
-Runs a Databricks notebook that contains custom validation logic.
+### 4. REST/API validator (`rest_api`)
 
-Use cases:
-
-- complex business logic
-- multi-step checks
-- code-heavy validation
-- generated artifacts
-- model evaluation
-
-Required notebook output:
-
-```json
-{
-  "status": "passed",
-  "message": "Gold table passed all checks",
-  "score_delta": 200,
-  "evidence": {
-    "checks_passed": 7,
-    "rows_validated": 10000
-  }
-}
-```
-
-### 5. Python code validator
-
-Runs a lightweight Python validation function or test suite.
+Queries a serving endpoint **by name** with a host-authored prompt and
+evaluates the reply with the shared expectation engine. Handles chat
+(`messages`) and agent/Responses (`input`) payloads.
 
 Use cases:
 
-- inspect code submitted by participant
-- run pytest-style checks
-- validate a function output
-- validate generated config files
-
-Pattern:
-
-- participant submits repo path, file path, or notebook path
-- validator worker checks out/reads artifact
-- tests run in controlled job environment
-- result is normalized
-
-### 6. REST/API validator
-
-Calls an endpoint and validates response.
-
-Use cases:
-
-- Databricks App task
 - model endpoint invocation
-- external API simulation
-- agent endpoint response check
+- agent (KA/MAS) endpoint response check
+- AI Gateway endpoint contract proof
 
-### 7. Manual validator
+### 5. Manual validator
 
 A host can manually mark a task as passed, failed, or partially passed.
 
@@ -411,9 +374,11 @@ The first-class validation engine ships with **`sql_assertion`** and **`manual`*
   standalone/master, workspace in a federation child — enforced by the
   `scoring_events.idempotency_key` UNIQUE constraint.
 
-`databricks_sdk`, `system_table`, `notebook`, `python_code`, and `rest_api`
-remain accepted by the authoring schema and are dispatched as `skipped` (with a
-host breadcrumb) until their executors land in later PRs.
+Every type in the authoring vocabulary executes: `sql_assertion`,
+`databricks_sdk`/`workspace_api`, `rest_api`, and `manual`. Unknown types are
+lint **errors** (an unknown type would dispatch as `skipped` at runtime — the
+stubbed-task failure mode the linter exists to block). See
+[`AUTHORING_QUEST_PACKS.md`](AUTHORING_QUEST_PACKS.md) for the live contract.
 
 ## Authoring standard
 

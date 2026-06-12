@@ -460,17 +460,49 @@ play is closed).
 
 ## Sample quest packs (works today — PR09)
 
-Two built-in, ready-to-run packs live in [`samples/packs/`](samples/packs/) and
-prove the platform end-to-end:
+The canonical importable catalog lives in
+[`quest_packs/built_in/`](quest_packs/built_in/); the same two packs ship as
+worked examples in [`samples/packs/`](samples/packs/) (kept byte-identical by
+`tests/test_sample_packs.py`):
 
 - **AI/BI GameDay** (`ai_bi_gameday.yml`) — govern a schema, build a trusted
-  revenue model, ship an AI/BI dashboard + Genie space. 3 quests / 6 tasks.
-- **Lakehouse Foundations** (`lakehouse_foundations.yml`) — the bronze→silver
-  medallion loop with a provable quality gate. 3 quests / 6 tasks.
+  revenue model, ship an AI/BI dashboard + Genie space, and prove the Genie's
+  first answer reconciles. 3 quests / 7 tasks.
+- **Lakehouse Foundations** (`lakehouse_foundations.yml`) — the bronze→silver→
+  gold medallion loop with a provable quality gate and a published dashboard.
+  4 quests / 8 tasks.
+- **Lakeflow GameDay: Keep the Lights On** (`lakeflow_pipelines_gameday.yml`,
+  built_in only) — dedupe a dirty landing zone, declare a Lakeflow pipeline,
+  schedule the refresh, prove quality holds. 4 quests / 8 tasks / 725 pts.
+- **Genie Deep Dive: Teach the Genie** (`genie_deep_dive.yml`, built_in only) —
+  model net revenue, create + curate a Genie space, pass a deterministic
+  10-question accuracy benchmark, and drive it via the Conversation API.
+  Advanced. 4 quests / 8 tasks / 975 pts.
+- **AI Gateway GameDay: The Tollbooth** (`ai_gateway_gameday.yml`, built_in
+  only) — govern per-team endpoints: usage tracking, a provable 429, PII
+  masking, fallbacks, and a live REST answer check. Advanced. 4 quests /
+  8 tasks / 900 pts.
+- **Lakebase GameDay: Checkout Line** (`lakebase_roundtrip.yml`, built_in
+  only) — shared Postgres instance, synced catalog, OLTP write path, and a
+  fully automated reverse-ETL integrity proof. Advanced. 4 quests / 8 tasks /
+  950 pts.
+- **Agent Bricks GameDay: The Concierge Desk** (`agent_bricks_gameday.yml`,
+  built_in only) — Knowledge Assistant over a staged corpus, Multi-Agent
+  Supervisor routing docs vs. data, evaluated with a recorded ledger.
+  Advanced. 4 quests / 8 tasks / 900 pts.
+
+The full catalog — progression map, per-pack permissions matrix, operating
+steps, versioning — lives in
+[`quest_packs/built_in/README.md`](quest_packs/built_in/README.md).
+
+Authoring-time check: `python scripts/verify_pack_sql.py <pack> --warehouse-id
+<id> --catalog <writable_catalog>` runs a pack's seeds, SQL solutions, and SQL
+validators against a real warehouse in a scratch schema (the SQL-surface subset
+of the event preflight).
 
 Each ships learning objectives, `resources.seed_sql` (per-team seed data that the
 PR08 bootstrap runs), `quest_completed` unlock gating, `sql_assertion` +
-`databricks_sdk` + `manual` validators, hints, and facilitator notes. Both lint
+`databricks_sdk` + `manual` validators, hints, and facilitator notes. All lint
 and import cleanly and are covered by `tests/test_sample_packs.py`.
 
 Run flow and customization guide:
