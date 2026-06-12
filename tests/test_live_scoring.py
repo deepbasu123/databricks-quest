@@ -11,6 +11,7 @@ auth/event-mode guards are no-ops here).
 """
 
 import asyncio
+from contextlib import contextmanager
 
 import pytest
 from fastapi import HTTPException
@@ -186,21 +187,52 @@ def test_reveal_hint_404_on_task_mismatch(main_module, monkeypatch):
 
 
 class _FakeLedger:
-    """Mimics UNIQUE(idempotency_key) ON CONFLICT DO NOTHING."""
+    """Mimics UNIQUE(idempotency_key) ON CONFLICT DO NOTHING + a transaction.
+
+    Audited scoring mutations (P1-15) run through ``db.transaction()`` and write
+    the ledger row plus an ``event_audit_log`` row through one cursor; this fake
+    models both write paths and both tables against one store.
+    """
 
     def __init__(self):
         self.keys = set()
         self.rows = []
+        self.audit_rows = []
+        self.rowcount = 0
+
+    def _apply(self, sql, params):
+        up = " ".join(sql.split()).upper()
+        if up.startswith("INSERT INTO SCORING_EVENTS"):
+            key = params[-1]
+            if key in self.keys:
+                self.rowcount = 0
+                return 0
+            self.keys.add(key)
+            self.rows.append(params)
+            self.rowcount = 1
+            return 1
+        if up.startswith("INSERT INTO EVENT_AUDIT_LOG"):
+            self.audit_rows.append(params)
+            self.rowcount = 1
+            return 1
+        raise AssertionError(f"unexpected SQL: {up[:60]}")
 
     def execute(self, sql, params=()):
-        up = " ".join(sql.split()).upper()
-        assert up.startswith("INSERT INTO SCORING_EVENTS")
-        key = params[-1]
-        if key in self.keys:
-            return 0
-        self.keys.add(key)
-        self.rows.append(params)
-        return 1
+        return self._apply(sql, params)
+
+    @contextmanager
+    def transaction(self):
+        ledger = self
+
+        class _Cur:
+            def execute(self, sql, params=()):
+                ledger._apply(sql, params)
+
+            @property
+            def rowcount(self):
+                return ledger.rowcount
+
+        yield _Cur()
 
 
 @pytest.fixture()
@@ -209,6 +241,7 @@ def ledger(monkeypatch):
     import db
 
     monkeypatch.setattr(db, "execute", fake.execute)
+    monkeypatch.setattr(db, "transaction", fake.transaction)
     return fake
 
 

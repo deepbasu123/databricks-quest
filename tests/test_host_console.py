@@ -148,19 +148,23 @@ def test_host_adjust_records_and_audits(main_module, monkeypatch):
     m = main_module
     monkeypatch.setattr(m, "_resolve_event_or_404", lambda e: "evt_1")
     monkeypatch.setattr(m.events_repo, "get_team", lambda t: {"team_id": t, "event_id": "evt_1"})
-    monkeypatch.setattr(
-        m.scoring_repo, "record_manual_adjustment",
-        lambda **kw: {"adjustment_id": "adj_1", "scoring_event_id": "score_1", "points_delta": kw["points_delta"]},
-    )
-    audited = {}
-    monkeypatch.setattr(m, "record_audit", lambda **kw: audited.update(kw))
+    captured = {}
+
+    def fake_adjust(**kw):
+        captured.update(kw)
+        return {"adjustment_id": "adj_1", "scoring_event_id": "score_1", "points_delta": kw["points_delta"]}
+
+    monkeypatch.setattr(m.scoring_repo, "record_manual_adjustment", fake_adjust)
 
     body = m.AdjustmentPayload(team_id="team_red", points_delta=-25, reason="penalty: late")
     out = _run(m.host_adjust_score("evt_1", body, user="h@x"))
     assert out["adjustment_id"] == "adj_1"
     assert out["points_delta"] == -25
-    assert audited["action"] == "score.adjust"
-    assert audited["payload"]["points_delta"] == -25
+    # P1-15: the audit descriptor is handed to record_manual_adjustment so it
+    # commits in the same transaction — not a separate best-effort call.
+    audit = captured["audit"]
+    assert audit["action"] == "score.adjust"
+    assert audit["payload"]["points_delta"] == -25
 
 
 # ── repo helpers ─────────────────────────────────────────────────────────

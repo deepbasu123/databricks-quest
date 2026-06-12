@@ -11,6 +11,7 @@ NOTHING`` (first insert affects 1 row, a duplicate affects 0) and assert that:
 """
 
 import re
+from contextlib import contextmanager
 
 import pytest
 
@@ -18,23 +19,56 @@ from services.scoring_service import ScoringService, base_points_idempotency_key
 
 
 class _FakeLedger:
-    """Mimics the UNIQUE(idempotency_key) ON CONFLICT DO NOTHING semantics."""
+    """Mimics UNIQUE(idempotency_key) ON CONFLICT DO NOTHING + a transaction.
+
+    Models both write paths against one store: the autocommit ``db.execute``
+    path (unaudited callers) and the ``db.transaction()`` cursor path (audited
+    awards, P1-15). Audited awards write the scoring row **and** an
+    ``event_audit_log`` row through the same cursor; both land in this fake so a
+    test can assert the audit row is present exactly when a ledger row is.
+    """
 
     def __init__(self):
         self.keys = set()
         self.rows = []
+        self.audit_rows = []
+        self.rowcount = 0
 
-    def execute(self, sql, params=()):
+    def _apply(self, sql, params):
         up = " ".join(sql.split()).upper()
-        if not up.startswith("INSERT INTO SCORING_EVENTS"):
-            raise AssertionError(f"unexpected SQL: {up[:60]}")
-        # idempotency_key is the last positional param in insert_scoring_event.
-        key = params[-1]
-        if key in self.keys:
-            return 0  # ON CONFLICT DO NOTHING
-        self.keys.add(key)
-        self.rows.append(params)
-        return 1
+        if up.startswith("INSERT INTO SCORING_EVENTS"):
+            key = params[-1]  # idempotency_key is the last positional param.
+            if key in self.keys:
+                self.rowcount = 0  # ON CONFLICT DO NOTHING
+                return 0
+            self.keys.add(key)
+            self.rows.append(params)
+            self.rowcount = 1
+            return 1
+        if up.startswith("INSERT INTO EVENT_AUDIT_LOG"):
+            self.audit_rows.append(params)
+            self.rowcount = 1
+            return 1
+        raise AssertionError(f"unexpected SQL: {up[:60]}")
+
+    # Autocommit path: db.execute(sql, params) -> rowcount.
+    def execute(self, sql, params=()):
+        return self._apply(sql, params)
+
+    # Transaction path: `with db.transaction() as cur: cur.execute(...)`.
+    @contextmanager
+    def transaction(self):
+        ledger = self
+
+        class _Cur:
+            def execute(self, sql, params=()):
+                ledger._apply(sql, params)
+
+            @property
+            def rowcount(self):
+                return ledger.rowcount
+
+        yield _Cur()
 
 
 @pytest.fixture()
@@ -43,6 +77,7 @@ def ledger(monkeypatch):
     import db
 
     monkeypatch.setattr(db, "execute", fake.execute)
+    monkeypatch.setattr(db, "transaction", fake.transaction)
     return fake
 
 
@@ -86,6 +121,8 @@ def test_passing_task_awards_once(ledger):
     assert first["awarded"] is True
     assert first["points"] == 200
     assert len(ledger.rows) == 1
+    # P1-15: the award wrote its audit row atomically (same transaction).
+    assert len(ledger.audit_rows) == 1
 
 
 def test_repeat_submission_does_not_double_award(ledger):
@@ -95,6 +132,8 @@ def test_repeat_submission_does_not_double_award(ledger):
     assert second["awarded"] is False
     assert second["points"] == 0
     assert len(ledger.rows) == 1  # still only one ledger row
+    # An idempotent replay writes neither a ledger row nor an audit row.
+    assert len(ledger.audit_rows) == 1
 
 
 def test_distinct_teams_each_get_their_own_award(ledger):
