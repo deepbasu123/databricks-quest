@@ -168,6 +168,53 @@ def assert_within_namespace(
         )
 
 
+# ── Workspace resources (PR21) ───────────────────────────────────────────────
+#
+# Workspace resources (serving endpoints, Lakebase instances, vector search
+# endpoints, Genie spaces) are not catalog.schema targets, so they get their own
+# namespace rule: every event-owned resource name must start with the event's
+# resource prefix. Names are normalized (lowercase; ``_``/`` `` → ``-``) before
+# comparison because different surfaces prefer different separators.
+
+# Charset for workspace resource names/titles: letters, digits, underscore,
+# dash, space. No dots/slashes/quotes — nothing that can smuggle a path or id.
+_RESOURCE_NAME_RE = re.compile(r"^[A-Za-z0-9_\- ]+$")
+
+
+def _normalize_resource_name(name: str) -> str:
+    return re.sub(r"[_ ]+", "-", (name or "").strip().lower())
+
+
+def event_resource_prefix(event: Dict[str, Any]) -> str:
+    """The name prefix every event-owned workspace resource must carry.
+
+    Derived the same way as the default event catalog: ``quest-<slug>-``
+    (normalized separators)."""
+    slug = sanitize_identifier(event.get("slug") or event.get("event_id") or "event")
+    return f"quest-{slug.replace('_', '-')}-"
+
+
+def assert_resource_name_in_namespace(name: str, event: Dict[str, Any]) -> str:
+    """Return ``name`` if it is a safe, event-prefixed workspace resource name.
+
+    The sole authority for what workspace resources an event may create or
+    delete — mirrors :func:`assert_within_namespace` for schemas."""
+    if not name or not _RESOURCE_NAME_RE.match(name):
+        raise NamespaceError(
+            f"Unsafe resource name: {name!r}. Letters, digits, underscores, "
+            "dashes, and spaces only.",
+            code="INVALID_RESOURCE_NAME",
+        )
+    prefix = event_resource_prefix(event)
+    if not _normalize_resource_name(name).startswith(prefix):
+        raise NamespaceError(
+            f"Resource name {name!r} is outside this event's namespace "
+            f"(must start with {prefix!r}, any separator).",
+            code="OUTSIDE_NAMESPACE",
+        )
+    return name
+
+
 # ── Templating for pack-supplied seed SQL ────────────────────────────────────
 
 _ALLOWED_SLOTS = {"team_catalog", "team_schema", "event_id"}

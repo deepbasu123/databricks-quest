@@ -104,6 +104,30 @@ listed above. Confirm the live set at runtime: `GET /api/health` returns
 the only egress is the workspace API host via the app's own identity; prompts
 are host-authored; `max_tokens` ≤ 512 and timeout ≤ 60s are clamped server-side.
 
+### `resources.workspace` — non-SQL resources the bootstrap provisions
+
+Beyond `seed_sql`, a pack may request workspace resources the host bootstrap
+creates (and event teardown deletes):
+
+```yaml
+resources:
+  workspace:
+    - type: serving_endpoint        # lakebase_instance | vector_search_endpoint
+      name: "quest-${event_slug}-${team_slug}-gw"   # | serving_endpoint | genie_space
+      spec: {config: {served_entities: [...]}}
+    - type: lakebase_instance
+      name: "quest-${event_slug}-pg"
+      spec: {capacity: CU_1}
+```
+
+Rules (lint-enforced): the `type` must be one of the four known kinds; `name`
+must include `${event_slug}` — rendered names must start with the event's
+namespace prefix `quest-<slug>-` (any separator) or the plan flags a blocker.
+A `${team_slug}` slot makes the entry per-team. Cost caps: 1 Lakebase
+instance, 1 vector search endpoint, 32 serving endpoints per event — exceeding
+a cap is a plan blocker, never silent truncation. Teardown deletes only
+resources that are **registry-recorded for the event AND namespace-prefixed**.
+
 ### `solutions` — the machine-playability contract (host-only)
 
 Every task with auto validators carries ordered `solutions:` steps that perform

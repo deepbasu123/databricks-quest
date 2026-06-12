@@ -241,6 +241,8 @@ def lint_manifest_text(manifest_yaml: str, strict: bool = False) -> LintResult:
             if strict:
                 _lint_task_playability(result, tloc, task)
 
+    _lint_workspace_resources(result, manifest)
+
     # Unlock-rule references must point at real quest slugs.
     for qi, quest in enumerate(manifest.quests):
         rule = quest.unlock_rule
@@ -263,6 +265,52 @@ def lint_manifest_text(manifest_yaml: str, strict: bool = False) -> LintResult:
                 )
 
     return result
+
+
+def _lint_workspace_resources(result: LintResult, manifest: Any) -> None:
+    """Validate optional ``resources.workspace`` entries (provisioned by PR21).
+
+    Each entry: ``type`` (known workspace resource type), ``name`` (template
+    that must carry the event slug so the rendered name passes the namespace
+    prefix guard; ``${team_slug}`` makes it per-team), optional ``spec``."""
+    resources = manifest.resources if isinstance(manifest.resources, dict) else None
+    if not resources:
+        return
+    entries = resources.get("workspace")
+    if entries is None:
+        return
+    from services.resource_service import KNOWN_WORKSPACE_RESOURCE_TYPES
+
+    if not isinstance(entries, list):
+        result.error("resources.workspace", "resources.workspace must be a list.")
+        return
+    for i, entry in enumerate(entries):
+        loc = f"resources.workspace[{i}]"
+        if not isinstance(entry, dict):
+            result.error(loc, "Each workspace resource must be a mapping.")
+            continue
+        rtype = str(entry.get("type") or "").strip()
+        if rtype not in KNOWN_WORKSPACE_RESOURCE_TYPES:
+            result.error(
+                f"{loc}.type",
+                f"Unknown workspace resource type '{rtype}'. Known: "
+                + ", ".join(sorted(KNOWN_WORKSPACE_RESOURCE_TYPES)),
+            )
+        name = str(entry.get("name") or "")
+        if not name.strip():
+            result.error(f"{loc}.name", "Workspace resource requires a 'name' template.")
+        elif "${event_slug}" not in name:
+            result.error(
+                f"{loc}.name",
+                "Workspace resource names must include '${event_slug}' (e.g. "
+                "'quest-${event_slug}-${team_slug}-gateway') so the rendered "
+                "name passes the event namespace prefix guard.",
+            )
+        else:
+            _check_template_vars(result, f"{loc}.name", name)
+        spec = entry.get("spec")
+        if spec is not None and not isinstance(spec, dict):
+            result.error(f"{loc}.spec", "Workspace resource 'spec' must be a mapping.")
 
 
 def _lint_solutions(result: LintResult, tloc: str, task: Any) -> None:
