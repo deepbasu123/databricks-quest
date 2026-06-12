@@ -17,10 +17,19 @@ from services.quest_pack_loader import compute_content_hash
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACK_DIR = os.path.join(REPO_ROOT, "samples", "packs")
+BUILT_IN_DIR = os.path.join(REPO_ROOT, "quest_packs", "built_in")
+
+# built_in is the canonical importable catalog; samples keeps the worked
+# examples the docs walk through. The two packs below ship in both places and
+# must stay byte-identical (see test_mirrored_packs_do_not_drift).
+MIRRORED_PACKS = ("ai_bi_gameday.yml", "lakehouse_foundations.yml")
 
 
 def _pack_paths():
-    return sorted(glob.glob(os.path.join(PACK_DIR, "*.yml")))
+    return sorted(
+        glob.glob(os.path.join(PACK_DIR, "*.yml"))
+        + glob.glob(os.path.join(BUILT_IN_DIR, "*.yml"))
+    )
 
 
 def test_at_least_two_sample_packs_shipped():
@@ -66,9 +75,22 @@ def test_sample_pack_content_hash_is_stable(path):
     assert h1 == h2
 
 
-def test_sample_packs_have_distinct_slugs():
-    slugs = []
-    for path in _pack_paths():
-        with open(path, "r", encoding="utf-8") as fh:
-            slugs.append(lint_manifest_text(fh.read()).manifest.pack.slug)
-    assert len(slugs) == len(set(slugs))
+def test_packs_have_distinct_slugs_within_each_dir():
+    for directory in (PACK_DIR, BUILT_IN_DIR):
+        slugs = []
+        for path in sorted(glob.glob(os.path.join(directory, "*.yml"))):
+            with open(path, "r", encoding="utf-8") as fh:
+                slugs.append(lint_manifest_text(fh.read()).manifest.pack.slug)
+        assert len(slugs) == len(set(slugs)), directory
+
+
+@pytest.mark.parametrize("filename", MIRRORED_PACKS)
+def test_mirrored_packs_do_not_drift(filename):
+    with open(os.path.join(PACK_DIR, filename), "r", encoding="utf-8") as fh:
+        sample = fh.read()
+    with open(os.path.join(BUILT_IN_DIR, filename), "r", encoding="utf-8") as fh:
+        built_in = fh.read()
+    assert sample == built_in, (
+        f"{filename} differs between samples/packs/ and quest_packs/built_in/ — "
+        "edit one and copy to the other; they must stay identical."
+    )
