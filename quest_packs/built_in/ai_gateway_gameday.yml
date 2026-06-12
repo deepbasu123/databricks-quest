@@ -1,0 +1,436 @@
+schema_version: "1.0"
+
+pack:
+  slug: ai-gateway-gameday
+  title: "AI Gateway GameDay: The Tollbooth"
+  version: "1.0.0"
+  description: >
+    An advanced GameDay where teams rebuild the company's front door to AI:
+    every token through one governed serving endpoint — metered, rate-limited,
+    guarded against PII leaks, and resilient. The host bootstrap pre-provisions
+    one endpoint per team (resources.workspace); players own the AI Gateway
+    configuration, not endpoint creation. Teams need CAN_MANAGE on their
+    endpoint; the app identity needs CAN_VIEW for the gateway checks.
+  audience: ["platform-owners", "ml-engineers", "security-architects"]
+  duration_minutes: 120
+  difficulty: advanced
+  owner: field-enablement
+
+scenario:
+  setup: >
+    Last month an intern's runaway script burned the quarter's LLM budget in a
+    weekend, and legal found a customer's phone number in a prompt log.
+    Northwind's CTO froze all direct model access. Your team rebuilds the front
+    door: one governed endpoint per team — usage tracked, rate limited,
+    guardrails on, and cheap to fail over. Re-open AI for the company without
+    re-opening the incident report.
+
+learning_objectives:
+  - "Operate a governed serving endpoint as the single front door to models."
+  - "Enable AI Gateway usage tracking and prove invocations are metered."
+  - "Set rate limits and demonstrate (deliberately) hitting them."
+  - "Apply guardrails so PII never leaves through a prompt or completion."
+  - "Configure fallbacks/traffic management and prove the API contract."
+
+capabilities_required:
+  - "Serverless SQL warehouse"
+  - "Unity Catalog schema per team"
+  - "Model serving + AI Gateway (per-team endpoints, host-provisioned)"
+  - "ai_query() on the warehouse"
+
+# The host bootstrap creates one serving endpoint per team. The spec serves
+# the smallest capable chat model with scale-to-zero provisioned throughput;
+# verify the entity name + a single test create on your workspace during
+# preflight, and swap the model if your region offers a different catalog.
+resources:
+  workspace:
+    - type: serving_endpoint
+      name: "quest-${event_slug}-${team_slug}-gw"
+      spec:
+        config:
+          served_entities:
+            - entity_name: "system.ai.databricks-claude-haiku-4-5"
+              entity_version: "1"
+              min_provisioned_throughput: 0
+              max_provisioned_throughput: 1
+  seed_sql:
+    - >
+      CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.support_tickets AS
+      SELECT
+        CAST(id AS INT) AS ticket_id,
+        concat('Customer ', CAST(1000 + id AS STRING),
+               ' reports an issue. Callback number 555-01',
+               lpad(CAST(id % 100 AS STRING), 2, '0'),
+               '. Order ref ORD-', CAST(7000 + id AS STRING), '.') AS ticket_text,
+        element_at(array('billing','shipping','quality','account'),
+                   CAST(id % 4 AS INT) + 1) AS category
+      FROM range(100)
+    - >
+      CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.prompt_log
+      (ts TIMESTAMP, kind STRING, status_code INT, detail STRING)
+
+scoring_defaults:
+  base_points: 100
+  first_blood_bonus: 25
+
+quests:
+  - slug: front-door
+    title: "One endpoint to rule them all"
+    category: foundations
+    difficulty: intermediate
+    base_points: 200
+    sort_order: 1
+    narrative_md: >
+      The host has parked a governed endpoint with your team's name on it.
+      Claim it, prove it's alive, and put your first metered tokens through it.
+    facilitator_notes: >
+      Endpoints are pre-provisioned by bootstrap as
+      quest-<event>-<team>-gw with scale-to-zero — first tokens may take a
+      minute while the endpoint warms. Grant each team CAN_MANAGE on theirs at
+      kickoff. The app identity needs CAN_VIEW for the SDK checks.
+    tasks:
+      - slug: claim-endpoint
+        title: "Confirm your endpoint is ready"
+        objective: "Your team's gateway endpoint exists and serves chat."
+        instructions_md: >
+          Find your endpoint (its name contains your team slug), open it in
+          Serving, and confirm it reaches the READY state.
+        success_criteria_md: "The team endpoint is READY."
+        points: 75
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: endpoint-ready
+            type: databricks_sdk
+            mode: sync
+            check: serving_endpoint_exists
+            params:
+              name_contains: "${team_slug}"
+              require_ready: true
+          - id: host-confirm-endpoint
+            type: manual
+            mode: sync
+        hints:
+          - title: "Cold start"
+            body_md: "Scale-to-zero endpoints wake on first call — send one and wait."
+            penalty_points: -5
+        solutions:
+          - skip: "Endpoint is provisioned by host bootstrap (resources.workspace)."
+      - slug: first-tokens
+        title: "First metered tokens"
+        objective: "Call the endpoint from SQL and log the invocation."
+        instructions_md: >
+          Use `ai_query('<your endpoint name>', ...)` from the SQL editor to
+          summarize one support ticket, and record the call into
+          `${team_catalog}.${team_schema}.prompt_log` with kind 'first-call'
+          and status_code 200.
+        success_criteria_md: "prompt_log shows your first successful call."
+        points: 125
+        validation_mode: auto
+        validators:
+          - id: first-call-logged
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) FROM ${team_catalog}.${team_schema}.prompt_log
+              WHERE kind = 'first-call' AND status_code = 200
+            expect:
+              operator: ">="
+              value: 1
+        hints:
+          - title: "ai_query"
+            body_md: "SELECT ai_query('<endpoint>', 'Summarize: ' || ticket_text) FROM support_tickets LIMIT 1."
+            penalty_points: -10
+        solutions:
+          - sql: >
+              INSERT INTO ${team_catalog}.${team_schema}.prompt_log
+              SELECT current_timestamp(), 'first-call', 200, 'preflight call recorded'
+
+  - slug: meter-and-limit
+    title: "The tollbooth"
+    category: governance
+    difficulty: advanced
+    base_points: 250
+    sort_order: 2
+    unlock_rule:
+      type: quest_completed
+      quest_slug: front-door
+    narrative_md: >
+      Metering before money: turn on usage tracking so every token is
+      accounted for, then put a rate limit on the door — and prove it works by
+      getting yourselves rejected.
+    facilitator_notes: >
+      Both tasks pair an ai_gateway_configured check with host review. The
+      rate-limit proof is deliberately fun: the team must show a real 429.
+      Per-team endpoints keep one team's limit testing from throttling
+      another.
+    tasks:
+      - slug: usage-tracking
+        title: "Meter every token"
+        objective: "AI Gateway usage tracking is enabled on your endpoint."
+        instructions_md: >
+          In your endpoint's AI Gateway tab, enable usage tracking (inference
+          tables). Show the host where the usage lands.
+        success_criteria_md: "Gateway usage tracking is enabled."
+        points: 125
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: gateway-usage
+            type: databricks_sdk
+            mode: sync
+            check: ai_gateway_configured
+            params:
+              name_contains: "${team_slug}"
+              require_usage_tracking: true
+          - id: host-confirm-usage
+            type: manual
+            mode: sync
+        hints:
+          - title: "Where"
+            body_md: "Serving → your endpoint → AI Gateway → Usage tracking."
+            penalty_points: -10
+        solutions:
+          - workspace_op:
+              op: put_ai_gateway
+              endpoint: "quest-${event_slug}-${team_slug}-gw"
+              usage_tracking: true
+      - slug: rate-limit
+        title: "Prove the limit bites"
+        objective: "A per-user rate limit exists — and you hit it."
+        instructions_md: >
+          Configure a low per-user rate limit (e.g. 5 calls/minute) on your
+          endpoint, then exceed it and record the rejection into prompt_log
+          with kind 'rate-limit' and status_code 429.
+        success_criteria_md: "Rate limit configured; a real 429 is logged."
+        points: 125
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: gateway-rate-limit
+            type: databricks_sdk
+            mode: sync
+            check: ai_gateway_configured
+            params:
+              name_contains: "${team_slug}"
+              require_rate_limits: true
+          - id: rejection-logged
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) FROM ${team_catalog}.${team_schema}.prompt_log
+              WHERE kind = 'rate-limit' AND status_code = 429
+            expect:
+              operator: ">="
+              value: 1
+          - id: host-confirm-limit
+            type: manual
+            mode: sync
+        hints:
+          - title: "Hitting it"
+            body_md: "A tight limit + a short loop of ai_query calls gets you a 429 fast."
+            penalty_points: -15
+        solutions:
+          - workspace_op:
+              op: put_ai_gateway
+              endpoint: "quest-${event_slug}-${team_slug}-gw"
+              rate_limits:
+                - calls: 5
+                  key: user
+                  renewal_period: minute
+          - sql: >
+              INSERT INTO ${team_catalog}.${team_schema}.prompt_log
+              SELECT current_timestamp(), 'rate-limit', 429, 'preflight rejection recorded'
+
+  - slug: guardrails
+    title: "Nothing leaks"
+    category: security
+    difficulty: advanced
+    base_points: 250
+    sort_order: 3
+    unlock_rule:
+      type: quest_completed
+      quest_slug: meter-and-limit
+    narrative_md: >
+      The incident report had a phone number in it. Never again: turn on
+      guardrails and prove the seeded (synthetic!) PII can't make it through
+      your pipeline unmasked.
+    facilitator_notes: >
+      The support_tickets seed plants synthetic phone numbers shaped 555-01xx —
+      say out loud that the PII is fake. The masking proof is fully automated:
+      a regex over the team's masked output. Guardrail availability varies by
+      region — if PII detection isn't offered, the gateway check still passes
+      on the safety guardrail and the SQL proof carries the masking evidence.
+    tasks:
+      - slug: pii-guard
+        title: "Mask the tickets"
+        objective: "Guardrails on; the masked corpus contains zero phone numbers."
+        instructions_md: >
+          Enable guardrails on your endpoint (PII detection where available).
+          Then produce `${team_catalog}.${team_schema}.tickets_masked`
+          (`ticket_id INT, masked_text STRING`) — every ticket processed, no
+          phone number surviving. Use ai_query through your endpoint or the
+          gateway's masking; the proof is in the output.
+        success_criteria_md: "≥100 masked rows; zero match the phone pattern."
+        points: 150
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: gateway-guardrails
+            type: databricks_sdk
+            mode: sync
+            check: ai_gateway_configured
+            params:
+              name_contains: "${team_slug}"
+              require_guardrails: true
+          - id: all-tickets-processed
+            type: sql_assertion
+            mode: sync
+            statement: "SELECT count(*) FROM ${team_catalog}.${team_schema}.tickets_masked"
+            expect:
+              operator: ">="
+              value: 100
+          - id: no-phone-numbers
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) FROM ${team_catalog}.${team_schema}.tickets_masked
+              WHERE masked_text RLIKE '555-01[0-9]{2}'
+            expect:
+              operator: "="
+              value: 0
+          - id: host-confirm-guardrails
+            type: manual
+            mode: sync
+        hints:
+          - title: "Belt and braces"
+            body_md: >
+              Gateway guardrails stop leaks at the door; regexp_replace in your
+              pipeline guarantees the stored output. Use both.
+            penalty_points: -15
+        solutions:
+          - workspace_op:
+              op: put_ai_gateway
+              endpoint: "quest-${event_slug}-${team_slug}-gw"
+              guardrails:
+                input:
+                  safety: true
+          - sql: >
+              CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.tickets_masked AS
+              SELECT ticket_id,
+                     regexp_replace(ticket_text, '555-01[0-9]{2}', '[REDACTED]') AS masked_text
+              FROM ${team_catalog}.${team_schema}.support_tickets
+      - slug: topic-block
+        title: "Block the off-limits topic"
+        objective: "An invalid-keywords guardrail rejects a probe."
+        instructions_md: >
+          Add an invalid-keywords guardrail (e.g. block 'password'), probe it,
+          and record the blocked attempt into prompt_log with kind
+          'topic-block' and status_code 400.
+        success_criteria_md: "A blocked probe is logged."
+        points: 100
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: block-logged
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) FROM ${team_catalog}.${team_schema}.prompt_log
+              WHERE kind = 'topic-block'
+            expect:
+              operator: ">="
+              value: 1
+          - id: host-confirm-block
+            type: manual
+            mode: sync
+        hints:
+          - title: "Where"
+            body_md: "AI Gateway → Guardrails → invalid keywords."
+            penalty_points: -10
+        solutions:
+          - sql: >
+              INSERT INTO ${team_catalog}.${team_schema}.prompt_log
+              SELECT current_timestamp(), 'topic-block', 400, 'preflight blocked probe recorded'
+
+  - slug: resilience
+    title: "Split and survive"
+    category: operations
+    difficulty: advanced
+    base_points: 200
+    sort_order: 4
+    unlock_rule:
+      type: quest_completed
+      quest_slug: guardrails
+    narrative_md: >
+      Governed is not enough — the front door must stay open when a model has
+      a bad day. Configure fallbacks and prove the raw API contract your
+      downstream apps will rely on.
+    facilitator_notes: >
+      The fallback check inspects the gateway's fallback config. The REST
+      proof is auto-graded by the platform actually querying the team's
+      endpoint — if the endpoint can't answer, the task routes to host review
+      rather than failing the team.
+    tasks:
+      - slug: fallbacks
+        title: "Configure fallbacks"
+        objective: "The gateway routes around failures."
+        instructions_md: >
+          Enable fallback routing on your endpoint (AI Gateway → Fallbacks) so
+          a failed served entity retries on the next one.
+        success_criteria_md: "Gateway fallback config is enabled."
+        points: 125
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: gateway-fallbacks
+            type: databricks_sdk
+            mode: sync
+            check: ai_gateway_configured
+            params:
+              name_contains: "${team_slug}"
+              require_fallbacks: true
+          - id: host-confirm-fallbacks
+            type: manual
+            mode: sync
+        hints:
+          - title: "One entity?"
+            body_md: "Fallbacks need ≥1 alternative route — discuss with the host what you'd add in production."
+            penalty_points: -10
+        solutions:
+          - workspace_op:
+              op: put_ai_gateway
+              endpoint: "quest-${event_slug}-${team_slug}-gw"
+              fallbacks: true
+      - slug: rest-proof
+        title: "Prove the API contract"
+        objective: "Your endpoint answers correctly over the raw API."
+        instructions_md: >
+          Downstream apps will call your endpoint over REST. Make sure it
+          answers: the platform will query your endpoint directly with a
+          checked question when you submit.
+        success_criteria_md: "The endpoint returns the expected answer."
+        points: 75
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: endpoint-answers
+            type: rest_api
+            mode: sync
+            endpoint: "quest-${event_slug}-${team_slug}-gw"
+            prompt: "What is 2+2? Answer with the number only."
+            max_tokens: 16
+            expect:
+              operator: contains
+              value: "4"
+          - id: host-confirm-rest
+            type: manual
+            mode: sync
+        hints:
+          - title: "Self-test first"
+            body_md: "curl /serving-endpoints/<name>/invocations with a messages payload before submitting."
+            penalty_points: -10
+        solutions:
+          - skip: >
+              The rest_api validator itself performs the call; the endpoint
+              exists from bootstrap and is warmed by first-tokens.
