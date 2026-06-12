@@ -86,6 +86,19 @@ def is_child() -> bool:
     return QUEST_ROLE == "child"
 
 
+def leaderboard_cache_ttl() -> float:
+    """Seconds to cache the adoption leaderboard (P2-4); 0 disables.
+
+    A leaderboard tolerates a few seconds of staleness, so a short TTL collapses
+    a burst of client polls into one DB aggregation. Read at call time so it can
+    be tuned per deployment without a rebuild.
+    """
+    try:
+        return float(os.getenv("LEADERBOARD_CACHE_TTL_SECONDS", "10") or 10)
+    except ValueError:
+        return 10.0
+
+
 def summary() -> dict:
     """Small, non-sensitive snapshot of the runtime role for /api/health etc."""
     return {
