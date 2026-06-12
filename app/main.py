@@ -22,6 +22,7 @@ from db import (
     execute_query,
 )
 import config
+from rate_limit import SlidingWindowLimiter
 from repositories import (
     QuestPacksRepository,
     EventsRepository,
@@ -485,6 +486,13 @@ events_repo = EventsRepository()
 attempts_repo = AttemptsRepository()
 leaderboard_repo = LeaderboardRepository()
 scoring_repo = ScoringRepository()
+
+# P1-18: per-player attempt rate limit. Defaults: 30 attempts / 60s. Set
+# QUEST_ATTEMPT_RATE_LIMIT=0 to disable.
+_attempt_limiter = SlidingWindowLimiter(
+    max_events=int(os.getenv("QUEST_ATTEMPT_RATE_LIMIT", "30")),
+    window_seconds=float(os.getenv("QUEST_ATTEMPT_RATE_WINDOW_SECONDS", "60")),
+)
 federation_repo = FederationRepository()
 announcements_repo = AnnouncementsRepository()
 resources_repo = ResourcesRepository()
@@ -2442,6 +2450,20 @@ async def submit_attempt(
     """
     user = get_user_email(request)
     resolved_event_id = _resolve_event_or_404(event_id)
+
+    # P1-18: cap attempt submissions per player (and per team) before doing any
+    # validator work, which runs real warehouse SQL / SDK calls. Process-local
+    # sliding window; disabled when the limit is <= 0.
+    if not _attempt_limiter.allow(f"user:{resolved_event_id}:{user}"):
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": {
+                    "code": "RATE_LIMITED",
+                    "message": "Too many attempts — slow down and try again shortly.",
+                }
+            },
+        )
 
     # Event lifecycle gate: only an active event accepts new attempts. Paused,
     # frozen, completed, draft/ready, and archived all block with a safe message.
