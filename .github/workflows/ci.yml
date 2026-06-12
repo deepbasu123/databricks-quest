@@ -1,0 +1,28 @@
+# CI — gap P1-12. On every PR and push to main: install the app dependencies and
+# run the test suite. The suite stubs/fakes Lakebase, so no Postgres service is
+# required (260 tests). databricks-sdk and psycopg2 are imported lazily by the
+# app and install as binary wheels here.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r app/requirements.txt pytest
+      - name: Run tests
+        run: python -m pytest tests/ -q
