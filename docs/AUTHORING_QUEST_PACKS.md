@@ -139,6 +139,18 @@ lint API) adds the rules CI enforces on every shipped pack:
 `tests/test_sample_packs.py` strict-lints everything in `quest_packs/built_in/`
 and `samples/packs/` — a pack that can't prove playability can't ship.
 
+After strict lint, verify the SQL surface live before opening a PR:
+
+```bash
+python scripts/verify_pack_sql.py quest_packs/built_in/<pack>.yml \
+  --warehouse-id <id> --catalog <writable_catalog>
+```
+
+It seeds a scratch schema, executes every `sql` solution step, evaluates every
+`sql_assertion`, and drops the schema — catching SQL syntax/reconciliation bugs
+that static lint cannot. Validators that depend on `workspace_op` outputs are
+reported as SKIP; the full event preflight covers those.
+
 ### `sql_assertion` safety (critical)
 
 The SQL safety layer ([`app/validators/safety.py`](../app/validators/safety.py))
