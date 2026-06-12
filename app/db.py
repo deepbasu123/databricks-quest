@@ -203,14 +203,18 @@ def warehouse_backend() -> bool:
 _CONN_TTL_SECONDS = 2700  # 45 minutes
 _conn_cache: Dict[str, Any] = {"conn": None, "expiry": 0}
 
-# Bounded connection pool for the federation writer-credential path only.
-# ADR_006 flags that many `child` apps each fanning connections into the MASTER
-# workspace's shared Lakebase can exhaust connections; a small per-process pool
-# caps and reuses them. The workspace-identity path (standalone/master/adoption)
-# keeps using the single cached connection below and never touches this pool.
+# Bounded connection pool for ALL roles (P1-10). Every query helper leases from
+# this pool instead of sharing one process-wide connection, so concurrent
+# requests — each offloaded to a worker thread (see ``aexecute_query``) — get
+# their own connection and never block the event loop or corrupt a shared
+# cursor. ``LAKEBASE_POOL_MAX`` caps fan-out into the (possibly shared, per
+# ADR_006) Lakebase. Connections are validated on borrow and minted by a factory
+# that resolves a FRESH credential each time, so short-lived workspace-OAuth
+# tokens are refreshed as the pool grows/replaces connections.
 _POOL_MIN = int(os.getenv("LAKEBASE_POOL_MIN", "1"))
 _POOL_MAX = int(os.getenv("LAKEBASE_POOL_MAX", "8"))
 _pool: Any = None
+_pool_lock = __import__("threading").Lock()
 
 
 def _writer_credential_path() -> bool:
@@ -218,29 +222,97 @@ def _writer_credential_path() -> bool:
     return bool(LAKEBASE_USER and LAKEBASE_PASSWORD)
 
 
-def _get_pool():
-    """Lazily build the bounded ThreadedConnectionPool for the writer path."""
+def _connection_factory():
+    """Open one fresh Lakebase connection, resolving credentials at call time.
+
+    Writer-credential (federation child): the static shared credential. Otherwise
+    the workspace identity — re-resolved per connection so an expiring OAuth token
+    is refreshed whenever the pool opens a new physical connection.
+    """
+    if not LAKEBASE_HOST:
+        raise RuntimeError("LAKEBASE_HOST not configured")
+    if _writer_credential_path():
+        user, token = LAKEBASE_USER, LAKEBASE_PASSWORD
+    else:
+        user, token = _workspace_credentials()
+    return _connect(LAKEBASE_HOST, LAKEBASE_DB, user, token, LAKEBASE_PORT)
+
+
+class _TokenAwarePool:
+    """A small, thread-safe, bounded connection pool with validate-on-borrow.
+
+    Unlike ``psycopg2.pool`` (which reuses the fixed credentials it was built
+    with), new physical connections come from a factory that re-resolves
+    credentials, so short-lived OAuth tokens are honoured. A bounded semaphore
+    caps total concurrent connections and applies backpressure when saturated.
+    """
+
+    def __init__(self, maxconn: int, factory):
+        import threading
+
+        self._factory = factory
+        self._idle: list = []
+        self._lock = threading.Lock()
+        self._slots = threading.BoundedSemaphore(max(1, maxconn))
+
+    @staticmethod
+    def _alive(conn) -> bool:
+        try:
+            with conn.cursor() as c:
+                c.execute("SELECT 1")
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    @staticmethod
+    def _close(conn) -> None:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def getconn(self):
+        self._slots.acquire()
+        try:
+            with self._lock:
+                conn = self._idle.pop() if self._idle else None
+            if conn is not None and self._alive(conn):
+                return conn
+            self._close(conn)
+            return self._factory()
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def putconn(self, conn, close: bool = False) -> None:
+        try:
+            if close or conn is None:
+                self._close(conn)
+            else:
+                with self._lock:
+                    self._idle.append(conn)
+        finally:
+            self._slots.release()
+
+    def closeall(self) -> None:
+        with self._lock:
+            while self._idle:
+                self._close(self._idle.pop())
+
+
+def _get_pool() -> "_TokenAwarePool":
+    """Lazily build the process-wide bounded pool (all roles)."""
     global _pool
     if _pool is None:
-        if not LAKEBASE_HOST:
-            raise RuntimeError("LAKEBASE_HOST not configured")
-        from psycopg2.pool import ThreadedConnectionPool
-
-        _pool = ThreadedConnectionPool(
-            _POOL_MIN,
-            _POOL_MAX,
-            host=LAKEBASE_HOST,
-            port=LAKEBASE_PORT,
-            dbname=LAKEBASE_DB,
-            user=LAKEBASE_USER,
-            password=LAKEBASE_PASSWORD,
-            sslmode="require",
-            connect_timeout=10,
-        )
-        logger.info(
-            "Lakebase writer-credential pool created as %s (min=%d max=%d)",
-            LAKEBASE_USER, _POOL_MIN, _POOL_MAX,
-        )
+        with _pool_lock:
+            if _pool is None:
+                _pool = _TokenAwarePool(_POOL_MAX, _connection_factory)
+                logger.info(
+                    "Lakebase pool created (max=%d, %s)",
+                    _POOL_MAX,
+                    "writer credential" if _writer_credential_path() else "workspace identity",
+                )
     return _pool
 
 
@@ -362,55 +434,36 @@ def get_lakebase_connection():
 
 @contextmanager
 def _lease(autocommit: bool):
-    """Lease a connection for one unit of work, releasing it afterwards.
+    """Lease a pooled connection for one unit of work, releasing it afterwards.
 
-    Two paths, chosen by deployment shape:
-
-    - Writer-credential (federation ``child`` → master): borrow from the bounded
-      pool and return it afterwards (closing it if the work raised, so a poisoned
-      session is never reused). This caps the connection fan-out into the shared
-      master Lakebase per ADR_006.
-    - Workspace-identity (standalone / master / adoption): reuse the single
-      cached, revalidated connection exactly as before — unchanged behaviour.
+    All roles borrow from the bounded pool (P1-10) — no more single process-wide
+    connection for standalone/master — so concurrent, thread-offloaded queries
+    each get their own connection. A connection whose work raised is closed
+    rather than returned, so a poisoned session is never reused.
 
     Commits/rolls back automatically when ``autocommit`` is False.
     """
-    if _writer_credential_path():
-        pool = _get_pool()
-        conn = pool.getconn()
-        broken = False
-        try:
-            conn.autocommit = autocommit
-            yield conn
-            if not autocommit:
-                conn.commit()
-        except Exception:
-            broken = True
-            if not autocommit:
-                try:
-                    conn.rollback()
-                except Exception:  # noqa: BLE001
-                    pass
-            raise
-        finally:
+    pool = _get_pool()
+    conn = pool.getconn()
+    broken = False
+    try:
+        conn.autocommit = autocommit
+        yield conn
+        if not autocommit:
+            conn.commit()
+    except Exception:
+        broken = True
+        if not autocommit:
             try:
-                pool.putconn(conn, close=broken)
+                conn.rollback()
             except Exception:  # noqa: BLE001
                 pass
-    else:
-        conn = get_connection()
-        prev = conn.autocommit
-        conn.autocommit = autocommit
+        raise
+    finally:
         try:
-            yield conn
-            if not autocommit:
-                conn.commit()
-        except Exception:
-            if not autocommit:
-                conn.rollback()
-            raise
-        finally:
-            conn.autocommit = prev
+            pool.putconn(conn, close=broken)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def execute_query(query: str, params: Tuple = ()) -> List[Dict[str, Any]]:
@@ -457,6 +510,26 @@ def transaction():
     with _lease(autocommit=False) as conn:
         with conn.cursor() as cur:
             yield cur
+
+
+async def aexecute_query(query: str, params: Tuple = ()) -> List[Dict[str, Any]]:
+    """Async wrapper for :func:`execute_query` (P1-10).
+
+    Offloads the blocking psycopg2 read to a worker thread so an ``async`` route
+    never blocks the event loop on DB I/O. Each offloaded call leases its own
+    pooled connection, so they run concurrently. Migrate hot async endpoints to
+    this (and :func:`aexecute`) from the bare sync helpers.
+    """
+    import asyncio
+
+    return await asyncio.to_thread(execute_query, query, params)
+
+
+async def aexecute(query: str, params: Tuple = ()) -> int:
+    """Async wrapper for :func:`execute` — offloads the blocking write off-loop."""
+    import asyncio
+
+    return await asyncio.to_thread(execute, query, params)
 
 
 def healthcheck() -> bool:
