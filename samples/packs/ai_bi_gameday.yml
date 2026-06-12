@@ -3,7 +3,7 @@ schema_version: "1.0"
 pack:
   slug: ai-bi-gameday
   title: "AI/BI GameDay"
-  version: "1.0.0"
+  version: "1.1.0"
   description: >
     A hands-on GameDay where teams stand up a governed analytics layer, build an
     AI/BI dashboard, and put a Genie space in front of it. Designed to run on a
@@ -35,17 +35,21 @@ capabilities_required:
 
 # These statements run per team during host bootstrap (PR08). They reference
 # only the team's own schema via the server-resolved template variables, so the
-# namespace guard keeps every team isolated.
+# namespace guard keeps every team isolated. The feed is deterministically
+# generated (no rand()) — 200 orders across 4 regions and 6 products — so the
+# revenue model is non-trivial and validator outcomes are stable.
 resources:
   seed_sql:
     - >
-      CREATE TABLE IF NOT EXISTS ${team_catalog}.${team_schema}.raw_sales
-      (order_id INT, region STRING, product STRING, amount DOUBLE, order_ts TIMESTAMP)
-    - >
-      INSERT INTO ${team_catalog}.${team_schema}.raw_sales VALUES
-      (1, 'EMEA', 'Trail Jacket', 220.0, current_timestamp()),
-      (2, 'AMER', 'Summit Pack', 140.0, current_timestamp()),
-      (3, 'APAC', 'Trail Jacket', 220.0, current_timestamp())
+      CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.raw_sales AS
+      SELECT
+        CAST(id AS INT) AS order_id,
+        element_at(array('EMEA','AMER','APAC','LATAM'), CAST(id % 4 AS INT) + 1) AS region,
+        element_at(array('Trail Jacket','Summit Pack','Glacier Tent','Ridge Boots',
+                         'Basecamp Stove','Alpine Bottle'), CAST(id % 6 AS INT) + 1) AS product,
+        CAST(20 + (id * 37) % 480 AS DOUBLE) + 0.99 AS amount,
+        timestampadd(HOUR, -CAST(id % 72 AS INT), current_timestamp()) AS order_ts
+      FROM range(200)
 
 scoring_defaults:
   base_points: 100
@@ -92,7 +96,7 @@ quests:
         instructions_md: >
           Your team works inside `${team_catalog}.${team_schema}`. Verify the raw
           feed landed.
-        success_criteria_md: "The raw_sales table has at least one row."
+        success_criteria_md: "The raw_sales table has at least 150 rows."
         points: 75
         validation_mode: auto
         validators:
@@ -102,7 +106,7 @@ quests:
             statement: "SELECT count(*) FROM ${team_catalog}.${team_schema}.raw_sales"
             expect:
               operator: ">="
-              value: 1
+              value: 150
         hints:
           - title: "No rows?"
             body_md: "Ask the host to run resource bootstrap for your event."
@@ -181,9 +185,10 @@ quests:
       Put a self-serve experience in front of your trusted model: an AI/BI
       dashboard and a Genie space a sales leader could actually use.
     facilitator_notes: >
-      The dashboard and Genie tasks are host-reviewed: teams show their work and
-      the host approves. The databricks_sdk validators document the intended
-      automated checks for when an SDK validator ships.
+      The dashboard and Genie tasks pair executable databricks_sdk checks with
+      host review: the SDK check auto-grades when the workspace client can run,
+      and the host confirms the work regardless. The final Genie task is fully
+      automated — the recorded answer must reconcile with the team's model.
     tasks:
       - slug: publish-dashboard
         title: "Publish an AI/BI dashboard"
@@ -230,4 +235,37 @@ quests:
         hints:
           - title: "Scope it"
             body_md: "Point the Genie space at your team schema only."
+            penalty_points: -10
+      - slug: genie-first-answer
+        title: "Prove the Genie's first answer"
+        objective: "Show the Genie answers a revenue question correctly."
+        instructions_md: >
+          Ask your Genie space for total revenue in one region of your choice.
+          Record what it told you into
+          `${team_catalog}.${team_schema}.genie_answer_check` with columns
+          `region STRING, total_amount DOUBLE`. The recorded answer must match
+          your revenue_by_region model exactly.
+        success_criteria_md: >
+          genie_answer_check contains at least one row that reconciles with
+          revenue_by_region.
+        points: 50
+        validation_mode: auto
+        validators:
+          - id: genie-answer-reconciles
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) FROM ${team_catalog}.${team_schema}.genie_answer_check g
+              JOIN ${team_catalog}.${team_schema}.revenue_by_region r
+                ON g.region = r.region
+               AND round(g.total_amount, 2) = round(r.total_amount, 2)
+            expect:
+              operator: ">="
+              value: 1
+        hints:
+          - title: "Wrong number?"
+            body_md: >
+              A mismatch is a curation gap, not a trick: check whether the Genie
+              summed the right column, then re-ask. CREATE OR REPLACE TABLE
+              genie_answer_check AS SELECT ... to record the answer.
             penalty_points: -10

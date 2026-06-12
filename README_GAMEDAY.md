@@ -460,17 +460,24 @@ play is closed).
 
 ## Sample quest packs (works today — PR09)
 
-Two built-in, ready-to-run packs live in [`samples/packs/`](samples/packs/) and
-prove the platform end-to-end:
+The canonical importable catalog lives in
+[`quest_packs/built_in/`](quest_packs/built_in/); the same two packs ship as
+worked examples in [`samples/packs/`](samples/packs/) (kept byte-identical by
+`tests/test_sample_packs.py`):
 
 - **AI/BI GameDay** (`ai_bi_gameday.yml`) — govern a schema, build a trusted
-  revenue model, ship an AI/BI dashboard + Genie space. 3 quests / 6 tasks.
-- **Lakehouse Foundations** (`lakehouse_foundations.yml`) — the bronze→silver
-  medallion loop with a provable quality gate. 3 quests / 6 tasks.
+  revenue model, ship an AI/BI dashboard + Genie space, and prove the Genie's
+  first answer reconciles. 3 quests / 7 tasks.
+- **Lakehouse Foundations** (`lakehouse_foundations.yml`) — the bronze→silver→
+  gold medallion loop with a provable quality gate and a published dashboard.
+  4 quests / 8 tasks.
+- **Lakeflow GameDay: Keep the Lights On** (`lakeflow_pipelines_gameday.yml`,
+  built_in only) — dedupe a dirty landing zone, declare a Lakeflow pipeline,
+  schedule the refresh, prove quality holds. 4 quests / 8 tasks / 725 pts.
 
 Each ships learning objectives, `resources.seed_sql` (per-team seed data that the
 PR08 bootstrap runs), `quest_completed` unlock gating, `sql_assertion` +
-`databricks_sdk` + `manual` validators, hints, and facilitator notes. Both lint
+`databricks_sdk` + `manual` validators, hints, and facilitator notes. All lint
 and import cleanly and are covered by `tests/test_sample_packs.py`.
 
 Run flow and customization guide:

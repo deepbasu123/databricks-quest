@@ -1,0 +1,355 @@
+schema_version: "1.0"
+
+pack:
+  slug: lakeflow-pipelines-gameday
+  title: "Lakeflow GameDay: Keep the Lights On"
+  version: "1.0.0"
+  description: >
+    A data-engineering GameDay where teams replace a dead overnight batch with
+    an automated, self-healing flow: dedupe a dirty landing zone, declare a
+    Lakeflow pipeline, put it on a schedule, and prove the quality holds when
+    things break. Runs on a serverless SQL warehouse with per-team Unity
+    Catalog schemas; the pipeline and job tasks need pipeline/job create
+    permissions and serverless entitlement.
+  audience: ["data-engineers", "platform-teams", "enablement"]
+  duration_minutes: 120
+  difficulty: intermediate
+  owner: field-enablement
+
+scenario:
+  setup: >
+    Velora Logistics' overnight batch died at 3 a.m. — again. Shipments data
+    keeps arriving in ${team_catalog}.${team_schema}.shipments_raw, but every
+    downstream consumer is reading stale CSVs from a dead pipeline. Your team
+    has until end of shift to stand up an automated flow: a declarative
+    pipeline in, a scheduled job on top, and freshness you can prove.
+
+learning_objectives:
+  - "Triage a dirty landing zone: duplicates, bad records, late data."
+  - "Build a Lakeflow Spark Declarative Pipeline and run it to completion."
+  - "Operate it: schedule the refresh and prove the output reconciles."
+  - "Design for failure: quality rules that reject bad data, and a runbook."
+
+capabilities_required:
+  - "Serverless SQL warehouse"
+  - "Unity Catalog schema per team"
+  - "Lakeflow Spark Declarative Pipelines (serverless)"
+  - "Lakeflow Jobs with schedules"
+
+# Deterministic generated feed (no rand()): 300 events over ~250 distinct
+# shipments (so dedupe is a real exercise), with negative weights sprinkled in
+# for the quality task, plus a small carriers dimension.
+resources:
+  seed_sql:
+    - >
+      CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.shipments_raw AS
+      SELECT
+        CAST(id % 250 AS INT) AS shipment_id,
+        CAST(id % 8 AS INT) AS carrier_id,
+        CASE WHEN id % 37 = 0 THEN -5.0 ELSE CAST(id % 90 AS DOUBLE) + 1.5 END AS weight_kg,
+        element_at(array('created','in_transit','delivered','exception'),
+                   CAST(id % 4 AS INT) + 1) AS status,
+        date_add(current_date(), -CAST(id % 21 AS INT)) AS ship_date
+      FROM range(300)
+    - >
+      CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.carriers AS
+      SELECT
+        CAST(id AS INT) AS carrier_id,
+        element_at(array('Northwind Freight','Summit Express','Glacier Lines',
+                         'Ridge Cargo','Basecamp Post','Alpine Road','Trailways',
+                         'Velora Fleet'), CAST(id AS INT) + 1) AS carrier_name
+      FROM range(8)
+
+scoring_defaults:
+  base_points: 100
+  first_blood_bonus: 25
+
+quests:
+  - slug: triage
+    title: "Triage: stabilize the landing zone"
+    category: foundations
+    difficulty: easy
+    base_points: 125
+    sort_order: 1
+    narrative_md: >
+      Before you automate anything, know what you're automating. The raw feed
+      in ${team_catalog}.${team_schema}.shipments_raw has duplicates and worse.
+    facilitator_notes: >
+      The connectivity task confirms bootstrap ran. The dedupe task is the
+      first real exercise — the seed deliberately writes ~300 events over ~250
+      distinct shipment_ids.
+    tasks:
+      - slug: connectivity-and-raw
+        title: "Confirm the raw feed landed"
+        objective: "Prove your warehouse works and the shipments feed is present."
+        instructions_md: >
+          Your team owns `${team_catalog}.${team_schema}`. Verify shipments_raw
+          arrived from bootstrap.
+        success_criteria_md: "shipments_raw has at least 250 rows."
+        points: 25
+        validation_mode: auto
+        validators:
+          - id: raw-rows
+            type: sql_assertion
+            mode: sync
+            statement: "SELECT count(*) FROM ${team_catalog}.${team_schema}.shipments_raw"
+            expect:
+              operator: ">="
+              value: 250
+        hints:
+          - title: "No rows?"
+            body_md: "Ask the host to run resource bootstrap for your event."
+            penalty_points: -5
+      - slug: dedupe-bronze
+        title: "Deduplicate into shipments_bronze"
+        objective: "One row per shipment, keeping the latest event."
+        instructions_md: >
+          Create `${team_catalog}.${team_schema}.shipments_bronze` with exactly
+          one row per `shipment_id` (keep the most recent `ship_date`).
+        success_criteria_md: "shipments_bronze has zero duplicate shipment_ids."
+        points: 100
+        validation_mode: auto
+        validators:
+          - id: bronze-unique
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) = count(DISTINCT shipment_id)
+              FROM ${team_catalog}.${team_schema}.shipments_bronze
+            expect:
+              operator: is_true
+          - id: bronze-complete
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(DISTINCT shipment_id)
+              FROM ${team_catalog}.${team_schema}.shipments_bronze
+            expect:
+              operator: ">="
+              value: 200
+        hints:
+          - title: "Dedupe pattern"
+            body_md: >
+              QUALIFY row_number() OVER (PARTITION BY shipment_id ORDER BY
+              ship_date DESC) = 1
+            penalty_points: -10
+
+  - slug: automate
+    title: "Automate: declare the pipeline"
+    category: engineering
+    difficulty: intermediate
+    base_points: 250
+    sort_order: 2
+    unlock_rule:
+      type: quest_completed
+      quest_slug: triage
+    narrative_md: >
+      Hand-run SQL dies at 3 a.m. with everything else. Declare the flow as a
+      Lakeflow Spark Declarative Pipeline so the platform owns the runs.
+    facilitator_notes: >
+      Serverless pipeline updates take 3–6 minutes — tell teams to kick off the
+      update before polishing their SQL. The SDK check matches on
+      name_contains, so enforce the "${team_slug}-" naming convention out loud
+      at kickoff. Teams need pipeline create permission.
+    tasks:
+      - slug: build-pipeline
+        title: "Build and run the shipments pipeline"
+        objective: "A declarative pipeline materializes shipments_silver."
+        instructions_md: >
+          Create a Lakeflow Spark Declarative Pipeline named
+          `${team_slug}-shipments` that reads shipments_bronze and produces
+          `${team_catalog}.${team_schema}.shipments_silver` containing only
+          clean rows: positive weight, a known carrier_id, and a non-null
+          shipment_id. Run an update to completion.
+        success_criteria_md: "A pipeline named for your team has a completed update."
+        points: 150
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: pipeline-completed
+            type: databricks_sdk
+            mode: sync
+            check: pipeline_update_completed
+            params:
+              name_contains: "${team_slug}"
+          - id: host-confirm-pipeline
+            type: manual
+            mode: sync
+        hints:
+          - title: "Starting point"
+            body_md: >
+              Pipelines → Create. A single SQL CREATE MATERIALIZED VIEW (or
+              streaming table) over shipments_bronze is enough — let the
+              platform do the orchestration.
+            penalty_points: -15
+      - slug: silver-materialized
+        title: "Prove silver materialized clean"
+        objective: "shipments_silver exists and holds only valid rows."
+        instructions_md: >
+          The pipeline's output table
+          `${team_catalog}.${team_schema}.shipments_silver` must be non-empty
+          with zero NULL shipment_ids.
+        success_criteria_md: "shipments_silver is non-empty and key-complete."
+        points: 100
+        validation_mode: auto
+        validators:
+          - id: silver-rows
+            type: sql_assertion
+            mode: sync
+            statement: "SELECT count(*) FROM ${team_catalog}.${team_schema}.shipments_silver"
+            expect:
+              operator: ">="
+              value: 100
+          - id: silver-keys
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) FROM ${team_catalog}.${team_schema}.shipments_silver
+              WHERE shipment_id IS NULL
+            expect:
+              operator: "="
+              value: 0
+        hints:
+          - title: "Empty table?"
+            body_md: "Did the pipeline update actually complete? Check the update's event log."
+            penalty_points: -10
+
+  - slug: schedule
+    title: "Operate: put it on a clock"
+    category: operations
+    difficulty: intermediate
+    base_points: 200
+    sort_order: 3
+    unlock_rule:
+      type: quest_completed
+      quest_slug: automate
+    narrative_md: >
+      A pipeline nobody triggers is a pipeline nobody trusts. Schedule the
+      refresh and prove the aggregate output reconciles with silver.
+    facilitator_notes: >
+      The job check looks for any matching job with a schedule or trigger —
+      teams should name the job "${team_slug}-shipments-refresh". The
+      reconciliation task is fully automated.
+    tasks:
+      - slug: scheduled-job
+        title: "Schedule the refresh"
+        objective: "A scheduled job owns the pipeline refresh."
+        instructions_md: >
+          Create a Lakeflow Job named `${team_slug}-shipments-refresh` that
+          runs your pipeline, and give it a CRON schedule (any cadence).
+        success_criteria_md: "A job named for your team has a schedule."
+        points: 125
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: job-scheduled
+            type: databricks_sdk
+            mode: sync
+            check: job_exists_with_schedule
+            params:
+              name_contains: "${team_slug}"
+          - id: host-confirm-job
+            type: manual
+            mode: sync
+        hints:
+          - title: "Job type"
+            body_md: "Jobs & Pipelines → Create job → add a pipeline task → Schedule."
+            penalty_points: -10
+      - slug: freshness-proof
+        title: "Reconcile the carrier daily rollup"
+        objective: "gold_carrier_daily agrees with silver, row for row."
+        instructions_md: >
+          Create `${team_catalog}.${team_schema}.gold_carrier_daily` with one
+          row per (carrier_id, ship_date) and a `shipments` count. The summed
+          counts must equal the silver row count exactly.
+        success_criteria_md: "Gold reconciles exactly with silver."
+        points: 75
+        validation_mode: auto
+        validators:
+          - id: gold-reconciles
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT
+                (SELECT sum(shipments) FROM ${team_catalog}.${team_schema}.gold_carrier_daily)
+                = (SELECT count(*) FROM ${team_catalog}.${team_schema}.shipments_silver)
+            expect:
+              operator: is_true
+        hints:
+          - title: "Pattern"
+            body_md: "GROUP BY carrier_id, ship_date with count(*) AS shipments."
+            penalty_points: -10
+
+  - slug: resilience
+    title: "Resilience: break it on purpose"
+    category: quality
+    difficulty: intermediate
+    base_points: 150
+    sort_order: 4
+    unlock_rule:
+      type: quest_completed
+      quest_slug: schedule
+    narrative_md: >
+      The 3 a.m. failure wasn't bad luck — it was bad data with nowhere safe to
+      go. Prove your silver rejects garbage, then walk the host through what
+      happens next time the feed goes sideways.
+    facilitator_notes: >
+      The quality check is automated (the seed plants negative weights — about
+      one row in 37). The runbook review is a conversation: expectations,
+      retries, alerting, and who gets paged. Best discussions earn the points.
+    tasks:
+      - slug: quality-expectation
+        title: "Prove the quality rule holds"
+        objective: "No invalid weights or unknown carriers survive to silver."
+        instructions_md: >
+          shipments_silver must contain zero rows with a non-positive
+          weight_kg, and every carrier_id must exist in the carriers dimension.
+        success_criteria_md: "Zero quality violations in shipments_silver."
+        points: 75
+        validation_mode: auto
+        validators:
+          - id: no-bad-weights
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) FROM ${team_catalog}.${team_schema}.shipments_silver
+              WHERE weight_kg <= 0
+            expect:
+              operator: "="
+              value: 0
+          - id: no-orphan-carriers
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) FROM ${team_catalog}.${team_schema}.shipments_silver s
+              LEFT ANTI JOIN ${team_catalog}.${team_schema}.carriers c
+                ON s.carrier_id = c.carrier_id
+            expect:
+              operator: "="
+              value: 0
+        hints:
+          - title: "Where to enforce"
+            body_md: >
+              Enforce it in the pipeline (expectations / WHERE clauses), not by
+              patching the table afterwards — the validator re-runs after every
+              refresh.
+            penalty_points: -10
+      - slug: runbook-review
+        title: "Walk the host through your runbook"
+        objective: "Explain failure handling: detection, quarantine, recovery."
+        instructions_md: >
+          Walk your host through what happens when tomorrow's feed contains
+          garbage: how the pipeline reacts, where bad rows go, who finds out,
+          and how you recover without re-running everything by hand.
+        success_criteria_md: "Host approves the failure-handling walkthrough."
+        points: 75
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: host-confirm-runbook
+            type: manual
+            mode: sync
+        hints:
+          - title: "Talking points"
+            body_md: "Expectations vs. hard failures, quarantine tables, retries, alerting."
+            penalty_points: -5
