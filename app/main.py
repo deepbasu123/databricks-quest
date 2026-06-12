@@ -519,6 +519,11 @@ _attempt_limiter = SlidingWindowLimiter(
     max_events=int(os.getenv("QUEST_ATTEMPT_RATE_LIMIT", "30")),
     window_seconds=float(os.getenv("QUEST_ATTEMPT_RATE_WINDOW_SECONDS", "60")),
 )
+# P2-4: short-TTL cache so a burst of leaderboard polls collapses into one DB
+# aggregation. TTL is applied from config at request time (0 disables).
+from cache import TTLCache
+
+_leaderboard_cache = TTLCache(0)
 federation_repo = FederationRepository()
 announcements_repo = AnnouncementsRepository()
 resources_repo = ResourcesRepository()
@@ -740,14 +745,16 @@ async def get_missions(request: Request):
 
 @app.get("/api/leaderboard")
 async def get_leaderboard(period: str = "all"):
-    try:
-        if period == "weekly":
-            order_col = "weekly_rank"
-        elif period == "monthly":
-            order_col = "monthly_rank"
-        else:
-            order_col = "all_time_rank"
+    _leaderboard_cache.ttl = config.leaderboard_cache_ttl()
+    cached = _leaderboard_cache.get(period)
+    if cached is not None:
+        return {"leaderboard": cached, "period": period}
 
+    order_col = {
+        "weekly": "weekly_rank",
+        "monthly": "monthly_rank",
+    }.get(period, "all_time_rank")
+    try:
         rows = execute_query(
             f"""
             SELECT user_id, display_name, total_points, weekly_points, monthly_points,
@@ -757,10 +764,13 @@ async def get_leaderboard(period: str = "all"):
             LIMIT 10
             """
         )
-        return {"leaderboard": rows, "period": period}
     except Exception as e:
+        # Don't cache a failure — return empty and let the next poll retry.
         logger.warning(f"Leaderboard error: {e}")
         return {"leaderboard": [], "period": period}
+
+    _leaderboard_cache.set(period, rows)
+    return {"leaderboard": rows, "period": period}
 
 
 @app.get("/api/notifications")
