@@ -236,12 +236,42 @@ def get_level_progress(points: int) -> dict:
 
 
 def get_user_email(request: Request) -> str:
-    email = request.headers.get("X-Forwarded-Email", "")
-    if not email:
-        email = request.headers.get("X-Forwarded-User", "")
-    if not email:
-        email = os.getenv("QUEST_DEFAULT_USER", "unknown@example.com")
-    return email
+    """Resolve the caller's identity from the Databricks Apps proxy headers.
+
+    P1-4 (identity defense-in-depth):
+    - Optional proxy-transit check: if QUEST_PROXY_SHARED_SECRET is set, the
+      request must carry a matching X-Quest-Proxy-Secret header, so a request that
+      bypasses the Apps auth proxy (a direct hit) is rejected rather than trusted.
+    - No silent anonymous identity in Event Mode: with no forwarded identity and
+      no explicit QUEST_DEFAULT_USER, deny (401) instead of defaulting to
+      unknown@example.com (forgeable and competition-relevant). Adoption mode
+      keeps the legacy fallback for backward compatibility.
+    """
+    secret = os.getenv("QUEST_PROXY_SHARED_SECRET", "").strip()
+    if secret and request.headers.get("X-Quest-Proxy-Secret", "") != secret:
+        raise HTTPException(
+            status_code=401,
+            detail={"error": {"code": "UNAUTHENTICATED",
+                              "message": "Request did not transit the trusted proxy."}},
+        )
+
+    email = request.headers.get("X-Forwarded-Email", "") or request.headers.get(
+        "X-Forwarded-User", ""
+    )
+    if email:
+        return email
+
+    default_user = os.getenv("QUEST_DEFAULT_USER", "").strip()
+    if default_user:
+        return default_user
+    if config.event_mode_enabled():
+        raise HTTPException(
+            status_code=401,
+            detail={"error": {"code": "UNAUTHENTICATED",
+                              "message": "No authenticated user; request must come through the Databricks Apps proxy."}},
+        )
+    # Adoption mode: preserve legacy behaviour.
+    return "unknown@example.com"
 
 
 # Host authority for GameDay host endpoints. A user is a host when ANY of:
