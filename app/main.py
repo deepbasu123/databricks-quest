@@ -1788,6 +1788,17 @@ async def host_adjust_score(
             team_id=body.team_id,
             user_id=body.user_id,
             task_id=body.task_id,
+            # P1-15: the audit row commits in the same transaction as the
+            # adjustment, instead of a best-effort call that a crash could drop.
+            audit={
+                "action": "score.adjust",
+                "actor_user_id": user,
+                "event_id": resolved_event_id,
+                "target_type": "team",
+                "target_id": body.team_id,
+                "payload": {"points_delta": body.points_delta,
+                            "reason": body.reason.strip()},
+            },
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("record_manual_adjustment failed: %s", exc)
@@ -1795,15 +1806,6 @@ async def host_adjust_score(
             status_code=503,
             detail={"error": {"code": "ADJUST_FAILED", "message": "Could not record the adjustment."}},
         )
-    record_audit(
-        action="score.adjust",
-        actor_user_id=user,
-        event_id=resolved_event_id,
-        target_type="team",
-        target_id=body.team_id,
-        payload={"points_delta": body.points_delta, "reason": body.reason.strip(),
-                 "adjustment_id": result["adjustment_id"]},
-    )
     return result
 
 

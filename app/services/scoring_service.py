@@ -115,6 +115,21 @@ class ScoringService:
             user_id=user_id,
             workspace_id=workspace_id,
             created_by=created_by,
+            # P1-15: the award and its audit row commit atomically.
+            audit={
+                "action": "scoring.award",
+                "actor_user_id": created_by,
+                "event_id": event_id,
+                "target_type": "task",
+                "target_id": task_id,
+                "payload": {
+                    "points": points,
+                    "reason": "task_passed",
+                    "team_id": team_id,
+                    "workspace_id": workspace_id,
+                    "source_id": attempt_id,
+                },
+            },
         )
 
     def apply_hint_penalty(
@@ -161,6 +176,20 @@ class ScoringService:
             user_id=user_id,
             workspace_id=workspace_id,
             created_by=created_by,
+            # P1-15: the penalty and its audit row commit atomically.
+            audit={
+                "action": "scoring.hint_penalty",
+                "actor_user_id": created_by,
+                "event_id": event_id,
+                "target_type": "task",
+                "target_id": task_id,
+                "payload": {
+                    "points_delta": delta,
+                    "hint_id": hint_id,
+                    "team_id": team_id,
+                    "workspace_id": workspace_id,
+                },
+            },
         )
         return {
             "applied": result["awarded"],
