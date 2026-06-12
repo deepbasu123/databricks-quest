@@ -267,9 +267,12 @@ def _lint_validator_config(result: LintResult, vloc: str, validator: Any) -> Non
                 f"Unknown operator '{expect.operator}'. Supported: "
                 + ", ".join(sorted(KNOWN_EXPECT_OPERATORS)),
             )
-    elif vtype == "databricks_sdk":
-        if not cfg.get("check"):
+    elif vtype in ("databricks_sdk", "workspace_api"):
+        check = cfg.get("check")
+        if not check:
             result.error(f"{vloc}.check", "databricks_sdk requires a 'check' name.")
+        else:
+            _lint_sdk_check(result, vloc, str(check), cfg.get("params") or {})
     elif vtype == "system_table":
         if not cfg.get("table"):
             result.error(f"{vloc}.table", "system_table validator requires 'table'.")
@@ -280,3 +283,49 @@ def _lint_validator_config(result: LintResult, vloc: str, validator: Any) -> Non
             result.error(
                 f"{vloc}.notebook_path", "notebook validator requires 'notebook_path'."
             )
+
+
+def _lint_sdk_check(
+    result: LintResult, vloc: str, check: str, params: Any
+) -> None:
+    """Validate a ``databricks_sdk`` check name and its params against the
+    registry contracts in :mod:`services.sdk_checks`."""
+    from services.sdk_checks import KNOWN_PARAMS, REQUIRED_PARAMS, known_checks
+
+    if check not in known_checks():
+        result.warn(
+            f"{vloc}.check",
+            f"Unknown databricks_sdk check '{check}'. Known checks: "
+            + ", ".join(known_checks()),
+        )
+        return
+
+    if not isinstance(params, dict):
+        result.error(f"{vloc}.params", "databricks_sdk 'params' must be a mapping.")
+        return
+
+    for requirement in REQUIRED_PARAMS.get(check, []):
+        if isinstance(requirement, tuple):
+            if not any(params.get(k) for k in requirement):
+                result.error(
+                    f"{vloc}.params",
+                    f"check '{check}' requires one of: " + ", ".join(requirement),
+                )
+        elif not params.get(requirement):
+            result.error(
+                f"{vloc}.params",
+                f"check '{check}' requires param '{requirement}'.",
+            )
+
+    known = KNOWN_PARAMS.get(check)
+    if known:
+        for key in params:
+            if key not in known:
+                result.warn(
+                    f"{vloc}.params",
+                    f"check '{check}' does not use param '{key}'. Known params: "
+                    + ", ".join(known),
+                )
+    for key, value in params.items():
+        if isinstance(value, str):
+            _check_template_vars(result, f"{vloc}.params.{key}", value)
