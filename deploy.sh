@@ -1400,125 +1400,13 @@ fi
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 7b: Sync Delta tables to Lakebase
 # ══════════════════════════════════════════════════════════════════════════════
-if [ -n "$LAKEBASE_HOST" ] && [ -z "$SKIP_SCORING" ]; then
-  step "Syncing data to Lakebase"
-
-  info "Reading scored data from Delta tables and syncing to Lakebase..."
-
-  # Generate fresh Lakebase credential
-  LB_PROJECT_ID=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
-  LB_TOKEN=$($CLI postgres generate-database-credential \
-    "projects/$LB_PROJECT_ID/branches/production/endpoints/primary" \
-    $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])" 2>/dev/null || true)
-
-  if [ -z "$LB_TOKEN" ]; then
-    # Fallback: use workspace auth token
-    LB_TOKEN=$($CLI auth token $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "$DATABRICKS_TOKEN")
-  fi
-
-  # Sync each table: read from Delta via SQL Statements API, write to Lakebase via psql
-  python3 << PYEOF
-import urllib.request, json, os, time, subprocess
-
-HOST = os.environ.get("DATABRICKS_HOST", "$WORKSPACE_HOST")
-TOKEN = os.environ.get("DATABRICKS_TOKEN", "")
-WH_ID = "$WAREHOUSE_ID"
-CATALOG = "$QUEST_CATALOG"
-SCHEMA = "$QUEST_SCHEMA"
-LB_HOST = "$LAKEBASE_HOST"
-LB_DB = "$LAKEBASE_DB"
-LB_TOKEN = "$LB_TOKEN"
-USER_EMAIL = "$USER_EMAIL"
-
-TABLES = [
-    ("mission_completions", "user_id, mission_id, mission_name, points_awarded, completed_at, period_start, period_end, scored_at"),
-    ("user_points_fact", "user_id, event_type, mission_id, points, reason, event_timestamp, scored_at"),
-    ("user_profile_snapshot", "user_id, display_name, total_points, level, current_streak, max_streak, badge_count, missions_completed, first_activity_date, last_activity_date, distinct_products_used, updated_at"),
-    ("leaderboard", "user_id, display_name, total_points, weekly_points, monthly_points, level, all_time_rank, weekly_rank, monthly_rank, updated_at"),
-    ("badges", "user_id, badge_id, badge_name, badge_icon, earned_at"),
-    ("notifications", "user_id, notification_type, title, message, mission_id, points, created_at"),
-]
-
-def run_sql(sql, timeout=50):
-    """Execute SQL via Statements API and return rows."""
-    data = json.dumps({"warehouse_id": WH_ID, "statement": sql, "wait_timeout": f"{timeout}s"}).encode()
-    req = urllib.request.Request(
-        f"{HOST}/api/2.0/sql/statements", data=data,
-        headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"})
-    resp = urllib.request.urlopen(req, timeout=60)
-    result = json.loads(resp.read())
-    status = result.get("status", {}).get("state", "?")
-    if status == "SUCCEEDED":
-        return result.get("result", {}).get("data_array", [])
-    elif status == "PENDING" or status == "RUNNING":
-        # Poll
-        stmt_id = result.get("statement_id", "")
-        for _ in range(30):
-            time.sleep(2)
-            req2 = urllib.request.Request(
-                f"{HOST}/api/2.0/sql/statements/{stmt_id}",
-                headers={"Authorization": f"Bearer {TOKEN}"})
-            resp2 = urllib.request.urlopen(req2, timeout=30)
-            result2 = json.loads(resp2.read())
-            if result2.get("status", {}).get("state") == "SUCCEEDED":
-                return result2.get("result", {}).get("data_array", [])
-            elif result2.get("status", {}).get("state") == "FAILED":
-                print(f"  SQL failed: {result2.get('status', {}).get('error', {}).get('message', '?')[:200]}")
-                return []
-        return []
-    else:
-        msg = result.get("status", {}).get("error", {}).get("message", "?")[:200]
-        print(f"  SQL error: {msg}")
-        return []
-
-def psql_exec(sql):
-    """Execute SQL against Lakebase via psql."""
-    env = os.environ.copy()
-    env["PGPASSWORD"] = LB_TOKEN
-    result = subprocess.run(
-        ["psql", f"host={LB_HOST} port=5432 dbname={LB_DB} user={USER_EMAIL} sslmode=require",
-         "-c", sql],
-        capture_output=True, text=True, env=env, timeout=60)
-    if result.returncode != 0:
-        print(f"  psql error: {result.stderr[:200]}")
-    return result.returncode == 0
-
-synced = 0
-for table_name, columns in TABLES:
-    print(f"  Syncing {table_name}...")
-    cols = [c.strip() for c in columns.split(",")]
-    rows = run_sql(f"SELECT {columns} FROM \`{CATALOG}\`.\`{SCHEMA}\`.\`{table_name}\`")
-    if rows is None:
-        rows = []
-
-    # Delete existing data
-    psql_exec(f"DELETE FROM {table_name}")
-
-    if rows:
-        # Build INSERT statements in batches
-        batch_size = 100
-        for i in range(0, len(rows), batch_size):
-            batch = rows[i:i+batch_size]
-            values = []
-            for row in batch:
-                escaped = []
-                for v in row:
-                    if v is None or v == "null":
-                        escaped.append("NULL")
-                    else:
-                        escaped.append("'" + str(v).replace("'", "''") + "'")
-                values.append(f"({', '.join(escaped)})")
-            insert_sql = f"INSERT INTO {table_name} ({columns}) VALUES {', '.join(values)}"
-            psql_exec(insert_sql)
-
-    print(f"  {table_name}: {len(rows)} rows synced")
-    synced += 1
-
-print(f"Lakebase sync complete: {synced}/{len(TABLES)} tables synced")
-PYEOF
-
-  success "Lakebase sync complete"
-fi
+# P1-20: the deploy-time shell sync was removed. It built bulk INSERT statements
+# by string-concatenating values from system/Delta tables with only quote-
+# doubling — a SQL-injection-shaped pattern over user-influenced data. The
+# Delta→Lakebase sync is owned by the parameterized notebook
+# notebooks/lakebase_sync.py (psycopg2 execute_values), run as the
+# `sync_to_lakebase` job task in databricks.yml. Triggering that job is the
+# single, safe sync path; deploy.sh no longer duplicates it.
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 8: Get App URL & Print Success
