@@ -218,6 +218,52 @@ class SolutionOps:
             tasks=[Task(task_key="refresh", pipeline_task=PipelineTask(pipeline_id=pipeline_id))],
         )
 
+    def wait_lakebase_available(self, op):
+        deadline = time.time() + 900
+        while time.time() < deadline:
+            inst = self.w.database.get_database_instance(op["name"])
+            state = str(getattr(inst, "state", "")).rsplit(".", 1)[-1].upper()
+            if state == "AVAILABLE":
+                return
+            if state in ("FAILED", "DELETING"):
+                raise RuntimeError(f"Lakebase instance state {state}")
+            time.sleep(20)
+        raise RuntimeError("Lakebase instance not AVAILABLE after 15 minutes")
+
+    def create_synced_table(self, op):
+        from databricks.sdk.service.database import (
+            NewPipelineSpec,
+            SyncedDatabaseTable,
+            SyncedTableSchedulingPolicy,
+            SyncedTableSpec,
+        )
+
+        table = SyncedDatabaseTable(
+            name=op["name"],
+            database_instance_name=op.get("instance"),
+            logical_database_name=op.get("logical_database") or "databricks_postgres",
+            spec=SyncedTableSpec(
+                source_table_full_name=op["source"],
+                primary_key_columns=list(op.get("primary_key") or []),
+                scheduling_policy=SyncedTableSchedulingPolicy.SNAPSHOT,
+                new_pipeline_spec=NewPipelineSpec(),
+                create_database_objects_if_missing=True,
+            ),
+        )
+        self.w.database.create_synced_database_table(table)
+        # Wait for the ONLINE family so the SDK validator passes right after.
+        deadline = time.time() + 900
+        while time.time() < deadline:
+            synced = self.w.database.get_synced_database_table(op["name"])
+            status = getattr(synced, "data_synchronization_status", None)
+            state = str(getattr(status, "detailed_state", "")).rsplit(".", 1)[-1].upper()
+            if state.startswith("ONLINE"):
+                return
+            if "FAILED" in state or "ERROR" in state:
+                raise RuntimeError(f"synced table state {state}")
+            time.sleep(20)
+        raise RuntimeError("synced table not ONLINE after 15 minutes")
+
     def create_serving_endpoint(self, op):
         self.w.api_client.do(
             "POST", "/api/2.0/serving-endpoints",

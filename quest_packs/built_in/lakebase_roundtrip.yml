@@ -1,0 +1,421 @@
+schema_version: "1.0"
+
+pack:
+  slug: lakebase-roundtrip
+  title: "Lakebase GameDay: Checkout Line"
+  version: "1.0.0"
+  description: >
+    An advanced GameDay where teams put their analytics catalog behind a real
+    OLTP serving layer: a shared Lakebase Postgres instance (host-provisioned,
+    one per event), a synced table pushing the catalog down, a transactional
+    write path for orders, and the reverse trip — orders landing back in the
+    lakehouse with referential integrity you can prove. Teams need database
+    access on the shared instance (a Postgres role each); the app identity
+    needs read access to Database APIs for the checks.
+  audience: ["app-developers", "data-engineers", "architects"]
+  duration_minutes: 120
+  difficulty: advanced
+  owner: field-enablement
+
+scenario:
+  setup: >
+    Velora Logistics is opening same-day delivery, and the warehouse app
+    can't run on a SQL warehouse — pickers need millisecond reads and
+    transactional writes. Your gold tables are great; now they have to power
+    a checkout line. Push the catalog down to Postgres, take orders at the
+    counter, and prove every order flows back into the lakehouse before the
+    nightly report runs.
+
+learning_objectives:
+  - "Operate a Lakebase Postgres instance as the OLTP edge of the lakehouse."
+  - "Sync a Unity Catalog table into Postgres and verify it serves reads."
+  - "Build a transactional write path with keys that respect the catalog."
+  - "Close the loop: reverse-ETL OLTP writes back into governed Delta."
+
+capabilities_required:
+  - "Serverless SQL warehouse"
+  - "Unity Catalog schema per team"
+  - "Lakebase (one shared instance per event, host-provisioned)"
+  - "Lakebase synced tables (UC → Postgres)"
+
+# One shared Lakebase instance per event (within the PR21 cap); teams get a
+# Postgres role each and work in their own Postgres schema. Catalog + orders
+# evidence tables are per-team in UC as usual.
+resources:
+  workspace:
+    - type: lakebase_instance
+      name: "quest-${event_slug}-pg"
+      spec:
+        capacity: CU_1
+  seed_sql:
+    - >
+      CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.product_catalog_gold AS
+      SELECT
+        CAST(id AS INT) AS product_id,
+        element_at(array('Trail Jacket','Summit Pack','Glacier Tent','Ridge Boots',
+                         'Basecamp Stove','Alpine Bottle','Creek Sandals','Peak Gloves',
+                         'Drift Kayak','Cinder Grill'), CAST(id % 10 AS INT) + 1)
+          || ' v' || CAST(1 + id % 3 AS STRING) AS product_name,
+        CAST(15 + (id * 31) % 280 AS DOUBLE) + 0.95 AS unit_price,
+        CAST(5 + (id * 17) % 95 AS INT) AS stock_qty
+      FROM range(100)
+    - >
+      CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.connection_log
+      (ts TIMESTAMP, kind STRING, value DOUBLE, detail STRING)
+
+scoring_defaults:
+  base_points: 100
+  first_blood_bonus: 25
+
+quests:
+  - slug: provision
+    title: "A database at the counter"
+    category: foundations
+    difficulty: intermediate
+    base_points: 200
+    sort_order: 1
+    narrative_md: >
+      The host has stood up one Lakebase Postgres instance for the event.
+      Confirm it's serving, get your team connected, and leave a receipt.
+    facilitator_notes: >
+      The shared instance (quest-<event>-pg) is created by bootstrap and takes
+      several minutes to reach AVAILABLE — start the briefing while it warms.
+      Hand each team Postgres credentials (a role per team) and have them work
+      in a Postgres schema named after their team. The connection receipt is
+      the evidence pattern used all day: do the thing in Postgres, record the
+      proof in your UC connection_log.
+    tasks:
+      - slug: instance-available
+        title: "Confirm the instance is serving"
+        objective: "The event's Lakebase instance is AVAILABLE."
+        instructions_md: >
+          Find the event's Lakebase instance in Compute → Database instances
+          and confirm it is AVAILABLE.
+        success_criteria_md: "The shared instance reports AVAILABLE."
+        points: 75
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: instance-up
+            type: databricks_sdk
+            mode: sync
+            check: lakebase_instance_exists
+            params:
+              name: "quest-${event_slug}-pg"
+              require_available: true
+          - id: host-confirm-instance
+            type: manual
+            mode: sync
+        hints:
+          - title: "Still starting?"
+            body_md: "CU_1 instances take a few minutes on first start; refresh."
+            penalty_points: -5
+        solutions:
+          - workspace_op:
+              op: wait_lakebase_available
+              name: "quest-${event_slug}-pg"
+      - slug: connect-and-prove
+        title: "Connect and leave a receipt"
+        objective: "Your team can reach Postgres and prove it."
+        instructions_md: >
+          Connect to the instance (psql, a SQL client, or the Databricks UI)
+          with your team's role, run `SELECT version()`, create a Postgres
+          schema named after your team, and record the receipt into
+          `${team_catalog}.${team_schema}.connection_log` with kind
+          'connected' and the Postgres major version as value.
+        success_criteria_md: "connection_log holds your 'connected' receipt."
+        points: 125
+        validation_mode: auto
+        validators:
+          - id: connected-receipt
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) FROM ${team_catalog}.${team_schema}.connection_log
+              WHERE kind = 'connected' AND value >= 14
+            expect:
+              operator: ">="
+              value: 1
+        hints:
+          - title: "Credentials"
+            body_md: >
+              Generate a database credential from the instance page (or ask
+              your host for the team role) and connect with sslmode=require.
+            penalty_points: -10
+        solutions:
+          - sql: >
+              INSERT INTO ${team_catalog}.${team_schema}.connection_log
+              SELECT current_timestamp(), 'connected', 16, 'preflight receipt'
+
+  - slug: sync-down
+    title: "Catalog to the edge"
+    category: engineering
+    difficulty: advanced
+    base_points: 250
+    sort_order: 2
+    unlock_rule:
+      type: quest_completed
+      quest_slug: provision
+    narrative_md: >
+      Pickers can't wait on a warehouse query. Push the product catalog down
+      into Postgres as a synced table and prove the read path serves the same
+      truth as the lakehouse.
+    facilitator_notes: >
+      Teams create the synced table from their own gold catalog — Catalog →
+      table → Create → Synced table (snapshot policy is enough for the day).
+      Sync provisioning takes minutes; the read-path task is doable while it
+      runs. The ONLINE check reads the synced-table status through the
+      Database API.
+    tasks:
+      - slug: synced-table
+        title: "Sync the catalog into Postgres"
+        objective: "product_catalog_pg is ONLINE in your schema."
+        instructions_md: >
+          Create a synced table
+          `${team_catalog}.${team_schema}.product_catalog_pg` from
+          `product_catalog_gold` (primary key product_id, snapshot policy)
+          into the event's Lakebase instance, and wait for it to come ONLINE.
+        success_criteria_md: "The synced table reaches the ONLINE state."
+        points: 150
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: synced-online
+            type: databricks_sdk
+            mode: sync
+            check: lakebase_synced_table_online
+            params:
+              table: "${team_catalog}.${team_schema}.product_catalog_pg"
+          - id: host-confirm-sync
+            type: manual
+            mode: sync
+        hints:
+          - title: "Where"
+            body_md: "Catalog → product_catalog_gold → Create → Synced table."
+            penalty_points: -15
+        solutions:
+          - workspace_op:
+              op: create_synced_table
+              name: "${team_catalog}.${team_schema}.product_catalog_pg"
+              source: "${team_catalog}.${team_schema}.product_catalog_gold"
+              instance: "quest-${event_slug}-pg"
+              primary_key: ["product_id"]
+      - slug: read-path
+        title: "Prove the read path"
+        objective: "Postgres serves the same catalog the lakehouse owns."
+        instructions_md: >
+          Query the synced table from Postgres, count the rows, and record the
+          count into connection_log with kind 'synced-read'. The recorded
+          count must equal the gold catalog's count exactly.
+        success_criteria_md: "Recorded Postgres count == gold catalog count."
+        points: 100
+        validation_mode: auto
+        validators:
+          - id: read-path-reconciles
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT
+                (SELECT max(value) FROM ${team_catalog}.${team_schema}.connection_log
+                 WHERE kind = 'synced-read')
+                = (SELECT CAST(count(*) AS DOUBLE)
+                   FROM ${team_catalog}.${team_schema}.product_catalog_gold)
+            expect:
+              operator: is_true
+        hints:
+          - title: "Mismatch?"
+            body_md: "Snapshot syncs are point-in-time — re-trigger after gold changes."
+            penalty_points: -10
+        solutions:
+          - sql: >
+              INSERT INTO ${team_catalog}.${team_schema}.connection_log
+              SELECT current_timestamp(), 'synced-read',
+                     CAST(count(*) AS DOUBLE), 'preflight read-path receipt'
+              FROM ${team_catalog}.${team_schema}.product_catalog_gold
+
+  - slug: write-path
+    title: "Take the orders"
+    category: engineering
+    difficulty: advanced
+    base_points: 250
+    sort_order: 3
+    unlock_rule:
+      type: quest_completed
+      quest_slug: sync-down
+    narrative_md: >
+      The counter opens. Build the transactional side: an orders table in
+      Postgres with keys that respect the synced catalog, and at least twenty
+      orders taken — by script, by hand, or by app.
+    facilitator_notes: >
+      The write path lives in Postgres, so the deterministic proof lands in
+      the next quest when orders flow back to UC. Here the team demos the
+      transactional insert live (watch for foreign keys against the synced
+      catalog — that's the teaching moment) and leaves receipts. Teams that
+      build a small app or use the Data API earn the second task.
+    tasks:
+      - slug: oltp-writes
+        title: "Open the order book"
+        objective: "A Postgres orders table holds ≥20 keyed orders."
+        instructions_md: >
+          In your Postgres schema, create an `orders` table (order_id, product_id
+          referencing the synced catalog, quantity, ordered_at) and insert at
+          least 20 orders. Record a receipt into connection_log with kind
+          'oltp-writes' and the order count as value. Demo a live insert to
+          your host.
+        success_criteria_md: "≥20 orders in Postgres; receipt recorded; live demo."
+        points: 150
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: writes-receipt
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) FROM ${team_catalog}.${team_schema}.connection_log
+              WHERE kind = 'oltp-writes' AND value >= 20
+            expect:
+              operator: ">="
+              value: 1
+          - id: host-confirm-writes
+            type: manual
+            mode: sync
+        hints:
+          - title: "Keys first"
+            body_md: >
+              Give orders a FOREIGN KEY to the synced catalog's product_id —
+              the roundtrip validator will check exactly that integrity.
+            penalty_points: -15
+        solutions:
+          - sql: >
+              INSERT INTO ${team_catalog}.${team_schema}.connection_log
+              SELECT current_timestamp(), 'oltp-writes', 24, 'preflight order-book receipt'
+      - slug: app-or-api
+        title: "Take one order over HTTP"
+        objective: "One order arrives via the Data API or an app."
+        instructions_md: >
+          Insert at least one order through an HTTP path — the Lakebase Data
+          API or a small app — and record a receipt with kind 'http-order'.
+          Show the host the request.
+        success_criteria_md: "An HTTP-inserted order, receipt recorded, demoed."
+        points: 100
+        validation_mode: manual
+        manual_validation_required: true
+        validators:
+          - id: http-receipt
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) FROM ${team_catalog}.${team_schema}.connection_log
+              WHERE kind = 'http-order'
+            expect:
+              operator: ">="
+              value: 1
+          - id: host-confirm-http
+            type: manual
+            mode: sync
+        hints:
+          - title: "Fastest path"
+            body_md: "The instance's Data API tab shows ready-to-copy request examples."
+            penalty_points: -10
+        solutions:
+          - sql: >
+              INSERT INTO ${team_catalog}.${team_schema}.connection_log
+              SELECT current_timestamp(), 'http-order', 1, 'preflight HTTP receipt'
+
+  - slug: roundtrip
+    title: "Back to the lakehouse"
+    category: proof
+    difficulty: advanced
+    base_points: 250
+    sort_order: 4
+    unlock_rule:
+      type: quest_completed
+      quest_slug: write-path
+    narrative_md: >
+      The nightly report doesn't read Postgres. Land the order book back in
+      governed Delta and prove referential integrity — every order joins a
+      real product, nothing orphaned, counts reconciled. This is the payoff:
+      the full circle, automated.
+    facilitator_notes: >
+      Fully automated quest. Teams land Postgres orders into
+      orders_from_lakebase (batch read, federation, or export — any path that
+      works) and the validators check volume, integrity, and the final report
+      reconciliation. The strict referential check is the day's teaching
+      moment: OLTP keys must respect the synced catalog.
+    tasks:
+      - slug: reverse-etl
+        title: "Land the orders in Delta"
+        objective: "orders_from_lakebase: ≥20 rows, zero orphans."
+        instructions_md: >
+          Land your Postgres orders into
+          `${team_catalog}.${team_schema}.orders_from_lakebase`
+          (order_id, product_id, quantity, ordered_at). Every product_id must
+          join the gold catalog; at least 20 orders must arrive.
+        success_criteria_md: "≥20 landed orders; zero orphaned product_ids."
+        points: 175
+        validation_mode: auto
+        validators:
+          - id: orders-landed
+            type: sql_assertion
+            mode: sync
+            statement: "SELECT count(*) FROM ${team_catalog}.${team_schema}.orders_from_lakebase"
+            expect:
+              operator: ">="
+              value: 20
+          - id: zero-orphans
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT count(*) FROM ${team_catalog}.${team_schema}.orders_from_lakebase o
+              LEFT ANTI JOIN ${team_catalog}.${team_schema}.product_catalog_gold p
+                ON o.product_id = p.product_id
+            expect:
+              operator: "="
+              value: 0
+        hints:
+          - title: "Paths back"
+            body_md: >
+              Query federation over the Postgres catalog, a COPY export, or a
+              small batch job — any governed path counts.
+            penalty_points: -20
+        solutions:
+          - sql: >
+              CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.orders_from_lakebase AS
+              SELECT
+                CAST(id AS INT) AS order_id,
+                CAST(id % 100 AS INT) AS product_id,
+                CAST(1 + id % 4 AS INT) AS quantity,
+                timestampadd(MINUTE, -CAST(id AS INT), current_timestamp()) AS ordered_at
+              FROM range(24)
+      - slug: close-the-loop
+        title: "The nightly report reconciles"
+        objective: "gold_orders_report agrees with the landed orders."
+        instructions_md: >
+          Build `${team_catalog}.${team_schema}.gold_orders_report` with one
+          row per product (product_name, orders, units). Its totals must
+          reconcile exactly with orders_from_lakebase.
+        success_criteria_md: "Report totals match the landed order book."
+        points: 75
+        validation_mode: auto
+        validators:
+          - id: report-reconciles
+            type: sql_assertion
+            mode: sync
+            statement: >
+              SELECT
+                (SELECT sum(units) FROM ${team_catalog}.${team_schema}.gold_orders_report)
+                = (SELECT sum(quantity) FROM ${team_catalog}.${team_schema}.orders_from_lakebase)
+            expect:
+              operator: is_true
+        hints:
+          - title: "Pattern"
+            body_md: "JOIN orders to the catalog, GROUP BY product, SUM(quantity) AS units."
+            penalty_points: -10
+        solutions:
+          - sql: >
+              CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.gold_orders_report AS
+              SELECT p.product_name, count(*) AS orders, sum(o.quantity) AS units
+              FROM ${team_catalog}.${team_schema}.orders_from_lakebase o
+              JOIN ${team_catalog}.${team_schema}.product_catalog_gold p
+                ON o.product_id = p.product_id
+              GROUP BY p.product_name
