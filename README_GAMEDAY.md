@@ -474,6 +474,15 @@ worked examples in [`samples/packs/`](samples/packs/) (kept byte-identical by
 - **Lakeflow GameDay: Keep the Lights On** (`lakeflow_pipelines_gameday.yml`,
   built_in only) — dedupe a dirty landing zone, declare a Lakeflow pipeline,
   schedule the refresh, prove quality holds. 4 quests / 8 tasks / 725 pts.
+- **Genie Deep Dive: Teach the Genie** (`genie_deep_dive.yml`, built_in only) —
+  model net revenue, create + curate a Genie space, pass a deterministic
+  10-question accuracy benchmark, and drive it via the Conversation API.
+  Advanced. 4 quests / 8 tasks / 975 pts.
+
+Authoring-time check: `python scripts/verify_pack_sql.py <pack> --warehouse-id
+<id> --catalog <writable_catalog>` runs a pack's seeds, SQL solutions, and SQL
+validators against a real warehouse in a scratch schema (the SQL-surface subset
+of the event preflight).
 
 Each ships learning objectives, `resources.seed_sql` (per-team seed data that the
 PR08 bootstrap runs), `quest_completed` unlock gating, `sql_assertion` +
