@@ -471,10 +471,13 @@ worked examples in [`samples/packs/`](samples/packs/) (kept byte-identical by
 - **Lakehouse Foundations** (`lakehouse_foundations.yml`) — the bronze→silver→
   gold medallion loop with a provable quality gate and a published dashboard.
   4 quests / 8 tasks.
+- **Lakeflow GameDay: Keep the Lights On** (`lakeflow_pipelines_gameday.yml`,
+  built_in only) — dedupe a dirty landing zone, declare a Lakeflow pipeline,
+  schedule the refresh, prove quality holds. 4 quests / 8 tasks / 725 pts.
 
 Each ships learning objectives, `resources.seed_sql` (per-team seed data that the
 PR08 bootstrap runs), `quest_completed` unlock gating, `sql_assertion` +
-`databricks_sdk` + `manual` validators, hints, and facilitator notes. Both lint
+`databricks_sdk` + `manual` validators, hints, and facilitator notes. All lint
 and import cleanly and are covered by `tests/test_sample_packs.py`.
 
 Run flow and customization guide:
