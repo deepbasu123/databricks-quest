@@ -38,9 +38,9 @@ def compute_content_hash(manifest: QuestPackManifest) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def lint_text(manifest_yaml: str) -> Dict[str, Any]:
+def lint_text(manifest_yaml: str, strict: bool = False) -> Dict[str, Any]:
     """Lint a YAML manifest string; never raises for content problems."""
-    return lint_manifest_text(manifest_yaml).to_dict()
+    return lint_manifest_text(manifest_yaml, strict=strict).to_dict()
 
 
 def import_text(manifest_yaml: str, actor: Optional[str]) -> Dict[str, Any]:

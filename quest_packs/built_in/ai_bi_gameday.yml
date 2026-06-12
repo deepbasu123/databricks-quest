@@ -90,6 +90,8 @@ quests:
           - title: "Stuck?"
             body_md: "Ask your host which warehouse is bound to the event."
             penalty_points: -5
+        solutions:
+          - skip: "Validator is self-contained (SELECT 1); no setup action needed."
       - slug: schema-ready
         title: "Verify your team schema exists"
         objective: "Confirm the host has bootstrapped your team's schema."
@@ -111,6 +113,8 @@ quests:
           - title: "No rows?"
             body_md: "Ask the host to run resource bootstrap for your event."
             penalty_points: -10
+        solutions:
+          - skip: "raw_sales is created by host bootstrap (resources.seed_sql)."
 
   - slug: build-the-model
     title: "Build the trusted model"
@@ -148,6 +152,12 @@ quests:
           - title: "Pattern"
             body_md: "GROUP BY region and SUM(amount) AS total_amount."
             penalty_points: -10
+        solutions:
+          - sql: >
+              CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.revenue_by_region AS
+              SELECT region, sum(amount) AS total_amount
+              FROM ${team_catalog}.${team_schema}.raw_sales
+              GROUP BY region
       - slug: reconcile-total
         title: "Reconcile total revenue"
         objective: "Your model's total must match the raw feed."
@@ -171,6 +181,8 @@ quests:
           - title: "Off by a bit?"
             body_md: "Watch for filters that drop rows from your aggregation."
             penalty_points: -15
+        solutions:
+          - skip: "Follows from the curate-revenue solution (no rows filtered)."
 
   - slug: ship-ai-bi
     title: "Ship AI/BI + Genie"
@@ -214,6 +226,11 @@ quests:
           - title: "Where to start"
             body_md: "Use the SQL editor result's 'Create dashboard' action."
             penalty_points: -10
+        solutions:
+          - workspace_op:
+              op: publish_dashboard
+              name: "${team_slug} revenue by region"
+              dataset_sql: "SELECT * FROM ${team_catalog}.${team_schema}.revenue_by_region"
       - slug: stand-up-genie
         title: "Stand up a Genie space"
         objective: "Create a Genie space scoped to your team's model."
@@ -236,6 +253,12 @@ quests:
           - title: "Scope it"
             body_md: "Point the Genie space at your team schema only."
             penalty_points: -10
+        solutions:
+          - workspace_op:
+              op: create_genie_space
+              name: "${team_slug} revenue genie"
+              tables:
+                - "${team_catalog}.${team_schema}.revenue_by_region"
       - slug: genie-first-answer
         title: "Prove the Genie's first answer"
         objective: "Show the Genie answers a revenue question correctly."
@@ -269,3 +292,9 @@ quests:
               summed the right column, then re-ask. CREATE OR REPLACE TABLE
               genie_answer_check AS SELECT ... to record the answer.
             penalty_points: -10
+        solutions:
+          - sql: >
+              CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.genie_answer_check AS
+              SELECT region, total_amount
+              FROM ${team_catalog}.${team_schema}.revenue_by_region
+              ORDER BY total_amount DESC LIMIT 1

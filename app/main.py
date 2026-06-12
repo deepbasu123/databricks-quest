@@ -1020,12 +1020,17 @@ async def remove_admin(email: str, user: str = Depends(require_admin)):
 
 class QuestPackPayload(BaseModel):
     manifest_yaml: str
+    strict: bool = False
 
 
 @app.post("/api/host/quest-packs/lint")
 async def host_lint_quest_pack(body: QuestPackPayload, user: str = Depends(require_host)):
-    """Lint a quest pack manifest without persisting anything."""
-    return quest_pack_loader.lint_text(body.manifest_yaml)
+    """Lint a quest pack manifest without persisting anything.
+
+    ``strict: true`` applies the playability gate (solutions present on auto
+    tasks, manual fallbacks paired, unknown check names are errors).
+    """
+    return quest_pack_loader.lint_text(body.manifest_yaml, strict=body.strict)
 
 
 @app.post("/api/host/quest-packs/import")

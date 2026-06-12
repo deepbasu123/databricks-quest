@@ -104,6 +104,41 @@ listed above. Confirm the live set at runtime: `GET /api/health` returns
 the only egress is the workspace API host via the app's own identity; prompts
 are host-authored; `max_tokens` ≤ 512 and timeout ≤ 60s are clamped server-side.
 
+### `solutions` — the machine-playability contract (host-only)
+
+Every task with auto validators carries ordered `solutions:` steps that perform
+the task's intended action. The operator preflight harness executes them to
+prove the pack is winnable end-to-end before an event; players never see them
+(they live only in the host-side manifest, not in player task rows). Steps:
+
+```yaml
+solutions:
+  - sql: "CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.silver AS SELECT ..."
+  - workspace_op:           # executed by the preflight's workspace executor
+      op: publish_dashboard # e.g. publish_dashboard, create_genie_space,
+      name: "${team_slug} revenue"   # create_pipeline_and_run, create_scheduled_job
+      dataset_sql: "SELECT ..."
+  - skip: "seeded by host bootstrap"   # nothing to do; reason required
+```
+
+Each step is **exactly one of** `sql` / `workspace_op` (mapping with an `op`
+name) / `skip` (reason string). Tasks whose only validators are `manual` are
+exempt.
+
+### Strict mode — the shipped-pack playability gate
+
+`python scripts/lint_quest_pack.py --strict <pack>` (or `"strict": true` on the
+lint API) adds the rules CI enforces on every shipped pack:
+
+- every task with auto validators has `solutions`;
+- every `databricks_sdk`/`workspace_api`/`rest_api` validator pairs with a
+  `manual` validator **and** `manual_validation_required: true`;
+- manual-only tasks set `manual_validation_required: true`;
+- an unknown `databricks_sdk` check name is an **error** (warning otherwise).
+
+`tests/test_sample_packs.py` strict-lints everything in `quest_packs/built_in/`
+and `samples/packs/` — a pack that can't prove playability can't ship.
+
 ### `sql_assertion` safety (critical)
 
 The SQL safety layer ([`app/validators/safety.py`](../app/validators/safety.py))

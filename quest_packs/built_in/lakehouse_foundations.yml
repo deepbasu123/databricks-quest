@@ -95,6 +95,8 @@ quests:
           - title: "Stuck?"
             body_md: "Confirm the event warehouse with your host."
             penalty_points: -5
+        solutions:
+          - skip: "Validator is self-contained (SELECT 1); no setup action needed."
       - slug: bronze-ready
         title: "Verify the bronze landing zone"
         objective: "Confirm bronze_events landed in your schema."
@@ -116,6 +118,8 @@ quests:
           - title: "No data?"
             body_md: "Ask the host to run resource bootstrap."
             penalty_points: -10
+        solutions:
+          - skip: "bronze_events is created by host bootstrap (resources.seed_sql)."
 
   - slug: refine
     title: "Refine to silver"
@@ -157,6 +161,11 @@ quests:
           - title: "Filter"
             body_md: "WHERE event_type = 'purchase' AND user_id IS NOT NULL AND value > 0."
             penalty_points: -10
+        solutions:
+          - sql: >
+              CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.silver_purchases AS
+              SELECT * FROM ${team_catalog}.${team_schema}.bronze_events
+              WHERE event_type = 'purchase' AND user_id IS NOT NULL AND value > 0
       - slug: quality-gate
         title: "Prove the quality rule"
         objective: "Silver must contain only clean purchases."
@@ -191,6 +200,8 @@ quests:
               Rebuild silver from bronze with all three predicates applied:
               purchase events, non-NULL user_id, positive value.
             penalty_points: -15
+        solutions:
+          - skip: "Proven by the build-silver solution's filters."
 
   - slug: prove-it
     title: "Prove the outcome"
@@ -229,6 +240,8 @@ quests:
           - title: "Hint"
             body_md: "SUM(value) over the silver table."
             penalty_points: -5
+        solutions:
+          - skip: "Follows from the build-silver solution (positive values only)."
       - slug: design-review
         title: "Walk the host through your design"
         objective: "Explain your bronze→silver design and quality rule."
@@ -252,6 +265,10 @@ quests:
           - title: "Talking points"
             body_md: "Cover ingestion, the quality gate, and lineage."
             penalty_points: -5
+        solutions:
+          - skip: >
+              silver_purchases exists from the build-silver solution (satisfies
+              table_exists); the walkthrough itself is host review.
 
   - slug: serve-gold
     title: "Serve the business"
@@ -304,6 +321,12 @@ quests:
           - title: "Pattern"
             body_md: "GROUP BY event_date and SUM(value) AS revenue."
             penalty_points: -10
+        solutions:
+          - sql: >
+              CREATE OR REPLACE TABLE ${team_catalog}.${team_schema}.gold_daily_revenue AS
+              SELECT event_date, sum(value) AS revenue
+              FROM ${team_catalog}.${team_schema}.silver_purchases
+              GROUP BY event_date
       - slug: first-dashboard
         title: "Publish your first dashboard"
         objective: "Publish an AI/BI dashboard over gold_daily_revenue."
@@ -331,3 +354,8 @@ quests:
               Open your gold table's query result in the SQL editor and use the
               'Create dashboard' action, then Publish.
             penalty_points: -10
+        solutions:
+          - workspace_op:
+              op: publish_dashboard
+              name: "${team_slug} daily revenue"
+              dataset_sql: "SELECT * FROM ${team_catalog}.${team_schema}.gold_daily_revenue"

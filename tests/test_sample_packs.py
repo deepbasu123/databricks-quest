@@ -38,9 +38,11 @@ def test_at_least_two_sample_packs_shipped():
 
 @pytest.mark.parametrize("path", _pack_paths(), ids=lambda p: os.path.basename(p))
 def test_sample_pack_lints_with_no_errors_or_warnings(path):
+    # Strict mode is the CI playability gate: every shipped pack must prove
+    # every task is machine-playable (solutions) or explicitly host-reviewed.
     with open(path, "r", encoding="utf-8") as fh:
-        result = lint_manifest_text(fh.read())
-    assert result.ok, f"{path} lint errors: {result.errors}"
+        result = lint_manifest_text(fh.read(), strict=True)
+    assert result.ok, f"{path} strict lint errors: {result.errors}"
     assert result.warnings == [], f"{path} lint warnings: {result.warnings}"
 
 

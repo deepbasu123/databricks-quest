@@ -107,6 +107,11 @@ class TaskSpec(BaseModel):
     hints: List[HintSpec] = Field(default_factory=list)
     scoring: Optional[Dict[str, Any]] = None
     metadata: Optional[Dict[str, Any]] = None
+    # Host-only machine-playability contract: ordered steps that perform the
+    # task's intended action, executed by the operator preflight harness and
+    # never shown to players. Each step is exactly one of:
+    #   {sql: "<statement>"} | {workspace_op: {op: <name>, ...}} | {skip: "<why>"}
+    solutions: Optional[List[Dict[str, Any]]] = None
 
 
 class QuestSpec(BaseModel):
