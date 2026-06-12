@@ -453,6 +453,12 @@ def require_host(request: Request) -> str:
     against the ``event_id`` (or slug) in the request path when present.
     """
     _ensure_event_mode()
+    # A trusted service caller (Control Tower) presenting the shared service
+    # token has host authority: it drives the event/pack/announcement lifecycle
+    # (contract C2) without a human workspace identity. Distinct from the
+    # player/host proxy identity; gated on QUEST_SERVICE_TOKEN being set.
+    if _has_valid_service_token(request):
+        return "service:control-tower"
     user = get_user_email(request)
     path_params = getattr(request, "path_params", {}) or {}
     event_id = _resolve_event_id_opt(path_params.get("event_id"))
@@ -486,6 +492,19 @@ def require_master_host(request: Request) -> str:
 # player/host proxy identity. Configure via QUEST_SERVICE_TOKEN; empty disables
 # the integration surface (503) so it is never silently open.
 QUEST_SERVICE_TOKEN = os.getenv("QUEST_SERVICE_TOKEN", "").strip()
+
+
+def _has_valid_service_token(request: Request) -> bool:
+    """True if the request carries the configured bearer service token.
+
+    Shared by ``require_service_token`` (integration endpoints) and
+    ``require_host`` (so the trusted Control Tower service token also confers
+    host authority for the event/pack/announcement lifecycle, C2)."""
+    if not QUEST_SERVICE_TOKEN:
+        return False
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    return bool(token) and token == QUEST_SERVICE_TOKEN
 
 
 def require_service_token(request: Request) -> str:
