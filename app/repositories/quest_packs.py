@@ -167,14 +167,31 @@ class QuestPacksRepository:
             rows = db.execute_query(
                 """
                 SELECT t.task_id, t.quest_id, t.slug, t.title, t.objective,
-                       t.points, t.validation_mode, q.pack_version_id
+                       t.points, t.validation_mode, t.metadata_json,
+                       q.pack_version_id
                 FROM quest_tasks t
                 JOIN quests q ON q.quest_id = t.quest_id
                 WHERE t.task_id = %s
                 """,
                 (task_id,),
             )
-            return rows[0] if rows else None
+            if not rows:
+                return None
+            row = rows[0]
+            # Surface the C4b attestation opt-in from task metadata so Control
+            # Tower's completion forwarding (contract C4b) awards an externally-
+            # attested completion only for tasks the author marked
+            # ``accepts_attested`` in the quest pack. metadata_json is JSONB
+            # (dict) but tolerate a JSON string too.
+            meta = row.get("metadata_json")
+            if isinstance(meta, str):
+                import json as _json
+                try:
+                    meta = _json.loads(meta)
+                except ValueError:
+                    meta = {}
+            row["accepts_attested"] = bool((meta or {}).get("accepts_attested"))
+            return row
         except Exception as exc:  # noqa: BLE001
             logger.warning("get_task failed: %s", exc)
             return None

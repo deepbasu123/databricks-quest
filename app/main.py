@@ -2,7 +2,7 @@ import os
 import time
 import logging
 from datetime import datetime, date
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Literal, Optional
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
@@ -2202,6 +2202,24 @@ class RosterUpsertPayload(BaseModel):
     attendees: List[AttendeeIdentity]
 
 
+class CompletionItem(BaseModel):
+    """One externally-attested task completion forwarded by Control Tower.
+
+    The attendee is identified by ``workspace_id`` (+ ``lab_user_email`` for the
+    federation identity map); the task by ``task_id``. ``mode`` selects how the
+    completion is honoured — see ``integrations_ingest_completions``.
+    """
+
+    task_id: str
+    lab_user_email: str
+    workspace_id: str
+    mode: Literal["attested", "trigger"] = "attested"
+
+
+class CompletionsIngestPayload(BaseModel):
+    completions: List[CompletionItem]
+
+
 def _resolve_event_or_404(event_id_or_slug: str) -> str:
     """Accept either an event_id or a slug and return the canonical event_id."""
     ev = events_repo.get_event(event_id_or_slug) or events_repo.get_event_by_slug(
@@ -2355,6 +2373,130 @@ async def integrations_upsert_roster(
         payload={k: result[k] for k in ("rows", "teams_created", "participants_created", "identities_mapped")},
     )
     return result
+
+
+def _resolve_completion_team(
+    event_id: str, workspace_id: str, lab_user_email: str
+) -> Optional[str]:
+    """Resolve the scoring team for a forwarded completion.
+
+    Prefer the federation identity map (a roster-imported attendee workspace,
+    the common case for Control Tower), then fall back to direct team
+    membership. Returns ``None`` when unattributable — the award still records
+    with ``workspace_id`` so a master can attribute it later, exactly like a
+    federation-child submission.
+    """
+    identity = federation_repo.resolve_identity(event_id, workspace_id, lab_user_email)
+    if identity and identity.get("team_id"):
+        return identity["team_id"]
+    team_row = events_repo.get_team_for_user(event_id, lab_user_email)
+    return team_row["team_id"] if team_row else None
+
+
+@app.post("/api/integrations/events/{event_id}/completions")
+async def integrations_ingest_completions(
+    event_id: str,
+    body: CompletionsIngestPayload,
+    _: None = Depends(require_event_mode),
+    actor: str = Depends(require_service_token),
+):
+    """C4b: ingest externally-attested task completions from Control Tower.
+
+    Control Tower forwards ``milestone.completed`` signals it has mapped to
+    Quest task refs (contract C4a). Each completion is honoured through the same
+    idempotent, lifecycle-gated scoring path a player submission uses — so an
+    attested award and an in-Quest validation for the same task+team collapse to
+    a single ledger row (``base_points_idempotency_key``), never a double count.
+    ``created_by`` records Control Tower as the source so the host console can
+    distinguish player-earned from attested points.
+
+    Two modes per item:
+
+    - ``attested`` (default): award the task's base points directly. The task
+      must opt in via ``accepts_attested`` in its definition — the integrity
+      control that keeps a host's tasks player-validated unless they explicitly
+      delegate verification to Control Tower.
+    - ``trigger``: request server-side re-validation. The validators run against
+      the attendee's live workspace, which requires the validation backend; this
+      ingress only records the request (status ``revalidation_requested``) — the
+      existing player/host validation path performs the run.
+
+    The event must be active; a closed event rejects the whole batch (409),
+    matching ``submit_attempt``.
+    """
+    resolved_event_id = _resolve_event_or_404(event_id)
+
+    ev = events_repo.get_event(resolved_event_id)
+    if ev and not attempts_open(ev["status"]):
+        raise HTTPException(
+            status_code=409,
+            detail={"error": {"code": "EVENT_NOT_ACTIVE",
+                              "message": _closed_event_message(ev["status"])}},
+        )
+
+    results: List[Dict[str, Any]] = []
+    awarded_count = 0
+    for item in body.completions:
+        row: Dict[str, Any] = {
+            "task_id": item.task_id,
+            "lab_user_email": item.lab_user_email,
+            "mode": item.mode,
+        }
+
+        if item.mode == "trigger":
+            # Live re-validation needs the attendee's workspace + the validation
+            # backend; this endpoint only records the request.
+            row["status"] = "revalidation_requested"
+            results.append(row)
+            continue
+
+        task = quest_packs_repo.get_task(item.task_id)
+        if not task:
+            row["status"] = "task_not_found"
+            results.append(row)
+            continue
+        if not task.get("accepts_attested"):
+            row["status"] = "attestation_not_allowed"
+            results.append(row)
+            continue
+
+        team_id = _resolve_completion_team(
+            resolved_event_id, item.workspace_id, item.lab_user_email
+        )
+        award = default_scoring_service.award_task_base_points(
+            event_id=resolved_event_id,
+            task_id=item.task_id,
+            points=int(task.get("points") or 0),
+            attempt_id=f"attest:{item.workspace_id}:{item.task_id}",
+            quest_id=task.get("quest_id"),
+            team_id=team_id,
+            user_id=item.lab_user_email,
+            workspace_id=item.workspace_id,
+            created_by=actor,
+        )
+        row["awarded"] = bool(award["awarded"])
+        row["points"] = award["points"]
+        row["scoring_event_id"] = award["scoring_event_id"]
+        row["already_awarded"] = (not award["awarded"]) and int(task.get("points") or 0) > 0
+        row["status"] = "awarded" if award["awarded"] else "skipped"
+        if award["awarded"]:
+            awarded_count += 1
+        results.append(row)
+
+    record_audit(
+        action="integrations.completions",
+        actor_user_id=actor,
+        event_id=resolved_event_id,
+        target_type="event",
+        target_id=resolved_event_id,
+        payload={"processed": len(results), "awarded": awarded_count},
+    )
+    return {
+        "event_id": resolved_event_id,
+        "processed": len(results),
+        "awarded": awarded_count,
+        "results": results,
+    }
 
 
 @app.get("/api/host/events/{event_id}/workspaces")
