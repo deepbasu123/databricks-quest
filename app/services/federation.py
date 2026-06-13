@@ -85,11 +85,18 @@ def startup_checkin() -> bool:
         logger.warning("child role without QUEST_WORKSPACE_ID — skipping check-in")
         return False
     event_id = resolve_event_id()
+    # Report the workspace host (the Databricks Apps runtime injects
+    # DATABRICKS_HOST = this workspace's URL) so the host console can deep-link
+    # into the attendee workspace; app_url falls back to the same host.
+    import os as _os
+
+    workspace_host = _os.getenv("DATABRICKS_HOST", "").strip() or None
     ok = _federation.checkin_workspace(
         workspace_id=config.QUEST_WORKSPACE_ID,
         event_id=event_id,
         event_slug=config.QUEST_EVENT_SLUG or None,
-        app_url=config.QUEST_APP_URL or None,
+        workspace_host=workspace_host,
+        app_url=config.QUEST_APP_URL or workspace_host,
         app_version=config.QUEST_APP_VERSION or None,
     )
     if ok:
