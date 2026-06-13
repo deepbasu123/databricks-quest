@@ -10,7 +10,7 @@ rules and produces actionable messages.
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Validator types recognised by the authoring format. Every name here has an
 # executable backend registered in services.validation_engine — types without
@@ -126,7 +126,18 @@ class QuestSpec(BaseModel):
     sort_order: Optional[int] = None
     unlock_rule: Optional[UnlockRule] = None
     facilitator_notes: Optional[str] = None
+    # A quest consists of a number of *missions* (the steps). ``missions:`` is the
+    # preferred pack key; ``tasks:`` stays accepted for back-compat with existing
+    # packs. Whichever is present populates this field.
+    bonus: bool = False
     tasks: List[TaskSpec] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_missions_alias(cls, data):
+        if isinstance(data, dict) and "missions" in data and not data.get("tasks"):
+            data = {**data, "tasks": data["missions"]}
+        return data
 
 
 class PackMeta(BaseModel):

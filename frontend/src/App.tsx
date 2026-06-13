@@ -119,11 +119,14 @@ export default function App() {
   // Event Mode is opt-in and server-driven: the Event nav only appears when the
   // backend reports it on (federation/status 404s otherwise, leaving this null).
   const isEventMode = !!federation && federation.event_mode !== false
+  // In Event Mode the event IS the experience: lead with it and drop the legacy
+  // adoption "Missions" catalog (baseNav[1]) — it's unrelated to the event's
+  // Quests→Missions and was the main nav confusion. Master gets the operator
+  // "Host Console" label; child gets "Event".
   const navItems: NavItem[] = isEventMode
     ? [
-        baseNav[0],
-        ...(federation?.role === 'child' ? [baseNav[1]] : []),
         { id: 'federation' as NavPage, label: federation?.role === 'master' ? 'Host Console' : 'Event', icon: Network },
+        baseNav[0],
         ...baseNav.slice(2),
       ]
     : baseNav

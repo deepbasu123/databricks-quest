@@ -504,7 +504,7 @@ function LobbyPanel({
         )}
         <div className="mt-4 grid grid-cols-2 gap-2 text-center text-xs text-slate-400">
           <Stat label="Quests" value={lobby.counts.quests} />
-          <Stat label="Tasks" value={lobby.counts.tasks} />
+          <Stat label="Missions" value={lobby.counts.tasks} />
         </div>
       </QuestCard>
     </div>
@@ -572,7 +572,7 @@ function QuestsPanel({ eventRef, onOpen }: { eventRef: string; onOpen: (id: stri
                 <div className="h-full rounded-full bg-[#FF5F1F]" style={{ width: `${pct}%` }} />
               </div>
               <span className="text-xs text-slate-400">
-                {q.completed_tasks}/{q.task_count} tasks
+                {q.completed_tasks}/{q.task_count} missions
               </span>
             </div>
           </button>
@@ -971,7 +971,7 @@ function TeamPanel({ eventRef }: { eventRef: string }) {
           <div className="mb-1 flex items-center justify-between text-xs text-slate-400">
             <span>Progress</span>
             <span>
-              {data.progress.completed_tasks}/{data.progress.total_tasks} tasks
+              {data.progress.completed_tasks}/{data.progress.total_tasks} missions
             </span>
           </div>
           <div className="h-2 overflow-hidden rounded-full bg-white/[0.06]">
@@ -995,7 +995,7 @@ function TeamPanel({ eventRef }: { eventRef: string }) {
 
       <QuestCard title="Recent scoring" eyebrow="Activity">
         {data.recent.length === 0 ? (
-          <p className="text-sm text-slate-400">No points yet. Complete a task to get on the board.</p>
+          <p className="text-sm text-slate-400">No points yet. Complete a mission to get on the board.</p>
         ) : (
           <ul className="space-y-2">
             {data.recent.map((r) => (
