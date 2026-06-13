@@ -273,6 +273,19 @@ class EventsRepository:
             logger.warning("list_player_events failed: %s", exc)
             return []
 
+    def latest_event_id(self) -> Optional[str]:
+        """Most-recently-created event id, or None. Used by a master host console
+        to auto-resolve its event when QUEST_EVENT_SLUG isn't pinned (a master
+        typically owns the single event Control Tower created for the run)."""
+        try:
+            rows = db.execute_query(
+                "SELECT event_id FROM events ORDER BY created_at DESC LIMIT 1"
+            )
+            return rows[0]["event_id"] if rows else None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("latest_event_id failed: %s", exc)
+            return None
+
     def list_teams_with_counts(self, event_id: str) -> List[Dict[str, Any]]:
         """Teams in an event with their member counts (lobby/host view)."""
         try:

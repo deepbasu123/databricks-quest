@@ -57,12 +57,20 @@ def stamp_federated_write(payload: Dict[str, Any], submitted_by: Optional[str] =
 
 
 def resolve_event_id(event_slug: Optional[str] = None) -> Optional[str]:
-    """Resolve an event slug (default: the configured one) to its event_id."""
+    """Resolve an event slug (default: the configured one) to its event_id.
+
+    When no slug is pinned, a master/standalone falls back to the latest event
+    it owns, so the host console resolves automatically instead of showing
+    "No Event Resolved" (a master typically hosts the single event Control Tower
+    created for the run). A child only uses its explicit slug — it federates to
+    exactly one event."""
     slug = event_slug or config.QUEST_EVENT_SLUG
-    if not slug:
-        return None
-    ev = _events.get_event_by_slug(slug)
-    return ev["event_id"] if ev else None
+    if slug:
+        ev = _events.get_event_by_slug(slug)
+        return ev["event_id"] if ev else None
+    if not config.is_child():
+        return _events.latest_event_id()
+    return None
 
 
 def startup_checkin() -> bool:
