@@ -35,6 +35,9 @@ class _FakeConn:
 
         return _Cur()
 
+    def rollback(self):
+        pass
+
     def close(self):
         self.closed = True
 
@@ -102,3 +105,40 @@ def test_lease_uses_pool_and_returns_connection(monkeypatch):
     # Returned (not leaked): a second lease succeeds immediately.
     with db._lease(autocommit=True) as conn2:
         assert isinstance(conn2, _FakeConn)
+
+
+class _TxFakeConn:
+    """Fake mimicking psycopg2: a query on a non-autocommit conn opens a tx, and
+    setting autocommit while in a tx raises (set_session error)."""
+    def __init__(self):
+        self.autocommit = False
+        self.in_tx = False
+        self.closed = False
+        self.rollbacks = 0
+
+    def cursor(self):
+        conn = self
+
+        class _Cur:
+            def __enter__(self_): return self_
+            def __exit__(self_, *a): return False
+            def execute(self_, sql, params=None):
+                if not conn.autocommit:
+                    conn.in_tx = True  # implicit BEGIN
+        return _Cur()
+
+    def rollback(self):
+        self.in_tx = False
+        self.rollbacks += 1
+
+    def close(self):
+        self.closed = True
+
+
+def test_validate_probe_does_not_leave_open_transaction():
+    """Regression: the validate-on-borrow probe must not leave a connection in a
+    transaction, else the next lease's autocommit switch fails."""
+    conn = _TxFakeConn()
+    assert db._TokenAwarePool._alive(conn) is True
+    assert conn.in_tx is False          # probe rolled back its implicit tx
+    assert conn.rollbacks >= 1
