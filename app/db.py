@@ -260,6 +260,12 @@ class _TokenAwarePool:
         try:
             with conn.cursor() as c:
                 c.execute("SELECT 1")
+            # The probe opens an implicit transaction on a non-autocommit
+            # connection (e.g. one returned from a ``transaction()`` lease). If
+            # left open, the next lease's ``conn.autocommit = ...`` raises
+            # "set_session cannot be used inside a transaction". Roll back so the
+            # connection returns IDLE regardless of its autocommit mode.
+            conn.rollback()
             return True
         except Exception:  # noqa: BLE001
             return False
@@ -447,6 +453,14 @@ def _lease(autocommit: bool):
     conn = pool.getconn()
     broken = False
     try:
+        # Switching autocommit is illegal inside a transaction; ensure the
+        # borrowed connection is IDLE first (defensive — the pool's validate
+        # probe also rolls back).
+        if getattr(conn, "autocommit", None) != autocommit:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
         conn.autocommit = autocommit
         yield conn
         if not autocommit:
