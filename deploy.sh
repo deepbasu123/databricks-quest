@@ -714,12 +714,18 @@ fi
 # ══════════════════════════════════════════════════════════════════════════════
 step "Step 3/8: Selecting SQL Warehouse"
 
-# Warehouse data backend: spin up a dedicated Small serverless warehouse with a
-# 1-hour auto-stop if the caller didn't supply one. It serves the app's reads
-# and is warmed by the 4-hourly scoring job (so dev intentionally drives DBUs).
-if [ "$QUEST_DATA_BACKEND" = "warehouse" ] && [ -z "$WAREHOUSE_ID" ] && [ -z "$WAREHOUSE_NAME" ]; then
+# A SQL warehouse is ALWAYS wired, in EVERY backend mode — not just
+# --data-backend warehouse. Warehouse mode reads scored Delta through it, and
+# even in Lakebase mode the runtime backend toggle persists its setting in a
+# Delta table via the warehouse (so switching backends keeps working when
+# Lakebase is down). When the caller doesn't supply one, reuse or provision a
+# dedicated Small serverless warehouse (60-min auto-stop) automatically — no
+# interactive prompt, so a customer running the command non-interactively still
+# gets a fully-wired app. Creation failure is non-fatal: we fall through to
+# selecting an existing warehouse below.
+if [ -z "$WAREHOUSE_ID" ] && [ -z "$WAREHOUSE_NAME" ]; then
   WH_QUEST_NAME="${APP_NAME}-warehouse"
-  info "Data backend: warehouse — provisioning Small serverless SQL warehouse '$WH_QUEST_NAME' (auto-stop 60 min)..."
+  info "No --warehouse specified — reusing or provisioning a dedicated Small serverless warehouse '$WH_QUEST_NAME' (auto-stop 60 min)..."
   WAREHOUSE_ID=$($CLI warehouses list $PROFILE_FLAG -o json 2>/dev/null | python3 -c "
 import sys, json
 try: whs = json.load(sys.stdin)
@@ -733,8 +739,11 @@ for w in whs:
       --auto-stop-mins 60 --max-num-clusters 1 --enable-serverless-compute --warehouse-type PRO \
       $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
   fi
-  [ -n "$WAREHOUSE_ID" ] || fail "Could not create/find the Quest serverless warehouse '$WH_QUEST_NAME'."
-  success "Quest warehouse ready: $WH_QUEST_NAME ($WAREHOUSE_ID) — Small / serverless / 60-min auto-stop"
+  if [ -n "$WAREHOUSE_ID" ]; then
+    success "Quest warehouse ready: $WH_QUEST_NAME ($WAREHOUSE_ID) — Small / serverless / 60-min auto-stop"
+  else
+    warn "Could not auto-provision a warehouse (insufficient permission?) — falling back to an existing one."
+  fi
 fi
 
 if [ -n "$WAREHOUSE_ID" ]; then
@@ -794,8 +803,15 @@ for wh in whs:
     fi
     success "Selected warehouse: $WAREHOUSE_NAME ($WAREHOUSE_ID)"
   else
-    # Interactive selection
-    read -rp "  Select warehouse number [1]: " WH_CHOICE
+    # Selection. Prompt only when attached to a terminal; otherwise (customer
+    # running non-interactively / piped) default to the first warehouse so the
+    # deploy never hangs on a read and never lands without a warehouse.
+    if [ -t 0 ]; then
+      read -rp "  Select warehouse number [1]: " WH_CHOICE
+    else
+      WH_CHOICE="1"
+      info "Non-interactive — defaulting to warehouse #1."
+    fi
     WH_CHOICE="${WH_CHOICE:-1}"
 
     WAREHOUSE_ID=$(echo "$WAREHOUSES_JSON" | python3 -c "
@@ -941,6 +957,15 @@ BUNDLE_FILE="$SCRIPT_DIR/databricks.yml"
 if [ "$QUEST_ROLE" = "child" ]; then
   info "Writing child app.yaml (role=child, points at master Lakebase)..."
   write_app_yaml "$MASTER_LAKEBASE_HOST" "$LAKEBASE_DB"
+elif [ "$DEPLOY_MODE" != "quick" ]; then
+  # Standalone/master: write app.yaml NOW (before the bundle uploads app/) with
+  # everything already known — warehouse id, catalog, schema, backend default.
+  # The Lakebase host isn't known until Step 6, which rewrites this file and
+  # redeploys. Writing it early means even a deploy that doesn't finish Step 6
+  # still boots an app with the warehouse + catalog wired (so warehouse mode and
+  # the backend toggle work), instead of a config-less placeholder app.yaml.
+  info "Writing app.yaml with known config (warehouse, catalog, backend)..."
+  write_app_yaml "$LAKEBASE_HOST" "$LAKEBASE_DB"
 fi
 
 if [ "$DEPLOY_MODE" = "quick" ]; then
