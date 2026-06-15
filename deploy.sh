@@ -1404,9 +1404,13 @@ elif [ "$DEPLOY_MODE" = "quick" ]; then
   echo ""
 
   NB_WORKSPACE_PATH="/Workspace/Users/${USER_EMAIL}/databricks-quest/notebooks/scoring_pipeline"
+  SYNC_NB_PATH="/Workspace/Users/${USER_EMAIL}/databricks-quest/notebooks/lakebase_sync"
+  # Two tasks: score (writes Delta), then the robust on-cluster sync into
+  # Lakebase (same notebook the full-deploy job uses). The sync no-ops when
+  # lakebase_host is empty (warehouse-only). No fragile local psql sync.
   set +e
   $CLI jobs submit \
-    --json "{\"run_name\": \"Quest Scoring (one-time)\", \"tasks\": [{\"task_key\": \"run_scoring\", \"notebook_task\": {\"notebook_path\": \"$NB_WORKSPACE_PATH\", \"base_parameters\": {\"quest_catalog\": \"$QUEST_CATALOG\", \"quest_schema\": \"$QUEST_SCHEMA\", \"lakebase_host\": \"$LAKEBASE_HOST\", \"lakebase_db\": \"$LAKEBASE_DB\", \"app_name\": \"$APP_NAME\", \"warehouse_id\": \"$WAREHOUSE_ID\"}, \"source\": \"WORKSPACE\"}, \"environment_key\": \"default\"}], \"environments\": [{\"environment_key\": \"default\", \"spec\": {\"client\": \"1\", \"dependencies\": [\"psycopg2-binary\"]}}]}" \
+    --json "{\"run_name\": \"Quest Scoring (one-time)\", \"tasks\": [{\"task_key\": \"run_scoring\", \"notebook_task\": {\"notebook_path\": \"$NB_WORKSPACE_PATH\", \"base_parameters\": {\"quest_catalog\": \"$QUEST_CATALOG\", \"quest_schema\": \"$QUEST_SCHEMA\", \"lakebase_host\": \"$LAKEBASE_HOST\", \"lakebase_db\": \"$LAKEBASE_DB\", \"app_name\": \"$APP_NAME\", \"warehouse_id\": \"$WAREHOUSE_ID\"}, \"source\": \"WORKSPACE\"}, \"environment_key\": \"default\"}, {\"task_key\": \"sync_to_lakebase\", \"depends_on\": [{\"task_key\": \"run_scoring\"}], \"notebook_task\": {\"notebook_path\": \"$SYNC_NB_PATH\", \"base_parameters\": {\"quest_catalog\": \"$QUEST_CATALOG\", \"quest_schema\": \"$QUEST_SCHEMA\", \"lakebase_host\": \"$LAKEBASE_HOST\", \"lakebase_db\": \"$LAKEBASE_DB\", \"app_name\": \"$APP_NAME\"}, \"source\": \"WORKSPACE\"}, \"environment_key\": \"default\"}], \"environments\": [{\"environment_key\": \"default\", \"spec\": {\"client\": \"1\", \"dependencies\": [\"psycopg2-binary\"]}}]}" \
     $PROFILE_FLAG 2>&1
   RUN_EXIT=$?
   set -e
@@ -1420,13 +1424,19 @@ else
   info "Takes 2-5 minutes on first run..."
   echo ""
 
+  # Pass the REAL lakebase_host so the job's sync_to_lakebase task populates
+  # Lakebase at deploy time using the robust on-cluster Spark sync (the same
+  # task the 4-hourly schedule uses). Previously this passed an empty
+  # lakebase_host, which made that task skip — leaving deploy-time Lakebase
+  # population to a fragile local psql sync that truncated then timed out on
+  # large/cold data (app showed "Not Initialized"). One sync mechanism now.
   set +e
   $CLI bundle run quest_scoring_pipeline --target "$TARGET" $PROFILE_FLAG \
     --var "warehouse_id=$WAREHOUSE_ID" \
     --var "quest_catalog=$QUEST_CATALOG" \
     --var "quest_schema=$QUEST_SCHEMA" \
-    --var "lakebase_host=" \
-    --var "lakebase_db=" \
+    --var "lakebase_host=$LAKEBASE_HOST" \
+    --var "lakebase_db=$LAKEBASE_DB" \
     --var "quest_data_backend=$QUEST_DATA_BACKEND"
   RUN_EXIT=$?
   set -e
@@ -1437,128 +1447,12 @@ else
   success "Scoring pipeline complete"
 fi
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 7b: Sync Delta tables to Lakebase
-# ══════════════════════════════════════════════════════════════════════════════
-if [ -n "$LAKEBASE_HOST" ] && [ -z "$SKIP_SCORING" ]; then
-  step "Syncing data to Lakebase"
-
-  info "Reading scored data from Delta tables and syncing to Lakebase..."
-
-  # Generate fresh Lakebase credential
-  LB_PROJECT_ID=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
-  LB_TOKEN=$($CLI postgres generate-database-credential \
-    "projects/$LB_PROJECT_ID/branches/production/endpoints/primary" \
-    $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])" 2>/dev/null || true)
-
-  if [ -z "$LB_TOKEN" ]; then
-    # Fallback: use workspace auth token
-    LB_TOKEN=$($CLI auth token $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "$DATABRICKS_TOKEN")
-  fi
-
-  # Sync each table: read from Delta via SQL Statements API, write to Lakebase via psql
-  python3 << PYEOF
-import urllib.request, json, os, time, subprocess
-
-HOST = os.environ.get("DATABRICKS_HOST", "$WORKSPACE_HOST")
-TOKEN = os.environ.get("DATABRICKS_TOKEN", "")
-WH_ID = "$WAREHOUSE_ID"
-CATALOG = "$QUEST_CATALOG"
-SCHEMA = "$QUEST_SCHEMA"
-LB_HOST = "$LAKEBASE_HOST"
-LB_DB = "$LAKEBASE_DB"
-LB_TOKEN = "$LB_TOKEN"
-USER_EMAIL = "$USER_EMAIL"
-
-TABLES = [
-    ("mission_completions", "user_id, mission_id, mission_name, points_awarded, completed_at, period_start, period_end, scored_at"),
-    ("user_points_fact", "user_id, event_type, mission_id, points, reason, event_timestamp, scored_at"),
-    ("user_profile_snapshot", "user_id, display_name, total_points, level, current_streak, max_streak, badge_count, missions_completed, first_activity_date, last_activity_date, distinct_products_used, updated_at"),
-    ("leaderboard", "user_id, display_name, total_points, weekly_points, monthly_points, level, all_time_rank, weekly_rank, monthly_rank, updated_at"),
-    ("badges", "user_id, badge_id, badge_name, badge_icon, earned_at"),
-    ("notifications", "user_id, notification_type, title, message, mission_id, points, created_at"),
-]
-
-def run_sql(sql, timeout=50):
-    """Execute SQL via Statements API and return rows."""
-    data = json.dumps({"warehouse_id": WH_ID, "statement": sql, "wait_timeout": f"{timeout}s"}).encode()
-    req = urllib.request.Request(
-        f"{HOST}/api/2.0/sql/statements", data=data,
-        headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"})
-    resp = urllib.request.urlopen(req, timeout=60)
-    result = json.loads(resp.read())
-    status = result.get("status", {}).get("state", "?")
-    if status == "SUCCEEDED":
-        return result.get("result", {}).get("data_array", [])
-    elif status == "PENDING" or status == "RUNNING":
-        # Poll
-        stmt_id = result.get("statement_id", "")
-        for _ in range(30):
-            time.sleep(2)
-            req2 = urllib.request.Request(
-                f"{HOST}/api/2.0/sql/statements/{stmt_id}",
-                headers={"Authorization": f"Bearer {TOKEN}"})
-            resp2 = urllib.request.urlopen(req2, timeout=30)
-            result2 = json.loads(resp2.read())
-            if result2.get("status", {}).get("state") == "SUCCEEDED":
-                return result2.get("result", {}).get("data_array", [])
-            elif result2.get("status", {}).get("state") == "FAILED":
-                print(f"  SQL failed: {result2.get('status', {}).get('error', {}).get('message', '?')[:200]}")
-                return []
-        return []
-    else:
-        msg = result.get("status", {}).get("error", {}).get("message", "?")[:200]
-        print(f"  SQL error: {msg}")
-        return []
-
-def psql_exec(sql):
-    """Execute SQL against Lakebase via psql."""
-    env = os.environ.copy()
-    env["PGPASSWORD"] = LB_TOKEN
-    result = subprocess.run(
-        ["psql", f"host={LB_HOST} port=5432 dbname={LB_DB} user={USER_EMAIL} sslmode=require",
-         "-c", sql],
-        capture_output=True, text=True, env=env, timeout=60)
-    if result.returncode != 0:
-        print(f"  psql error: {result.stderr[:200]}")
-    return result.returncode == 0
-
-synced = 0
-for table_name, columns in TABLES:
-    print(f"  Syncing {table_name}...")
-    cols = [c.strip() for c in columns.split(",")]
-    rows = run_sql(f"SELECT {columns} FROM \`{CATALOG}\`.\`{SCHEMA}\`.\`{table_name}\`")
-    if rows is None:
-        rows = []
-
-    # Delete existing data
-    psql_exec(f"DELETE FROM {table_name}")
-
-    if rows:
-        # Build INSERT statements in batches
-        batch_size = 100
-        for i in range(0, len(rows), batch_size):
-            batch = rows[i:i+batch_size]
-            values = []
-            for row in batch:
-                escaped = []
-                for v in row:
-                    if v is None or v == "null":
-                        escaped.append("NULL")
-                    else:
-                        escaped.append("'" + str(v).replace("'", "''") + "'")
-                values.append(f"({', '.join(escaped)})")
-            insert_sql = f"INSERT INTO {table_name} ({columns}) VALUES {', '.join(values)}"
-            psql_exec(insert_sql)
-
-    print(f"  {table_name}: {len(rows)} rows synced")
-    synced += 1
-
-print(f"Lakebase sync complete: {synced}/{len(TABLES)} tables synced")
-PYEOF
-
-  success "Lakebase sync complete"
-fi
+# NOTE: deploy-time Lakebase population is handled by the scoring job's
+# sync_to_lakebase task (full deploy) / the one-time job's sync task (quick),
+# both using the robust on-cluster Spark sync (notebooks/lakebase_sync.py).
+# The previous fragile local psql sync here (TRUNCATE + per-batch INSERT with a
+# 60s timeout and no Statements-API result chunking) truncated good data and
+# timed out on large/cold datasets, leaving the app "Not Initialized" — removed.
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 8: Get App URL & Print Success
