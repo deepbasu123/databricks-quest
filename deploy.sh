@@ -719,13 +719,13 @@ step "Step 3/8: Selecting SQL Warehouse"
 # even in Lakebase mode the runtime backend toggle persists its setting in a
 # Delta table via the warehouse (so switching backends keeps working when
 # Lakebase is down). When the caller doesn't supply one, reuse or provision a
-# dedicated X-Small serverless warehouse (60-min auto-stop) automatically — no
+# dedicated 2X-Small serverless warehouse (60-min auto-stop) automatically — no
 # interactive prompt, so a customer running the command non-interactively still
 # gets a fully-wired app. Creation failure is non-fatal: we fall through to
 # selecting an existing warehouse below.
 if [ -z "$WAREHOUSE_ID" ] && [ -z "$WAREHOUSE_NAME" ]; then
   WH_QUEST_NAME="${APP_NAME}-warehouse"
-  info "No --warehouse specified — reusing or provisioning a dedicated X-Small serverless warehouse '$WH_QUEST_NAME' (auto-stop 60 min)..."
+  info "No --warehouse specified — reusing or provisioning a dedicated 2X-Small serverless warehouse '$WH_QUEST_NAME' (auto-stop 60 min)..."
   # NOTE: the `|| WAREHOUSE_ID=""` guards are required — under `set -euo
   # pipefail` a non-zero CLI exit (e.g. the deploying identity lacks permission
   # to list/create warehouses) would otherwise abort the whole deploy instead of
@@ -739,23 +739,23 @@ for w in whs:
         print(w.get('id','')); break
 " 2>/dev/null) || WAREHOUSE_ID=""
   if [ -z "$WAREHOUSE_ID" ]; then
-    WAREHOUSE_ID=$($CLI warehouses create --name "$WH_QUEST_NAME" --cluster-size "X-Small" \
+    WAREHOUSE_ID=$($CLI warehouses create --name "$WH_QUEST_NAME" --cluster-size "2X-Small" \
       --auto-stop-mins 60 --max-num-clusters 1 --enable-serverless-compute --warehouse-type PRO \
       $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null) || WAREHOUSE_ID=""
   else
     # Reuse-path: a dedicated Quest warehouse from a prior deploy already exists.
-    # Enforce X-Small (idempotent if already X-Small) so re-running the deploy
+    # Enforce 2X-Small (idempotent if already 2X-Small) so re-running the deploy
     # downsizes a warehouse left at a larger size by an older script. Scoped to
     # OUR managed '${APP_NAME}-warehouse' only — a warehouse the caller passes
     # via --warehouse/--warehouse-id is never touched. Full spec is sent so the
     # edit is deterministic. Non-fatal: a failed resize keeps the existing size.
-    info "Reusing existing '$WH_QUEST_NAME' ($WAREHOUSE_ID) — enforcing X-Small size..."
-    $CLI warehouses edit "$WAREHOUSE_ID" --name "$WH_QUEST_NAME" --cluster-size "X-Small" \
+    info "Reusing existing '$WH_QUEST_NAME' ($WAREHOUSE_ID) — enforcing 2X-Small size..."
+    $CLI warehouses edit "$WAREHOUSE_ID" --name "$WH_QUEST_NAME" --cluster-size "2X-Small" \
       --auto-stop-mins 60 --max-num-clusters 1 --enable-serverless-compute --warehouse-type PRO \
-      $PROFILE_FLAG -o json >/dev/null 2>&1 || warn "Could not resize '$WH_QUEST_NAME' to X-Small (keeping current size)."
+      $PROFILE_FLAG -o json >/dev/null 2>&1 || warn "Could not resize '$WH_QUEST_NAME' to 2X-Small (keeping current size)."
   fi
   if [ -n "$WAREHOUSE_ID" ]; then
-    success "Quest warehouse ready: $WH_QUEST_NAME ($WAREHOUSE_ID) — X-Small / serverless / 60-min auto-stop"
+    success "Quest warehouse ready: $WH_QUEST_NAME ($WAREHOUSE_ID) — 2X-Small / serverless / 60-min auto-stop"
   else
     warn "Could not auto-provision a warehouse (insufficient permission?) — falling back to an existing one."
   fi
