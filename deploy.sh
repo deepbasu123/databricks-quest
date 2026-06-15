@@ -719,13 +719,13 @@ step "Step 3/8: Selecting SQL Warehouse"
 # even in Lakebase mode the runtime backend toggle persists its setting in a
 # Delta table via the warehouse (so switching backends keeps working when
 # Lakebase is down). When the caller doesn't supply one, reuse or provision a
-# dedicated Small serverless warehouse (60-min auto-stop) automatically — no
+# dedicated X-Small serverless warehouse (60-min auto-stop) automatically — no
 # interactive prompt, so a customer running the command non-interactively still
 # gets a fully-wired app. Creation failure is non-fatal: we fall through to
 # selecting an existing warehouse below.
 if [ -z "$WAREHOUSE_ID" ] && [ -z "$WAREHOUSE_NAME" ]; then
   WH_QUEST_NAME="${APP_NAME}-warehouse"
-  info "No --warehouse specified — reusing or provisioning a dedicated Small serverless warehouse '$WH_QUEST_NAME' (auto-stop 60 min)..."
+  info "No --warehouse specified — reusing or provisioning a dedicated X-Small serverless warehouse '$WH_QUEST_NAME' (auto-stop 60 min)..."
   # NOTE: the `|| WAREHOUSE_ID=""` guards are required — under `set -euo
   # pipefail` a non-zero CLI exit (e.g. the deploying identity lacks permission
   # to list/create warehouses) would otherwise abort the whole deploy instead of
@@ -739,12 +739,12 @@ for w in whs:
         print(w.get('id','')); break
 " 2>/dev/null) || WAREHOUSE_ID=""
   if [ -z "$WAREHOUSE_ID" ]; then
-    WAREHOUSE_ID=$($CLI warehouses create --name "$WH_QUEST_NAME" --cluster-size "Small" \
+    WAREHOUSE_ID=$($CLI warehouses create --name "$WH_QUEST_NAME" --cluster-size "X-Small" \
       --auto-stop-mins 60 --max-num-clusters 1 --enable-serverless-compute --warehouse-type PRO \
       $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null) || WAREHOUSE_ID=""
   fi
   if [ -n "$WAREHOUSE_ID" ]; then
-    success "Quest warehouse ready: $WH_QUEST_NAME ($WAREHOUSE_ID) — Small / serverless / 60-min auto-stop"
+    success "Quest warehouse ready: $WH_QUEST_NAME ($WAREHOUSE_ID) — X-Small / serverless / 60-min auto-stop"
   else
     warn "Could not auto-provision a warehouse (insufficient permission?) — falling back to an existing one."
   fi
