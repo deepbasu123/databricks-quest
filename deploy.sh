@@ -742,6 +742,17 @@ for w in whs:
     WAREHOUSE_ID=$($CLI warehouses create --name "$WH_QUEST_NAME" --cluster-size "X-Small" \
       --auto-stop-mins 60 --max-num-clusters 1 --enable-serverless-compute --warehouse-type PRO \
       $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null) || WAREHOUSE_ID=""
+  else
+    # Reuse-path: a dedicated Quest warehouse from a prior deploy already exists.
+    # Enforce X-Small (idempotent if already X-Small) so re-running the deploy
+    # downsizes a warehouse left at a larger size by an older script. Scoped to
+    # OUR managed '${APP_NAME}-warehouse' only — a warehouse the caller passes
+    # via --warehouse/--warehouse-id is never touched. Full spec is sent so the
+    # edit is deterministic. Non-fatal: a failed resize keeps the existing size.
+    info "Reusing existing '$WH_QUEST_NAME' ($WAREHOUSE_ID) — enforcing X-Small size..."
+    $CLI warehouses edit "$WAREHOUSE_ID" --name "$WH_QUEST_NAME" --cluster-size "X-Small" \
+      --auto-stop-mins 60 --max-num-clusters 1 --enable-serverless-compute --warehouse-type PRO \
+      $PROFILE_FLAG -o json >/dev/null 2>&1 || warn "Could not resize '$WH_QUEST_NAME' to X-Small (keeping current size)."
   fi
   if [ -n "$WAREHOUSE_ID" ]; then
     success "Quest warehouse ready: $WH_QUEST_NAME ($WAREHOUSE_ID) — X-Small / serverless / 60-min auto-stop"
