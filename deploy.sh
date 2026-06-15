@@ -714,12 +714,22 @@ fi
 # ══════════════════════════════════════════════════════════════════════════════
 step "Step 3/8: Selecting SQL Warehouse"
 
-# Warehouse data backend: spin up a dedicated Small serverless warehouse with a
-# 1-hour auto-stop if the caller didn't supply one. It serves the app's reads
-# and is warmed by the 4-hourly scoring job (so dev intentionally drives DBUs).
-if [ "$QUEST_DATA_BACKEND" = "warehouse" ] && [ -z "$WAREHOUSE_ID" ] && [ -z "$WAREHOUSE_NAME" ]; then
+# A SQL warehouse is ALWAYS wired, in EVERY backend mode — not just
+# --data-backend warehouse. Warehouse mode reads scored Delta through it, and
+# even in Lakebase mode the runtime backend toggle persists its setting in a
+# Delta table via the warehouse (so switching backends keeps working when
+# Lakebase is down). When the caller doesn't supply one, reuse or provision a
+# dedicated 2X-Small serverless warehouse (60-min auto-stop) automatically — no
+# interactive prompt, so a customer running the command non-interactively still
+# gets a fully-wired app. Creation failure is non-fatal: we fall through to
+# selecting an existing warehouse below.
+if [ -z "$WAREHOUSE_ID" ] && [ -z "$WAREHOUSE_NAME" ]; then
   WH_QUEST_NAME="${APP_NAME}-warehouse"
-  info "Data backend: warehouse — provisioning Small serverless SQL warehouse '$WH_QUEST_NAME' (auto-stop 60 min)..."
+  info "No --warehouse specified — reusing or provisioning a dedicated 2X-Small serverless warehouse '$WH_QUEST_NAME' (auto-stop 60 min)..."
+  # NOTE: the `|| WAREHOUSE_ID=""` guards are required — under `set -euo
+  # pipefail` a non-zero CLI exit (e.g. the deploying identity lacks permission
+  # to list/create warehouses) would otherwise abort the whole deploy instead of
+  # falling through to selecting an existing warehouse below.
   WAREHOUSE_ID=$($CLI warehouses list $PROFILE_FLAG -o json 2>/dev/null | python3 -c "
 import sys, json
 try: whs = json.load(sys.stdin)
@@ -727,14 +737,28 @@ except Exception: whs = []
 for w in whs:
     if w.get('name') == '$WH_QUEST_NAME':
         print(w.get('id','')); break
-" 2>/dev/null)
+" 2>/dev/null) || WAREHOUSE_ID=""
   if [ -z "$WAREHOUSE_ID" ]; then
-    WAREHOUSE_ID=$($CLI warehouses create --name "$WH_QUEST_NAME" --cluster-size "Small" \
+    WAREHOUSE_ID=$($CLI warehouses create --name "$WH_QUEST_NAME" --cluster-size "2X-Small" \
       --auto-stop-mins 60 --max-num-clusters 1 --enable-serverless-compute --warehouse-type PRO \
-      $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+      $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null) || WAREHOUSE_ID=""
+  else
+    # Reuse-path: a dedicated Quest warehouse from a prior deploy already exists.
+    # Enforce 2X-Small (idempotent if already 2X-Small) so re-running the deploy
+    # downsizes a warehouse left at a larger size by an older script. Scoped to
+    # OUR managed '${APP_NAME}-warehouse' only — a warehouse the caller passes
+    # via --warehouse/--warehouse-id is never touched. Full spec is sent so the
+    # edit is deterministic. Non-fatal: a failed resize keeps the existing size.
+    info "Reusing existing '$WH_QUEST_NAME' ($WAREHOUSE_ID) — enforcing 2X-Small size..."
+    $CLI warehouses edit "$WAREHOUSE_ID" --name "$WH_QUEST_NAME" --cluster-size "2X-Small" \
+      --auto-stop-mins 60 --max-num-clusters 1 --enable-serverless-compute --warehouse-type PRO \
+      $PROFILE_FLAG -o json >/dev/null 2>&1 || warn "Could not resize '$WH_QUEST_NAME' to 2X-Small (keeping current size)."
   fi
-  [ -n "$WAREHOUSE_ID" ] || fail "Could not create/find the Quest serverless warehouse '$WH_QUEST_NAME'."
-  success "Quest warehouse ready: $WH_QUEST_NAME ($WAREHOUSE_ID) — Small / serverless / 60-min auto-stop"
+  if [ -n "$WAREHOUSE_ID" ]; then
+    success "Quest warehouse ready: $WH_QUEST_NAME ($WAREHOUSE_ID) — 2X-Small / serverless / 60-min auto-stop"
+  else
+    warn "Could not auto-provision a warehouse (insufficient permission?) — falling back to an existing one."
+  fi
 fi
 
 if [ -n "$WAREHOUSE_ID" ]; then
@@ -794,8 +818,15 @@ for wh in whs:
     fi
     success "Selected warehouse: $WAREHOUSE_NAME ($WAREHOUSE_ID)"
   else
-    # Interactive selection
-    read -rp "  Select warehouse number [1]: " WH_CHOICE
+    # Selection. Prompt only when attached to a terminal; otherwise (customer
+    # running non-interactively / piped) default to the first warehouse so the
+    # deploy never hangs on a read and never lands without a warehouse.
+    if [ -t 0 ]; then
+      read -rp "  Select warehouse number [1]: " WH_CHOICE
+    else
+      WH_CHOICE="1"
+      info "Non-interactive — defaulting to warehouse #1."
+    fi
     WH_CHOICE="${WH_CHOICE:-1}"
 
     WAREHOUSE_ID=$(echo "$WAREHOUSES_JSON" | python3 -c "
@@ -941,6 +972,15 @@ BUNDLE_FILE="$SCRIPT_DIR/databricks.yml"
 if [ "$QUEST_ROLE" = "child" ]; then
   info "Writing child app.yaml (role=child, points at master Lakebase)..."
   write_app_yaml "$MASTER_LAKEBASE_HOST" "$LAKEBASE_DB"
+elif [ "$DEPLOY_MODE" != "quick" ]; then
+  # Standalone/master: write app.yaml NOW (before the bundle uploads app/) with
+  # everything already known — warehouse id, catalog, schema, backend default.
+  # The Lakebase host isn't known until Step 6, which rewrites this file and
+  # redeploys. Writing it early means even a deploy that doesn't finish Step 6
+  # still boots an app with the warehouse + catalog wired (so warehouse mode and
+  # the backend toggle work), instead of a config-less placeholder app.yaml.
+  info "Writing app.yaml with known config (warehouse, catalog, backend)..."
+  write_app_yaml "$LAKEBASE_HOST" "$LAKEBASE_DB"
 fi
 
 if [ "$DEPLOY_MODE" = "quick" ]; then
@@ -1364,9 +1404,13 @@ elif [ "$DEPLOY_MODE" = "quick" ]; then
   echo ""
 
   NB_WORKSPACE_PATH="/Workspace/Users/${USER_EMAIL}/databricks-quest/notebooks/scoring_pipeline"
+  SYNC_NB_PATH="/Workspace/Users/${USER_EMAIL}/databricks-quest/notebooks/lakebase_sync"
+  # Two tasks: score (writes Delta), then the robust on-cluster sync into
+  # Lakebase (same notebook the full-deploy job uses). The sync no-ops when
+  # lakebase_host is empty (warehouse-only). No fragile local psql sync.
   set +e
   $CLI jobs submit \
-    --json "{\"run_name\": \"Quest Scoring (one-time)\", \"tasks\": [{\"task_key\": \"run_scoring\", \"notebook_task\": {\"notebook_path\": \"$NB_WORKSPACE_PATH\", \"base_parameters\": {\"quest_catalog\": \"$QUEST_CATALOG\", \"quest_schema\": \"$QUEST_SCHEMA\", \"lakebase_host\": \"$LAKEBASE_HOST\", \"lakebase_db\": \"$LAKEBASE_DB\", \"app_name\": \"$APP_NAME\", \"warehouse_id\": \"$WAREHOUSE_ID\"}, \"source\": \"WORKSPACE\"}, \"environment_key\": \"default\"}], \"environments\": [{\"environment_key\": \"default\", \"spec\": {\"client\": \"1\", \"dependencies\": [\"psycopg2-binary\"]}}]}" \
+    --json "{\"run_name\": \"Quest Scoring (one-time)\", \"tasks\": [{\"task_key\": \"run_scoring\", \"notebook_task\": {\"notebook_path\": \"$NB_WORKSPACE_PATH\", \"base_parameters\": {\"quest_catalog\": \"$QUEST_CATALOG\", \"quest_schema\": \"$QUEST_SCHEMA\", \"lakebase_host\": \"$LAKEBASE_HOST\", \"lakebase_db\": \"$LAKEBASE_DB\", \"app_name\": \"$APP_NAME\", \"warehouse_id\": \"$WAREHOUSE_ID\"}, \"source\": \"WORKSPACE\"}, \"environment_key\": \"default\"}, {\"task_key\": \"sync_to_lakebase\", \"depends_on\": [{\"task_key\": \"run_scoring\"}], \"notebook_task\": {\"notebook_path\": \"$SYNC_NB_PATH\", \"base_parameters\": {\"quest_catalog\": \"$QUEST_CATALOG\", \"quest_schema\": \"$QUEST_SCHEMA\", \"lakebase_host\": \"$LAKEBASE_HOST\", \"lakebase_db\": \"$LAKEBASE_DB\", \"app_name\": \"$APP_NAME\"}, \"source\": \"WORKSPACE\"}, \"environment_key\": \"default\"}], \"environments\": [{\"environment_key\": \"default\", \"spec\": {\"client\": \"1\", \"dependencies\": [\"psycopg2-binary\"]}}]}" \
     $PROFILE_FLAG 2>&1
   RUN_EXIT=$?
   set -e
@@ -1380,13 +1424,19 @@ else
   info "Takes 2-5 minutes on first run..."
   echo ""
 
+  # Pass the REAL lakebase_host so the job's sync_to_lakebase task populates
+  # Lakebase at deploy time using the robust on-cluster Spark sync (the same
+  # task the 4-hourly schedule uses). Previously this passed an empty
+  # lakebase_host, which made that task skip — leaving deploy-time Lakebase
+  # population to a fragile local psql sync that truncated then timed out on
+  # large/cold data (app showed "Not Initialized"). One sync mechanism now.
   set +e
   $CLI bundle run quest_scoring_pipeline --target "$TARGET" $PROFILE_FLAG \
     --var "warehouse_id=$WAREHOUSE_ID" \
     --var "quest_catalog=$QUEST_CATALOG" \
     --var "quest_schema=$QUEST_SCHEMA" \
-    --var "lakebase_host=" \
-    --var "lakebase_db=" \
+    --var "lakebase_host=$LAKEBASE_HOST" \
+    --var "lakebase_db=$LAKEBASE_DB" \
     --var "quest_data_backend=$QUEST_DATA_BACKEND"
   RUN_EXIT=$?
   set -e
@@ -1397,128 +1447,12 @@ else
   success "Scoring pipeline complete"
 fi
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 7b: Sync Delta tables to Lakebase
-# ══════════════════════════════════════════════════════════════════════════════
-if [ -n "$LAKEBASE_HOST" ] && [ -z "$SKIP_SCORING" ]; then
-  step "Syncing data to Lakebase"
-
-  info "Reading scored data from Delta tables and syncing to Lakebase..."
-
-  # Generate fresh Lakebase credential
-  LB_PROJECT_ID=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
-  LB_TOKEN=$($CLI postgres generate-database-credential \
-    "projects/$LB_PROJECT_ID/branches/production/endpoints/primary" \
-    $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])" 2>/dev/null || true)
-
-  if [ -z "$LB_TOKEN" ]; then
-    # Fallback: use workspace auth token
-    LB_TOKEN=$($CLI auth token $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "$DATABRICKS_TOKEN")
-  fi
-
-  # Sync each table: read from Delta via SQL Statements API, write to Lakebase via psql
-  python3 << PYEOF
-import urllib.request, json, os, time, subprocess
-
-HOST = os.environ.get("DATABRICKS_HOST", "$WORKSPACE_HOST")
-TOKEN = os.environ.get("DATABRICKS_TOKEN", "")
-WH_ID = "$WAREHOUSE_ID"
-CATALOG = "$QUEST_CATALOG"
-SCHEMA = "$QUEST_SCHEMA"
-LB_HOST = "$LAKEBASE_HOST"
-LB_DB = "$LAKEBASE_DB"
-LB_TOKEN = "$LB_TOKEN"
-USER_EMAIL = "$USER_EMAIL"
-
-TABLES = [
-    ("mission_completions", "user_id, mission_id, mission_name, points_awarded, completed_at, period_start, period_end, scored_at"),
-    ("user_points_fact", "user_id, event_type, mission_id, points, reason, event_timestamp, scored_at"),
-    ("user_profile_snapshot", "user_id, display_name, total_points, level, current_streak, max_streak, badge_count, missions_completed, first_activity_date, last_activity_date, distinct_products_used, updated_at"),
-    ("leaderboard", "user_id, display_name, total_points, weekly_points, monthly_points, level, all_time_rank, weekly_rank, monthly_rank, updated_at"),
-    ("badges", "user_id, badge_id, badge_name, badge_icon, earned_at"),
-    ("notifications", "user_id, notification_type, title, message, mission_id, points, created_at"),
-]
-
-def run_sql(sql, timeout=50):
-    """Execute SQL via Statements API and return rows."""
-    data = json.dumps({"warehouse_id": WH_ID, "statement": sql, "wait_timeout": f"{timeout}s"}).encode()
-    req = urllib.request.Request(
-        f"{HOST}/api/2.0/sql/statements", data=data,
-        headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"})
-    resp = urllib.request.urlopen(req, timeout=60)
-    result = json.loads(resp.read())
-    status = result.get("status", {}).get("state", "?")
-    if status == "SUCCEEDED":
-        return result.get("result", {}).get("data_array", [])
-    elif status == "PENDING" or status == "RUNNING":
-        # Poll
-        stmt_id = result.get("statement_id", "")
-        for _ in range(30):
-            time.sleep(2)
-            req2 = urllib.request.Request(
-                f"{HOST}/api/2.0/sql/statements/{stmt_id}",
-                headers={"Authorization": f"Bearer {TOKEN}"})
-            resp2 = urllib.request.urlopen(req2, timeout=30)
-            result2 = json.loads(resp2.read())
-            if result2.get("status", {}).get("state") == "SUCCEEDED":
-                return result2.get("result", {}).get("data_array", [])
-            elif result2.get("status", {}).get("state") == "FAILED":
-                print(f"  SQL failed: {result2.get('status', {}).get('error', {}).get('message', '?')[:200]}")
-                return []
-        return []
-    else:
-        msg = result.get("status", {}).get("error", {}).get("message", "?")[:200]
-        print(f"  SQL error: {msg}")
-        return []
-
-def psql_exec(sql):
-    """Execute SQL against Lakebase via psql."""
-    env = os.environ.copy()
-    env["PGPASSWORD"] = LB_TOKEN
-    result = subprocess.run(
-        ["psql", f"host={LB_HOST} port=5432 dbname={LB_DB} user={USER_EMAIL} sslmode=require",
-         "-c", sql],
-        capture_output=True, text=True, env=env, timeout=60)
-    if result.returncode != 0:
-        print(f"  psql error: {result.stderr[:200]}")
-    return result.returncode == 0
-
-synced = 0
-for table_name, columns in TABLES:
-    print(f"  Syncing {table_name}...")
-    cols = [c.strip() for c in columns.split(",")]
-    rows = run_sql(f"SELECT {columns} FROM \`{CATALOG}\`.\`{SCHEMA}\`.\`{table_name}\`")
-    if rows is None:
-        rows = []
-
-    # Delete existing data
-    psql_exec(f"DELETE FROM {table_name}")
-
-    if rows:
-        # Build INSERT statements in batches
-        batch_size = 100
-        for i in range(0, len(rows), batch_size):
-            batch = rows[i:i+batch_size]
-            values = []
-            for row in batch:
-                escaped = []
-                for v in row:
-                    if v is None or v == "null":
-                        escaped.append("NULL")
-                    else:
-                        escaped.append("'" + str(v).replace("'", "''") + "'")
-                values.append(f"({', '.join(escaped)})")
-            insert_sql = f"INSERT INTO {table_name} ({columns}) VALUES {', '.join(values)}"
-            psql_exec(insert_sql)
-
-    print(f"  {table_name}: {len(rows)} rows synced")
-    synced += 1
-
-print(f"Lakebase sync complete: {synced}/{len(TABLES)} tables synced")
-PYEOF
-
-  success "Lakebase sync complete"
-fi
+# NOTE: deploy-time Lakebase population is handled by the scoring job's
+# sync_to_lakebase task (full deploy) / the one-time job's sync task (quick),
+# both using the robust on-cluster Spark sync (notebooks/lakebase_sync.py).
+# The previous fragile local psql sync here (TRUNCATE + per-batch INSERT with a
+# 60s timeout and no Statements-API result chunking) truncated good data and
+# timed out on large/cold datasets, leaving the app "Not Initialized" — removed.
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 8: Get App URL & Print Success
