@@ -726,6 +726,10 @@ step "Step 3/8: Selecting SQL Warehouse"
 if [ -z "$WAREHOUSE_ID" ] && [ -z "$WAREHOUSE_NAME" ]; then
   WH_QUEST_NAME="${APP_NAME}-warehouse"
   info "No --warehouse specified — reusing or provisioning a dedicated Small serverless warehouse '$WH_QUEST_NAME' (auto-stop 60 min)..."
+  # NOTE: the `|| WAREHOUSE_ID=""` guards are required — under `set -euo
+  # pipefail` a non-zero CLI exit (e.g. the deploying identity lacks permission
+  # to list/create warehouses) would otherwise abort the whole deploy instead of
+  # falling through to selecting an existing warehouse below.
   WAREHOUSE_ID=$($CLI warehouses list $PROFILE_FLAG -o json 2>/dev/null | python3 -c "
 import sys, json
 try: whs = json.load(sys.stdin)
@@ -733,11 +737,11 @@ except Exception: whs = []
 for w in whs:
     if w.get('name') == '$WH_QUEST_NAME':
         print(w.get('id','')); break
-" 2>/dev/null)
+" 2>/dev/null) || WAREHOUSE_ID=""
   if [ -z "$WAREHOUSE_ID" ]; then
     WAREHOUSE_ID=$($CLI warehouses create --name "$WH_QUEST_NAME" --cluster-size "Small" \
       --auto-stop-mins 60 --max-num-clusters 1 --enable-serverless-compute --warehouse-type PRO \
-      $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+      $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null) || WAREHOUSE_ID=""
   fi
   if [ -n "$WAREHOUSE_ID" ]; then
     success "Quest warehouse ready: $WH_QUEST_NAME ($WAREHOUSE_ID) — Small / serverless / 60-min auto-stop"
