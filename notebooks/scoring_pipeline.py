@@ -1463,6 +1463,27 @@ print("Streak data computed.")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Remove non-human principals (service principals)
+# MAGIC System tables attribute job/automation activity to service principals, whose
+# MAGIC ids are bare application UUIDs (no email). Quest is a human adoption game, so
+# MAGIC before building the profile/leaderboard we sweep service principals out of the
+# MAGIC scored fact tables, keeping only real users (an email-shaped user_id). Doing it
+# MAGIC here means the leaderboard ranks are computed over humans only, and it runs
+# MAGIC every cycle so the data stays clean after each re-score.
+
+# COMMAND ----------
+
+_human = "user_id IS NULL OR user_id NOT LIKE '%@%'"
+for _t in ["mission_completions", "user_points_fact"]:
+    _n = spark.sql(f"SELECT COUNT(*) AS c FROM {tbl(_t)} WHERE {_human}").first()["c"]
+    if _n:
+        spark.sql(f"DELETE FROM {tbl(_t)} WHERE {_human}")
+        print(f"  {_t}: removed {_n} service-principal rows")
+print("Service-principal sweep complete — profile/leaderboard/badges build from human users only.")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Step 5: Compute Product Breadth
 
 # COMMAND ----------
@@ -1836,6 +1857,23 @@ try:
 except Exception as e:
     print(f"Warning: Auto-grant failed (non-fatal): {e}")
     print("You may need to manually grant permissions. See SETUP.md troubleshooting.")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Sweep stale service principals from output tables
+# MAGIC MERGE updates/inserts but never deletes, so service-principal rows written by
+# MAGIC earlier runs (before this filter existed) would linger in the profile,
+# MAGIC leaderboard, badges and notifications. Remove them here. Human rows already
+# MAGIC carry correct ranks (computed above over the cleaned fact tables).
+
+# COMMAND ----------
+
+for _t in ["user_profile_snapshot", "leaderboard", "badges", "notifications", "mission_completions", "user_points_fact"]:
+    _n = spark.sql(f"SELECT COUNT(*) AS c FROM {tbl(_t)} WHERE {_human}").first()["c"]
+    if _n:
+        spark.sql(f"DELETE FROM {tbl(_t)} WHERE {_human}")
+        print(f"  {_t}: removed {_n} stale service-principal rows")
 
 # COMMAND ----------
 
