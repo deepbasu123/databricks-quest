@@ -1541,18 +1541,23 @@ try:
     if not tok:
         print("  WARN  no usable workspace token — skipped Delta verification")
         print("VERIFY_RESULT=WARN"); raise SystemExit(0)
-    # Permission checks are INFORMATIONAL only: SHOW GRANTS reports the principal in
-    # whatever form the grant was issued (client-id UUID vs display name), so a
-    # non-match doesn't prove the grant is absent. Never hard-fail here — the data
-    # read below and the app /api/health probe are the authoritative permission tests.
+    # Permission checks ENFORCE the app SP's read access — a missing grant is the
+    # exact failure that ships a "successful" deploy whose app shows no data, so we
+    # hard-fail it. deploy.sh grants directly to the SP client-id, and SHOW GRANTS
+    # returns that same id, so a demonstrated absence is real. We only WARN (don't
+    # fail) when the check itself can't run (can't read grants), never on a
+    # confirmed-present grant.
     def grant_check(scope, want, label):
+        global fail
         rows,err=run(f"SHOW GRANTS `{sp}` ON {scope}")
         if rows is None:
-            print(f"  WARN  {label}: could not verify ({err})"); return
+            print(f"  WARN  {label}: could not verify ({err}) — not failing on an unverifiable grant"); return
         have={(r[1] or "").upper() for r in rows if len(r)>=2 and (r[0] or "").lower()==sp}
         missing=[w for w in want if w not in have]
-        if missing: print(f"  WARN  {label}: could not confirm SP {missing} — if the app can't read, apply the GRANT")
-        else: print(f"  PASS  {label}: SP has {want}")
+        if missing:
+            print(f"  FAIL  {label}: app SP is missing {missing} — it cannot read the data, so the app would show nothing"); fail=1
+        else:
+            print(f"  PASS  {label}: SP has {want}")
     if sp:
         grant_check(f"CATALOG `{cat}`", ["USE CATALOG"], "catalog grant")
         grant_check(f"SCHEMA `{cat}`.`{sch}`", ["USE SCHEMA","SELECT"], "schema grant")
