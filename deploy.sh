@@ -320,6 +320,7 @@ while [[ $# -gt 0 ]]; do
     --lakebase-db)    LAKEBASE_DB="$2"; shift 2 ;;
     --skip-build)     SKIP_BUILD=1; shift ;;
     --skip-scoring)   SKIP_SCORING=1; shift ;;
+    --skip-verify)    SKIP_VERIFY=1; shift ;;
     --skip-auth-check) SKIP_AUTH_CHECK=1; shift ;;
     --quick)          DEPLOY_MODE="quick"; shift ;;
     --full)           DEPLOY_MODE="full"; shift ;;
@@ -350,6 +351,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --full                Full deploy: DAB bundle with scoring job (default)"
       echo "  --skip-build          Skip frontend build (use existing app/static/)"
       echo "  --skip-scoring        Skip running the scoring pipeline"
+      echo "  --skip-verify         Skip the post-deploy permission & data verification"
       echo "  --skip-auth-check     Skip authentication validation (use if already authenticated)"
       echo "  --admins EMAILS       Comma-separated emails seeded as Admin-page admins."
       echo "                        Defaults to the deploying user when omitted (except"
@@ -1482,6 +1484,177 @@ APP_STATE=""
 if [ -n "$APP_JSON" ]; then
   APP_URL=$(echo "$APP_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('url',''))" 2>/dev/null || true)
   APP_STATE=$(echo "$APP_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',{}).get('state','UNKNOWN'))" 2>/dev/null || true)
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Verify permissions + data actually landed — fail loudly instead of printing a
+# false "Deployed!" banner. Targets the two things that silently break a deploy:
+#   1) the app service principal can't read the scored Delta tables (UC grants), and
+#   2) scoring/sync produced no rows (app shows "Not Initialized" / empty profiles).
+# A real problem hard-fails the deploy (exit 1). A check that can't be run warns.
+# ══════════════════════════════════════════════════════════════════════════════
+VERIFY_FAILED=0
+CORE_TABLES="user_profile_snapshot mission_completions leaderboard"
+
+if [ -z "${SKIP_VERIFY:-}" ] && [ -z "$SKIP_SCORING" ]; then
+  step "Verifying permissions & data"
+
+  # A workspace token for the Statements API + app health probe. Falls back to a
+  # short-lived OAuth token when DATABRICKS_TOKEN isn't in the env (profile auth).
+  VTOKEN="${DATABRICKS_TOKEN:-}"
+  if [ -z "$VTOKEN" ]; then
+    VTOKEN=$($CLI auth token $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || true)
+  fi
+
+  # Re-resolve the app service principal if an earlier branch didn't set it.
+  if [ -z "${SP_CLIENT_ID:-}" ]; then
+    SP_CLIENT_ID=$(app_sp_client_id)
+  fi
+
+  # ── Delta: SP grants + scored row counts (run as the deploying identity) ─────
+  if [ -n "$WAREHOUSE_ID" ]; then
+    set +e
+    VERIFY_OUT=$(HOST="${DATABRICKS_HOST:-$WORKSPACE_HOST}" TOKEN="$VTOKEN" WH="$WAREHOUSE_ID" \
+      SP="${SP_CLIENT_ID:-}" CAT="$QUEST_CATALOG" SCH="$QUEST_SCHEMA" CORE="$CORE_TABLES" python3 <<'PYEOF'
+import os, json, time, urllib.request
+host=os.environ.get("HOST","").rstrip("/"); tok=os.environ.get("TOKEN",""); wh=os.environ.get("WH","")
+sp=os.environ.get("SP","").lower(); cat=os.environ.get("CAT",""); sch=os.environ.get("SCH","")
+core=os.environ.get("CORE","").split()
+def run(s, timeout=50):
+    body=json.dumps({"warehouse_id":wh,"statement":s,"wait_timeout":f"{timeout}s"}).encode()
+    req=urllib.request.Request(host+"/api/2.0/sql/statements",data=body,
+        headers={"Authorization":"Bearer "+tok,"Content-Type":"application/json"})
+    try: d=json.loads(urllib.request.urlopen(req,timeout=70).read())
+    except Exception as e: return None, str(e)[:160]
+    sid=d.get("statement_id"); st=d.get("status",{}).get("state")
+    while st in ("PENDING","RUNNING") and sid:
+        time.sleep(2)
+        r=urllib.request.Request(host+"/api/2.0/sql/statements/"+sid,headers={"Authorization":"Bearer "+tok})
+        try: d=json.loads(urllib.request.urlopen(r,timeout=30).read())
+        except Exception as e: return None, str(e)[:160]
+        st=d.get("status",{}).get("state")
+    if st=="SUCCEEDED": return d.get("result",{}).get("data_array",[]) or [], None
+    return None, (d.get("status",{}).get("error",{}) or {}).get("message","unknown")[:160]
+fail=0
+try:
+    # No usable token => can't verify anything. WARN and skip (never hard-fail on auth).
+    if not tok:
+        print("  WARN  no usable workspace token — skipped Delta verification")
+        print("VERIFY_RESULT=WARN"); raise SystemExit(0)
+    # Permission checks are INFORMATIONAL only: SHOW GRANTS reports the principal in
+    # whatever form the grant was issued (client-id UUID vs display name), so a
+    # non-match doesn't prove the grant is absent. Never hard-fail here — the data
+    # read below and the app /api/health probe are the authoritative permission tests.
+    def grant_check(scope, want, label):
+        rows,err=run(f"SHOW GRANTS `{sp}` ON {scope}")
+        if rows is None:
+            print(f"  WARN  {label}: could not verify ({err})"); return
+        have={(r[1] or "").upper() for r in rows if len(r)>=2 and (r[0] or "").lower()==sp}
+        missing=[w for w in want if w not in have]
+        if missing: print(f"  WARN  {label}: could not confirm SP {missing} — if the app can't read, apply the GRANT")
+        else: print(f"  PASS  {label}: SP has {want}")
+    if sp:
+        grant_check(f"CATALOG `{cat}`", ["USE CATALOG"], "catalog grant")
+        grant_check(f"SCHEMA `{cat}`.`{sch}`", ["USE SCHEMA","SELECT"], "schema grant")
+    else:
+        print("  WARN  app service principal not resolved — skipped grant check")
+    # Data checks — a missing table or 0 rows is a REAL failure (scoring didn't land
+    # data). A transient/auth read error only warns (don't block on a network blip).
+    for t in core:
+        rows,err=run(f"SELECT COUNT(*) FROM `{cat}`.`{sch}`.`{t}`")
+        if rows is None:
+            e=(err or "").lower()
+            if "not found" in e or "does not exist" in e or "table_or_view" in e:
+                print(f"  FAIL  data {t}: table missing — scoring did not create it"); fail=1
+            else:
+                print(f"  WARN  data {t}: could not read ({err})")
+            continue
+        try: n=int(rows[0][0])
+        except Exception: n=0
+        if n>0: print(f"  PASS  data {t}: {n} rows")
+        else: print(f"  FAIL  data {t}: 0 rows (scoring produced no data)"); fail=1
+    print("VERIFY_RESULT=FAIL" if fail else "VERIFY_RESULT=PASS")
+except SystemExit:
+    raise
+except Exception as e:
+    print(f"  WARN  verification error: {str(e)[:160]}")
+    print("VERIFY_RESULT=WARN")
+PYEOF
+)
+    set -e
+    echo "$VERIFY_OUT" | grep -v '^VERIFY_RESULT=' || true
+    # Only an explicit FAIL sentinel fails the deploy. A missing sentinel (python
+    # crash) or a WARN sentinel (no token / transient) does NOT block the deploy.
+    if echo "$VERIFY_OUT" | grep -q '^VERIFY_RESULT=FAIL'; then VERIFY_FAILED=1; fi
+  else
+    warn "No warehouse id resolved — skipped Delta permission/data verification."
+  fi
+
+  # ── Lakebase: confirm the app's read store actually has rows ─────────────────
+  if [ -n "$LAKEBASE_HOST" ]; then
+    LB_VPROJECT=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+    LB_VTOKEN=$($CLI postgres generate-database-credential \
+      "projects/$LB_VPROJECT/branches/production/endpoints/primary" \
+      $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])" 2>/dev/null || true)
+    [ -z "$LB_VTOKEN" ] && LB_VTOKEN="$VTOKEN"
+    for t in $CORE_TABLES; do
+      CNT=$(PGPASSWORD="$LB_VTOKEN" psql "host=$LAKEBASE_HOST port=5432 dbname=$LAKEBASE_DB user=$USER_EMAIL sslmode=require" \
+        -tAc "SELECT COUNT(*) FROM $t" 2>/dev/null | tr -d '[:space:]' || true)
+      # Lakebase is warn-only: the Delta→Lakebase sync can still be in flight here,
+      # so a 0/unreadable count must not block an otherwise-good deploy.
+      if [[ "$CNT" =~ ^[0-9]+$ ]] && [ "$CNT" -gt 0 ]; then
+        success "  PASS  lakebase $t: $CNT rows"
+      elif [[ "$CNT" =~ ^[0-9]+$ ]]; then
+        warn "  WARN  lakebase $t: 0 rows (Delta→Lakebase sync may still be running — recheck shortly)"
+      else
+        warn "  WARN  lakebase $t: could not read row count"
+      fi
+    done
+  fi
+
+  # ── App end-to-end: the app (running as the SP) can connect to its store ─────
+  if [ -n "$APP_URL" ]; then
+    for _ in $(seq 1 18); do
+      [ "$APP_STATE" = "RUNNING" ] && break
+      sleep 5
+      APP_STATE=$($CLI apps get "$DEV_APP_NAME" $PROFILE_FLAG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',{}).get('state','UNKNOWN'))" 2>/dev/null || echo "UNKNOWN")
+    done
+    HEALTH=$(APP_URL="$APP_URL" TOKEN="$VTOKEN" python3 <<'PYEOF' 2>/dev/null || true
+import os, json, urllib.request
+u=os.environ["APP_URL"].rstrip("/")+"/api/health"; tok=os.environ.get("TOKEN","")
+req=urllib.request.Request(u, headers={"Authorization":"Bearer "+tok})
+try:
+    d=json.loads(urllib.request.urlopen(req,timeout=20).read())
+    print("OK" if d.get("db_connected") else "DBDOWN")
+except Exception:
+    print("ERR")
+PYEOF
+)
+    case "$HEALTH" in
+      OK)     success "  PASS  app /api/health: db_connected=true" ;;
+      DBDOWN) warn "  FAIL  app /api/health: db_connected=false — app is up but cannot read its data store"; VERIFY_FAILED=1 ;;
+      *)      warn "  WARN  app /api/health not confirmed (state=$APP_STATE) — recheck once the app finishes starting." ;;
+    esac
+  fi
+
+  # ── Verdict ──────────────────────────────────────────────────────────────────
+  if [ "$VERIFY_FAILED" -ne 0 ]; then
+    echo ""
+    echo -e "${BOLD}${RED}╔══════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}${RED}║   Verification FAILED — data/permissions      ║${NC}"
+    echo -e "${BOLD}${RED}╚══════════════════════════════════════════════╝${NC}"
+    echo -e "  The app deployed, but it will show empty / 'Not Initialized' until this is fixed:"
+    echo -e "    • Check the scoring job run (Workflows) actually wrote ${BOLD}${QUEST_CATALOG}.${QUEST_SCHEMA}${NC}."
+    echo -e "    • Ensure the app service principal has read access:"
+    echo -e "        ${DIM}GRANT USE CATALOG ON CATALOG ${QUEST_CATALOG} TO \`${SP_CLIENT_ID:-<app-sp-client-id>}\`;${NC}"
+    echo -e "        ${DIM}GRANT USE SCHEMA, SELECT ON SCHEMA ${QUEST_CATALOG}.${QUEST_SCHEMA} TO \`${SP_CLIENT_ID:-<app-sp-client-id>}\`;${NC}"
+    echo -e "    • Fix the cause above, then re-run the deploy (or pass ${BOLD}--skip-verify${NC} to bypass)."
+    echo ""
+    exit 1
+  fi
+  success "Verification passed — SP can read the data and the scored tables are populated."
+elif [ -n "${SKIP_VERIFY:-}" ]; then
+  warn "Skipping post-deploy verification (--skip-verify)."
 fi
 
 # ── Success Banner ───────────────────────────────────────────────────────────
