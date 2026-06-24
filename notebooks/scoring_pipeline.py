@@ -1604,7 +1604,7 @@ MERGE INTO {tbl('leaderboard')} AS target
 USING (
   WITH mission_pts AS (
     SELECT user_id, SUM(points_awarded) AS pts,
-      SUM(CASE WHEN completed_at >= DATE_SUB(CURRENT_DATE(), (DAYOFWEEK(CURRENT_DATE()) + 1) % 7)
+      SUM(CASE WHEN completed_at >= DATE_SUB(CURRENT_DATE(), DAYOFWEEK(CURRENT_DATE()) % 7)
         THEN points_awarded ELSE 0 END) AS weekly_pts,
       SUM(CASE WHEN completed_at >= DATE_TRUNC('MONTH', CURRENT_DATE())
         THEN points_awarded ELSE 0 END) AS monthly_pts
@@ -1612,7 +1612,7 @@ USING (
   ),
   consumption_pts AS (
     SELECT user_id, SUM(points) AS pts,
-      SUM(CASE WHEN event_timestamp >= DATE_SUB(CURRENT_DATE(), (DAYOFWEEK(CURRENT_DATE()) + 1) % 7)
+      SUM(CASE WHEN event_timestamp >= DATE_SUB(CURRENT_DATE(), DAYOFWEEK(CURRENT_DATE()) % 7)
         THEN points ELSE 0 END) AS weekly_pts,
       SUM(CASE WHEN event_timestamp >= DATE_TRUNC('MONTH', CURRENT_DATE())
         THEN points ELSE 0 END) AS monthly_pts
