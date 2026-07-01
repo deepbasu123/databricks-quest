@@ -42,7 +42,7 @@ const pageTitles: Record<NavPage, { title: string; subtitle: string }> = {
   missions: { title: 'Missions', subtitle: 'Complete real platform actions and earn adoption points' },
   leaderboard: { title: 'Leaderboard', subtitle: 'Weekly competition across Databricks platform explorers' },
   badges: { title: 'Badge Vault', subtitle: 'Track achievements and unlock mastery milestones' },
-  rewards: { title: 'Rewards', subtitle: 'Swag, recognition, and weekly prize eligibility' },
+  rewards: { title: 'Rewards', subtitle: 'Recognition and weekly eligibility' },
   admin: { title: 'Admin', subtitle: 'Platform adoption telemetry and scoring health' },
   federation: { title: 'Event', subtitle: 'Join an event, play quests, and track your team' },
 }

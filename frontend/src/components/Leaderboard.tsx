@@ -109,7 +109,7 @@ function RankingView({
         <div className="grid grid-cols-3 gap-4">
           {[podium[1], podium[0], podium[2]].map((entry, i) => {
             const place = [2, 1, 3][i]
-            const prize = place === 1 ? 'Hoodie / T-Shirt' : place === 2 ? 'Bottle / Notebook' : 'Sticker pack'
+            const prize = place === 1 ? 'Champion recognition' : 'Weekly recognition'
             return (
               <div
                 key={entry.user_id}
@@ -216,13 +216,13 @@ function TeamsView({ entries }: { entries: LeaderboardEntry[] }) {
 
 function SwagPanel() {
   const tiers = [
-    { icon: Crown, color: '#F5B72E', place: '1st Place', prize: 'Hoodie or T-Shirt' },
-    { icon: Medal, color: '#CBD5E1', place: '2nd Place', prize: 'Bottle, Cup, or Notebook' },
-    { icon: Medal, color: '#B45309', place: '3rd Place', prize: 'Sticker pack' },
+    { icon: Crown, color: '#F5B72E', place: '1st Place', prize: 'Champion recognition' },
+    { icon: Medal, color: '#CBD5E1', place: '2nd Place', prize: 'Weekly recognition' },
+    { icon: Medal, color: '#B45309', place: '3rd Place', prize: 'Weekly recognition' },
   ]
   return (
-    <QuestCard title="Weekly Swag Awards" eyebrow="Recognition">
-      <p className="-mt-2 mb-4 text-sm text-slate-400">Top performers each week win exclusive Databricks swag.</p>
+    <QuestCard title="Weekly Recognition" eyebrow="Recognition">
+      <p className="-mt-2 mb-4 text-sm text-slate-400">Top performers each week earn Databricks recognition.</p>
       <div className="grid gap-3 sm:grid-cols-3">
         {tiers.map((t) => (
           <div key={t.place} className="rounded-xl border border-white/10 bg-white/[0.03] p-4 text-center">

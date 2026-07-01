@@ -1,4 +1,4 @@
-import { Crown, Gift, Medal, Shirt, Sticker, Trophy, Coffee } from 'lucide-react'
+import { Award, Crown, Gift, Medal, Trophy } from 'lucide-react'
 import type { LeaderboardEntry, UserProfile } from '../types'
 import { useApi } from '../lib/api'
 import { QuestCard } from './quest/QuestCard'
@@ -7,9 +7,9 @@ import { EmptyState } from './quest/States'
 type LeaderboardResponse = { leaderboard: LeaderboardEntry[] }
 
 const SWAG_TIERS = [
-  { place: 1, icon: Shirt, color: '#F5B72E', title: 'Champion', items: ['Premium Hoodie', 'or Databricks T-Shirt'] },
-  { place: 2, icon: Coffee, color: '#CBD5E1', title: 'Runner-up', items: ['Insulated Bottle', 'Coffee Cup, or Notebook & Pen'] },
-  { place: 3, icon: Sticker, color: '#B45309', title: 'Top 3', items: ['Collectible Sticker Pack'] },
+  { place: 1, icon: Crown, color: '#F5B72E', title: 'Champion', items: ['Top weekly recognition'] },
+  { place: 2, icon: Medal, color: '#CBD5E1', title: 'Runner-up', items: ['Weekly recognition'] },
+  { place: 3, icon: Award, color: '#B45309', title: 'Top 3', items: ['Weekly recognition'] },
 ]
 
 export default function Rewards({ profile }: { profile?: UserProfile | null }) {
@@ -30,19 +30,19 @@ export default function Rewards({ profile }: { profile?: UserProfile | null }) {
           <div className="max-w-xl">
             <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#F5B72E]">Weekly eligibility</p>
             <h2 className="mt-2 text-2xl font-bold text-white">
-              {eligible ? 'You’re in the swag zone this week' : 'Climb into the top 3 to earn swag'}
+              {eligible ? 'You’re in the top 3 this week' : 'Climb into the top 3 for recognition'}
             </h2>
             <p className="mt-1 text-sm text-slate-300">
               {typeof weeklyRank === 'number'
                 ? `You’re currently ranked #${weeklyRank} this week with ${(you?.weekly_points ?? 0).toLocaleString()} points.`
-                : 'Earn points this week to enter the weekly swag rankings.'}
+                : 'Earn points this week to enter the weekly rankings.'}
             </p>
           </div>
           <div className={`flex items-center gap-3 rounded-2xl border px-5 py-4 ${eligible ? 'border-[#22C55E]/30 bg-[#22C55E]/[0.08]' : 'border-white/10 bg-white/[0.03]'}`}>
             <Gift className={`h-8 w-8 ${eligible ? 'text-[#22C55E]' : 'text-slate-400'}`} />
             <div>
               <p className="text-sm font-semibold text-white">{eligible ? 'Eligible' : 'Not yet eligible'}</p>
-              <p className="text-xs text-slate-400">{eligible ? 'Prize fulfilled at week close' : 'Top 3 weekly win swag'}</p>
+              <p className="text-xs text-slate-400">{eligible ? 'Recognised at week close' : 'Top 3 weekly earn recognition'}</p>
             </div>
           </div>
         </div>
@@ -80,8 +80,8 @@ export default function Rewards({ profile }: { profile?: UserProfile | null }) {
             {[
               'Complete real Databricks platform actions to earn adoption points.',
               'Points roll up into the weekly leaderboard, scored from System Tables.',
-              'The top 3 explorers each week qualify for Databricks swag.',
-              'Program admins fulfil prizes shortly after the week closes.',
+              'The top 3 explorers each week earn Databricks recognition.',
+              'Program admins recognise top performers shortly after the week closes.',
             ].map((step, i) => (
               <li key={i} className="flex gap-3">
                 <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#FF5F1F]/15 text-xs font-bold text-[#FF8A3D]">{i + 1}</span>
