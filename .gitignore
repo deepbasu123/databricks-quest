@@ -26,3 +26,4 @@ ENV/
 .mypy_cache/
 .coverage
 htmlcov/
+frontend/node_modules

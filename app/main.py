@@ -137,7 +137,7 @@ if config.is_child():
 
 MISSION_DEFINITIONS = [
     # --- Getting Started ---
-    {"id": "first_steps", "name": "First Steps", "description": "Record your first Databricks compute usage", "points": 25, "category": "Getting Started", "award_type": "one_time", "icon": "rocket"},
+    {"id": "first_steps", "name": "First Steps", "description": "Record your first Databricks usage", "points": 25, "category": "Getting Started", "award_type": "one_time", "icon": "rocket"},
     # --- Data Engineering ---
     {"id": "job_creator", "name": "Job Creator", "description": "Create your first Lakeflow Job", "points": 100, "category": "Data Engineering", "award_type": "one_time", "icon": "briefcase"},
     {"id": "pipeline_builder", "name": "Pipeline Builder", "description": "Create your first Lakeflow Spark Declarative Pipeline", "points": 150, "category": "Data Engineering", "award_type": "one_time", "icon": "git-branch"},
@@ -173,17 +173,12 @@ MISSION_DEFINITIONS = [
     {"id": "vector_search_pioneer", "name": "Vector Search Pioneer", "description": "Create a Vector Search index", "points": 200, "category": "AI / ML", "award_type": "one_time", "icon": "search"},
     {"id": "mlflow_experimenter", "name": "MLflow Experimenter", "description": "Log 10+ MLflow experiment runs", "points": 150, "category": "AI / ML", "award_type": "one_time", "icon": "flask-conical"},
     # --- Streaming ---
-    {"id": "stream_starter", "name": "Stream Starter", "description": "Run a Structured Streaming job for 24+ hours", "points": 250, "category": "Streaming", "award_type": "one_time", "icon": "radio"},
-    # --- Consumption (repeatable, weekly) ---
-    {"id": "sql_analyst", "name": "SQL Analyst", "description": "Consume 50+ SQL Warehouse DBUs in a month", "points": 100, "category": "Consumption", "award_type": "repeatable", "icon": "database"},
-    {"id": "job_runner", "name": "Job Runner", "description": "Consume 50+ Jobs Compute DBUs in a month", "points": 100, "category": "Consumption", "award_type": "repeatable", "icon": "play"},
-    {"id": "ml_practitioner", "name": "ML Practitioner", "description": "Consume any Model Serving DBUs in a month", "points": 150, "category": "Consumption", "award_type": "repeatable", "icon": "brain"},
-    {"id": "dlt_operator", "name": "Pipeline Operator", "description": "Consume 50+ DLT DBUs in a month", "points": 100, "category": "Consumption", "award_type": "repeatable", "icon": "activity"},
-    # --- Consumption milestones (one-time) ---
-    {"id": "dbu_100", "name": "First 100 DBUs", "description": "Reach 100 lifetime DBUs consumed", "points": 50, "category": "Consumption", "award_type": "one_time", "icon": "zap"},
-    {"id": "dbu_1k", "name": "1K DBU Club", "description": "Reach 1,000 lifetime DBUs consumed", "points": 200, "category": "Consumption", "award_type": "one_time", "icon": "zap"},
-    {"id": "dbu_10k", "name": "10K DBU Club", "description": "Reach 10,000 lifetime DBUs consumed", "points": 500, "category": "Consumption", "award_type": "one_time", "icon": "zap"},
-    {"id": "dbu_100k", "name": "100K DBU Club", "description": "Reach 100,000 lifetime DBUs consumed", "points": 1000, "category": "Consumption", "award_type": "one_time", "icon": "trophy"},
+    {"id": "stream_starter", "name": "Stream Starter", "description": "Run a Structured Streaming job", "points": 250, "category": "Streaming", "award_type": "one_time", "icon": "radio"},
+    # --- Product-specific consumption (repeatable, monthly) — filed under the product's own category ---
+    {"id": "sql_analyst", "name": "SQL Analyst", "description": "Consume 50+ SQL Warehouse DBUs in a month", "points": 100, "category": "Analytics", "track": "Business Users", "award_type": "repeatable", "icon": "database"},
+    {"id": "job_runner", "name": "Job Runner", "description": "Consume 50+ Jobs Compute DBUs in a month", "points": 100, "category": "Data Engineering", "award_type": "repeatable", "icon": "play"},
+    {"id": "ml_practitioner", "name": "ML Practitioner", "description": "Consume any Model Serving DBUs in a month", "points": 150, "category": "AI / ML", "award_type": "repeatable", "icon": "brain"},
+    {"id": "dlt_operator", "name": "Pipeline Operator", "description": "Consume 50+ DLT DBUs in a month", "points": 100, "category": "Data Engineering", "award_type": "repeatable", "icon": "activity"},
     # --- Engagement ---
     {"id": "consistent_operator", "name": "Consistent Operator", "description": "Run pipelines or jobs on 7 distinct days within 30 days", "points": 300, "category": "Engagement", "award_type": "repeatable", "icon": "calendar-check"},
     {"id": "daily_driver", "name": "Daily Driver", "description": "Active on 20+ days in a 30-day window", "points": 400, "category": "Engagement", "award_type": "repeatable", "icon": "calendar"},
@@ -200,7 +195,6 @@ BADGE_DEFINITIONS = [
     {"id": "platform_explorer", "name": "Platform Explorer", "description": "Use 4+ distinct Databricks product areas", "icon": "compass", "required_products": 4},
     {"id": "consistent_contributor", "name": "Consistent Contributor", "description": "Maintain a 14-day activity streak", "icon": "flame", "required_streak": 14},
     {"id": "ai_pioneer", "name": "AI Pioneer", "description": "Complete 3 AI/ML missions", "icon": "brain", "required_missions": 3, "mission_filter": ["model_deployer", "ai_function_builder", "vector_search_pioneer", "mlflow_experimenter"]},
-    {"id": "consumption_king", "name": "Consumption King", "description": "Reach the 10K DBU Club milestone", "icon": "crown", "required_milestone": "dbu_10k"},
     {"id": "full_stack", "name": "Full Stack", "description": "Complete missions in 5+ different categories", "icon": "layers", "required_categories": 5},
 ]
 

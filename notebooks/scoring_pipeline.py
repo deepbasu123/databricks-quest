@@ -1220,39 +1220,7 @@ except Exception as e:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Consumption Missions: DBU milestones and product-specific usage
-
-# COMMAND ----------
-
-# DBU Milestones (one-time)
-for milestone_id, milestone_name, threshold, pts in [
-    ("dbu_100", "First 100 DBUs", 100, 50),
-    ("dbu_1k", "1K DBU Club", 1000, 200),
-    ("dbu_10k", "10K DBU Club", 10000, 500),
-    ("dbu_100k", "100K DBU Club", 100000, 1000),
-]:
-    spark.sql(f"""
-    MERGE INTO {tbl('mission_completions')} AS target
-    USING (
-      SELECT
-        identity_metadata.run_as AS user_id,
-        '{milestone_id}' AS mission_id,
-        '{milestone_name}' AS mission_name,
-        {pts} AS points_awarded,
-        CAST(MAX(usage_date) AS TIMESTAMP) AS completed_at,
-        CAST(MIN(usage_date) AS DATE) AS period_start,
-        CAST(MAX(usage_date) AS DATE) AS period_end,
-        CAST('{NOW}' AS TIMESTAMP) AS scored_at
-      FROM system.billing.usage
-      WHERE identity_metadata.run_as IS NOT NULL AND identity_metadata.run_as != ''
-        AND usage_quantity > 0
-      GROUP BY identity_metadata.run_as
-      HAVING SUM(usage_quantity) >= {threshold}
-    ) AS source
-    ON target.user_id = source.user_id AND target.mission_id = source.mission_id
-    WHEN NOT MATCHED THEN INSERT *
-    """)
-    print(f"Mission scored: {milestone_name}")
+# MAGIC ### Consumption Missions: product-specific usage
 
 # COMMAND ----------
 

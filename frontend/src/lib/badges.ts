@@ -45,14 +45,6 @@ export const BADGE_CATALOG: BadgeDef[] = [
     requirement: 'Complete 3 AI/ML missions',
   },
   {
-    id: 'consumption_king',
-    name: 'Consumption King',
-    description: 'Reached a major lifetime DBU consumption milestone.',
-    category: 'Cost & Efficiency',
-    image: '/assets/badges/cost-optimizer.svg',
-    requirement: 'Reach the 10K DBU Club milestone',
-  },
-  {
     id: 'full_stack',
     name: 'Full Stack',
     description: 'Demonstrated breadth across the full Databricks platform.',
@@ -67,7 +59,6 @@ export const BADGE_CATEGORY_ORDER = [
   'Data Engineering',
   'AI / ML',
   'Engagement',
-  'Cost & Efficiency',
   'Mastery',
 ]
 
