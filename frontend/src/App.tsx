@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   LayoutDashboard,
   Target,
@@ -60,11 +60,18 @@ const levelColor: Record<string, string> = {
 
 export default function App() {
   const [page, setPage] = useState<NavPage>('dashboard')
+  const mainRef = useRef<HTMLElement>(null)
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [showNotifs, setShowNotifs] = useState(false)
   const [federation, setFederation] = useState<FederationStatus | null>(null)
   const [health, setHealth] = useState<HealthStatus | null>(null)
+
+  // Reset the scroll container to the top when switching tabs, so a new (often
+  // shorter) page never opens scrolled past its content and looking blank.
+  useEffect(() => {
+    mainRef.current?.scrollTo({ top: 0 })
+  }, [page])
 
   const fetchProfile = useCallback(async () => {
     try {
@@ -251,7 +258,7 @@ export default function App() {
           </div>
         </header>
 
-        <main className="quest-grid-bg min-w-0 flex-1 overflow-y-auto p-4 lg:p-5">
+        <main ref={mainRef} className="quest-grid-bg min-w-0 flex-1 overflow-y-auto p-4 lg:p-5">
           <div key={page} className="quest-rise">
             {page === 'dashboard' && <DashboardV2 profile={profile} onRefresh={fetchProfile} notifications={notifications} onNavigate={(p) => setPage(p as NavPage)} />}
             {page === 'missions' && <Missions />}
