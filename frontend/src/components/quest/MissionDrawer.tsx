@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { BarChart3, CheckCircle2, ChevronRight, Repeat, Shield, X } from 'lucide-react'
 import type { Mission } from '../../types'
 import { categoryMeta, difficultyForPoints, missionIcon } from '../../lib/mission-meta'
@@ -27,7 +28,11 @@ export function MissionDrawer({ mission, onClose }: MissionDrawerProps) {
   const difficulty = difficultyForPoints(mission.points)
   const repeatable = mission.award_type === 'repeatable'
 
-  return (
+  // Render in a portal on <body> so `fixed` anchors to the viewport. Otherwise
+  // the animated `.quest-rise` page wrapper (transform persists via animation
+  // fill-mode "both") becomes the containing block and the panel scrolls with
+  // the page instead of floating.
+  return createPortal(
     <div className="fixed inset-0 z-[60]">
       <button
         aria-label="Close mission detail"
@@ -101,7 +106,8 @@ export function MissionDrawer({ mission, onClose }: MissionDrawerProps) {
           </a>
         </div>
       </aside>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
