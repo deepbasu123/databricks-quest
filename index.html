@@ -79,6 +79,14 @@
     .feature li{display:flex;gap:10px;color:var(--text);font-size:15px}
     .feature li::before{content:"◆";color:var(--amber);font-size:12px;line-height:1.7}
     .shot{border-radius:var(--radius);border:1px solid var(--line);box-shadow:0 30px 80px rgba(0,0,0,.5);overflow:hidden}
+    /* flow diagram (replaces a screenshot) */
+    .flow{display:flex;flex-direction:column;gap:10px}
+    .flow-node{display:flex;align-items:center;gap:14px;background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.02));border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+    .flow-node .fi{font-size:20px;width:42px;height:42px;display:flex;align-items:center;justify-content:center;background:rgba(255,95,31,.12);border-radius:11px;flex-shrink:0}
+    .flow-node b{display:block;font-size:15px}
+    .flow-node small{color:var(--muted);font-size:12.5px}
+    .flow-node.accent-node{border-color:rgba(255,95,31,.4);background:linear-gradient(180deg,rgba(255,95,31,.13),rgba(255,255,255,.02))}
+    .flow-arrow{text-align:center;color:var(--dim);font-size:15px;line-height:1}
 
     /* tiers */
     .tiers{display:grid;grid-template-columns:repeat(5,1fr);gap:14px}
@@ -211,7 +219,17 @@
         <li>Runs entirely inside your own workspace</li>
       </ul>
     </div>
-    <div class="shot"><img src="images/scoring-pipeline.png" alt="Scoring pipeline job" /></div>
+    <div class="flow">
+      <div class="flow-node"><span class="fi">🗄️</span><div><b>Unity Catalog system tables</b><small>billing.usage · query.history · lakeflow · access.audit</small></div></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node"><span class="fi">⚙️</span><div><b>Scheduled scoring job</b><small>scores missions, points, levels and badges</small></div></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node"><span class="fi">🔺</span><div><b>Delta tables</b><small>per-user results, refreshed every few hours</small></div></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node"><span class="fi">🐘</span><div><b>Lakebase or SQL warehouse</b><small>serving layer</small></div></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node accent-node"><span class="fi">🎯</span><div><b>Databricks App</b><small>personal dashboard, workspace SSO</small></div></div>
+    </div>
   </div>
 
 </div>
