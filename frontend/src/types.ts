@@ -35,6 +35,7 @@ export interface Mission {
   icon: string
   status: 'available' | 'completed'
   completed_at?: string
+  doc_url?: string
 }
 
 export interface LeaderboardEntry {

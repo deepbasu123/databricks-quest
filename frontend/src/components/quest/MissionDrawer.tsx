@@ -96,7 +96,7 @@ export function MissionDrawer({ mission, onClose }: MissionDrawerProps) {
           )}
 
           <a
-            href="https://docs.databricks.com"
+            href={mission.doc_url || 'https://docs.databricks.com'}
             target="_blank"
             rel="noreferrer"
             className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#FF7A1A] to-[#E93D1E] px-5 py-3.5 text-sm font-semibold text-white shadow-xl shadow-[#FF5F1F]/20 transition hover:brightness-110"

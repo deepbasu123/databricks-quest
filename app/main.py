@@ -135,56 +135,62 @@ if config.is_child():
         config.QUEST_EVENT_SLUG or "(unset)",
     )
 
+# Each mission carries a `doc_url` pointing at the specific official Databricks
+# documentation page for that capability. Every URL below was verified live
+# against docs.databricks.com (AWS/en docs) — do not swap for a generic landing
+# page. When adding a mission, link the most specific how-to page that exists.
+_DOCS = "https://docs.databricks.com/aws/en"
+
 MISSION_DEFINITIONS = [
     # --- Getting Started ---
-    {"id": "first_steps", "name": "First Steps", "description": "Record your first Databricks usage", "points": 25, "category": "Getting Started", "award_type": "one_time", "icon": "rocket"},
+    {"id": "first_steps", "name": "First Steps", "description": "Record your first Databricks usage", "points": 25, "category": "Getting Started", "award_type": "one_time", "icon": "rocket", "doc_url": f"{_DOCS}/getting-started/free-edition"},
     # --- Data Engineering ---
-    {"id": "job_creator", "name": "Job Creator", "description": "Create your first Lakeflow Job", "points": 100, "category": "Data Engineering", "award_type": "one_time", "icon": "briefcase"},
-    {"id": "pipeline_builder", "name": "Pipeline Builder", "description": "Create your first Lakeflow Spark Declarative Pipeline", "points": 150, "category": "Data Engineering", "award_type": "one_time", "icon": "git-branch"},
-    {"id": "pipeline_runner", "name": "Pipeline Runner", "description": "Complete your first successful pipeline update", "points": 200, "category": "Data Engineering", "award_type": "one_time", "icon": "play-circle"},
-    {"id": "scheduler", "name": "Scheduler", "description": "Create a scheduled or CRON-triggered job", "points": 150, "category": "Data Engineering", "award_type": "one_time", "icon": "clock"},
-    {"id": "auto_loader_pioneer", "name": "Auto Loader Pioneer", "description": "Use Auto Loader in a pipeline for streaming ingestion", "points": 250, "category": "Data Engineering", "award_type": "one_time", "icon": "upload-cloud"},
-    {"id": "multi_task_orchestrator", "name": "Multi-Task Orchestrator", "description": "Create a workflow with 3+ tasks", "points": 200, "category": "Data Engineering", "award_type": "one_time", "icon": "git-branch"},
-    {"id": "liquid_clustering", "name": "Liquid Clustering Adopter", "description": "Enable Liquid Clustering on a table", "points": 200, "category": "Data Engineering", "award_type": "one_time", "icon": "layers"},
+    {"id": "job_creator", "name": "Job Creator", "description": "Create your first Lakeflow Job", "points": 100, "category": "Data Engineering", "award_type": "one_time", "icon": "briefcase", "doc_url": f"{_DOCS}/jobs/create-run-jobs"},
+    {"id": "pipeline_builder", "name": "Pipeline Builder", "description": "Create your first Lakeflow Spark Declarative Pipeline", "points": 150, "category": "Data Engineering", "award_type": "one_time", "icon": "git-branch", "doc_url": f"{_DOCS}/ldp/"},
+    {"id": "pipeline_runner", "name": "Pipeline Runner", "description": "Complete your first successful pipeline update", "points": 200, "category": "Data Engineering", "award_type": "one_time", "icon": "play-circle", "doc_url": f"{_DOCS}/ldp/tutorial-pipelines"},
+    {"id": "scheduler", "name": "Scheduler", "description": "Create a scheduled or CRON-triggered job", "points": 150, "category": "Data Engineering", "award_type": "one_time", "icon": "clock", "doc_url": f"{_DOCS}/jobs/triggers"},
+    {"id": "auto_loader_pioneer", "name": "Auto Loader Pioneer", "description": "Use Auto Loader in a pipeline for streaming ingestion", "points": 250, "category": "Data Engineering", "award_type": "one_time", "icon": "upload-cloud", "doc_url": f"{_DOCS}/ingestion/cloud-object-storage/auto-loader/"},
+    {"id": "multi_task_orchestrator", "name": "Multi-Task Orchestrator", "description": "Create a workflow with 3+ tasks", "points": 200, "category": "Data Engineering", "award_type": "one_time", "icon": "git-branch", "doc_url": f"{_DOCS}/jobs/configure-task"},
+    {"id": "liquid_clustering", "name": "Liquid Clustering Adopter", "description": "Enable Liquid Clustering on a table", "points": 200, "category": "Data Engineering", "award_type": "one_time", "icon": "layers", "doc_url": f"{_DOCS}/delta/clustering/"},
     # --- Business Users (Genie, dashboards, SQL, apps, notebooks) — track: Business Users ---
-    {"id": "genie_creator", "name": "Genie Creator", "description": "Create your first AI/BI Genie space", "points": 200, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "sparkles"},
-    {"id": "genie_explorer", "name": "Genie Explorer", "description": "Ask a question in an AI/BI Genie space", "points": 100, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "search"},
-    {"id": "genie_curator", "name": "Genie Curator", "description": "Add instructions or sample questions to tune a Genie space", "points": 150, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "sparkles"},
-    {"id": "genie_power_user", "name": "Genie Power User", "description": "Ask 10+ Genie questions in a single week", "points": 100, "category": "Analytics", "track": "Business Users", "award_type": "repeatable", "icon": "zap"},
-    {"id": "genie_code_user", "name": "AI Assistant", "description": "Use the Databricks Assistant (Genie) to write or fix code", "points": 100, "category": "AI / ML", "track": "Business Users", "award_type": "one_time", "icon": "brain"},
-    {"id": "dashboard_designer", "name": "Dashboard Designer", "description": "Create your first Databricks Dashboard", "points": 150, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "layout-dashboard"},
-    {"id": "dashboard_viewer", "name": "Dashboard Explorer", "description": "Open and view a published AI/BI dashboard", "points": 75, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "bar-chart-2"},
-    {"id": "dashboard_publisher", "name": "Dashboard Publisher", "description": "Publish a dashboard for others to use", "points": 150, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "share-2"},
-    {"id": "dashboard_operator", "name": "Dashboard Operator", "description": "Schedule a dashboard delivery or subscription", "points": 150, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "calendar-check"},
-    {"id": "data_explorer", "name": "Data Explorer", "description": "Execute 50+ SQL queries in a single week", "points": 150, "category": "Analytics", "track": "Business Users", "award_type": "repeatable", "icon": "search"},
-    {"id": "power_analyst", "name": "Power Analyst", "description": "Execute 200+ SQL queries in a single week", "points": 200, "category": "Analytics", "track": "Business Users", "award_type": "repeatable", "icon": "bar-chart-2"},
-    {"id": "query_author", "name": "Query Author", "description": "Save a query in the SQL editor", "points": 75, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "search"},
-    {"id": "alert_creator", "name": "Alert Creator", "description": "Create a SQL Alert with a schedule", "points": 150, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "bell"},
-    {"id": "app_builder", "name": "App Builder", "description": "Create and deploy a Databricks App", "points": 250, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "layers"},
-    {"id": "notebook_author", "name": "Notebook Author", "description": "Create your first notebook", "points": 75, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "play"},
+    {"id": "genie_creator", "name": "Genie Creator", "description": "Create your first AI/BI Genie space", "points": 200, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "sparkles", "doc_url": f"{_DOCS}/genie/set-up"},
+    {"id": "genie_explorer", "name": "Genie Explorer", "description": "Ask a question in an AI/BI Genie space", "points": 100, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "search", "doc_url": f"{_DOCS}/genie/"},
+    {"id": "genie_curator", "name": "Genie Curator", "description": "Add instructions or sample questions to tune a Genie space", "points": 150, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "sparkles", "doc_url": f"{_DOCS}/genie/best-practices"},
+    {"id": "genie_power_user", "name": "Genie Power User", "description": "Ask 10+ Genie questions in a single week", "points": 100, "category": "Analytics", "track": "Business Users", "award_type": "repeatable", "icon": "zap", "doc_url": f"{_DOCS}/genie/best-practices"},
+    {"id": "genie_code_user", "name": "AI Assistant", "description": "Use the Databricks Assistant (Genie) to write or fix code", "points": 100, "category": "AI / ML", "track": "Business Users", "award_type": "one_time", "icon": "brain", "doc_url": f"{_DOCS}/genie-code/"},
+    {"id": "dashboard_designer", "name": "Dashboard Designer", "description": "Create your first Databricks Dashboard", "points": 150, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "layout-dashboard", "doc_url": f"{_DOCS}/dashboards/tutorials/create-dashboard"},
+    {"id": "dashboard_viewer", "name": "Dashboard Explorer", "description": "Open and view a published AI/BI dashboard", "points": 75, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "bar-chart-2", "doc_url": f"{_DOCS}/dashboards/"},
+    {"id": "dashboard_publisher", "name": "Dashboard Publisher", "description": "Publish a dashboard for others to use", "points": 150, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "share-2", "doc_url": f"{_DOCS}/dashboards/share/"},
+    {"id": "dashboard_operator", "name": "Dashboard Operator", "description": "Schedule a dashboard delivery or subscription", "points": 150, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "calendar-check", "doc_url": f"{_DOCS}/dashboards/share/schedule-subscribe"},
+    {"id": "data_explorer", "name": "Data Explorer", "description": "Execute 50+ SQL queries in a single week", "points": 150, "category": "Analytics", "track": "Business Users", "award_type": "repeatable", "icon": "search", "doc_url": f"{_DOCS}/sql/user/sql-editor/"},
+    {"id": "power_analyst", "name": "Power Analyst", "description": "Execute 200+ SQL queries in a single week", "points": 200, "category": "Analytics", "track": "Business Users", "award_type": "repeatable", "icon": "bar-chart-2", "doc_url": f"{_DOCS}/sql/user/sql-editor/"},
+    {"id": "query_author", "name": "Query Author", "description": "Save a query in the SQL editor", "points": 75, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "search", "doc_url": f"{_DOCS}/sql/user/queries/"},
+    {"id": "alert_creator", "name": "Alert Creator", "description": "Create a SQL Alert with a schedule", "points": 150, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "bell", "doc_url": f"{_DOCS}/sql/user/alerts/"},
+    {"id": "app_builder", "name": "App Builder", "description": "Create and deploy a Databricks App", "points": 250, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "layers", "doc_url": f"{_DOCS}/dev-tools/databricks-apps/"},
+    {"id": "notebook_author", "name": "Notebook Author", "description": "Create your first notebook", "points": 75, "category": "Analytics", "track": "Business Users", "award_type": "one_time", "icon": "play", "doc_url": f"{_DOCS}/notebooks/"},
     # --- Lakebase — track: Lakebase ---
-    {"id": "lakebase_builder", "name": "Lakebase Builder", "description": "Create your first Lakebase (Postgres) database instance", "points": 250, "category": "Lakebase", "track": "Lakebase", "award_type": "one_time", "icon": "database"},
-    {"id": "lakebase_sync", "name": "Lakebase Sync Builder", "description": "Sync a Unity Catalog table into Lakebase", "points": 250, "category": "Lakebase", "track": "Lakebase", "award_type": "one_time", "icon": "upload-cloud"},
-    {"id": "lakebase_database", "name": "Lakebase Database Creator", "description": "Create a Lakebase database or registered catalog", "points": 150, "category": "Lakebase", "track": "Lakebase", "award_type": "one_time", "icon": "database"},
-    {"id": "lakebase_connector", "name": "Lakebase Connector", "description": "Connect to Lakebase from an app or client", "points": 100, "category": "Lakebase", "track": "Lakebase", "award_type": "one_time", "icon": "zap"},
+    {"id": "lakebase_builder", "name": "Lakebase Builder", "description": "Create your first Lakebase (Postgres) database instance", "points": 250, "category": "Lakebase", "track": "Lakebase", "award_type": "one_time", "icon": "database", "doc_url": f"{_DOCS}/oltp/create/"},
+    {"id": "lakebase_sync", "name": "Lakebase Sync Builder", "description": "Sync a Unity Catalog table into Lakebase", "points": 250, "category": "Lakebase", "track": "Lakebase", "award_type": "one_time", "icon": "upload-cloud", "doc_url": f"{_DOCS}/oltp/"},
+    {"id": "lakebase_database", "name": "Lakebase Database Creator", "description": "Create a Lakebase database or registered catalog", "points": 150, "category": "Lakebase", "track": "Lakebase", "award_type": "one_time", "icon": "database", "doc_url": f"{_DOCS}/oltp/create/"},
+    {"id": "lakebase_connector", "name": "Lakebase Connector", "description": "Connect to Lakebase from an app or client", "points": 100, "category": "Lakebase", "track": "Lakebase", "award_type": "one_time", "icon": "zap", "doc_url": f"{_DOCS}/oltp/query/"},
     # --- AI / ML ---
-    {"id": "model_deployer", "name": "Model Deployer", "description": "Deploy a model to a serving endpoint", "points": 300, "category": "AI / ML", "award_type": "one_time", "icon": "cpu"},
-    {"id": "ai_function_builder", "name": "AI Function Builder", "description": "Use ai_query() in a SQL statement", "points": 250, "category": "AI / ML", "award_type": "one_time", "icon": "sparkles"},
-    {"id": "vector_search_pioneer", "name": "Vector Search Pioneer", "description": "Create a Vector Search index", "points": 200, "category": "AI / ML", "award_type": "one_time", "icon": "search"},
-    {"id": "mlflow_experimenter", "name": "MLflow Experimenter", "description": "Log 10+ MLflow experiment runs", "points": 150, "category": "AI / ML", "award_type": "one_time", "icon": "flask-conical"},
+    {"id": "model_deployer", "name": "Model Deployer", "description": "Deploy a model to a serving endpoint", "points": 300, "category": "AI / ML", "award_type": "one_time", "icon": "cpu", "doc_url": f"{_DOCS}/machine-learning/model-serving/"},
+    {"id": "ai_function_builder", "name": "AI Function Builder", "description": "Use ai_query() in a SQL statement", "points": 250, "category": "AI / ML", "award_type": "one_time", "icon": "sparkles", "doc_url": f"{_DOCS}/large-language-models/ai-query/"},
+    {"id": "vector_search_pioneer", "name": "Vector Search Pioneer", "description": "Create a Vector Search index", "points": 200, "category": "AI / ML", "award_type": "one_time", "icon": "search", "doc_url": f"{_DOCS}/generative-ai/vector-search/"},
+    {"id": "mlflow_experimenter", "name": "MLflow Experimenter", "description": "Log 10+ MLflow experiment runs", "points": 150, "category": "AI / ML", "award_type": "one_time", "icon": "flask-conical", "doc_url": f"{_DOCS}/mlflow/tracking/"},
     # --- Streaming ---
-    {"id": "stream_starter", "name": "Stream Starter", "description": "Run a Structured Streaming job", "points": 250, "category": "Streaming", "award_type": "one_time", "icon": "radio"},
+    {"id": "stream_starter", "name": "Stream Starter", "description": "Run a Structured Streaming job", "points": 250, "category": "Streaming", "award_type": "one_time", "icon": "radio", "doc_url": f"{_DOCS}/structured-streaming/"},
     # --- Product-specific consumption (repeatable, monthly) — filed under the product's own category ---
-    {"id": "sql_analyst", "name": "SQL Analyst", "description": "Consume 50+ SQL Warehouse DBUs in a month", "points": 100, "category": "Analytics", "track": "Business Users", "award_type": "repeatable", "icon": "database"},
-    {"id": "job_runner", "name": "Job Runner", "description": "Consume 50+ Jobs Compute DBUs in a month", "points": 100, "category": "Data Engineering", "award_type": "repeatable", "icon": "play"},
-    {"id": "ml_practitioner", "name": "ML Practitioner", "description": "Consume any Model Serving DBUs in a month", "points": 150, "category": "AI / ML", "award_type": "repeatable", "icon": "brain"},
-    {"id": "dlt_operator", "name": "Pipeline Operator", "description": "Consume 50+ DLT DBUs in a month", "points": 100, "category": "Data Engineering", "award_type": "repeatable", "icon": "activity"},
+    {"id": "sql_analyst", "name": "SQL Analyst", "description": "Consume 50+ SQL Warehouse DBUs in a month", "points": 100, "category": "Analytics", "track": "Business Users", "award_type": "repeatable", "icon": "database", "doc_url": f"{_DOCS}/compute/sql-warehouse/"},
+    {"id": "job_runner", "name": "Job Runner", "description": "Consume 50+ Jobs Compute DBUs in a month", "points": 100, "category": "Data Engineering", "award_type": "repeatable", "icon": "play", "doc_url": f"{_DOCS}/admin/system-tables/jobs"},
+    {"id": "ml_practitioner", "name": "ML Practitioner", "description": "Consume any Model Serving DBUs in a month", "points": 150, "category": "AI / ML", "award_type": "repeatable", "icon": "brain", "doc_url": f"{_DOCS}/machine-learning/model-serving/"},
+    {"id": "dlt_operator", "name": "Pipeline Operator", "description": "Consume 50+ DLT DBUs in a month", "points": 100, "category": "Data Engineering", "award_type": "repeatable", "icon": "activity", "doc_url": f"{_DOCS}/ldp/observability"},
     # --- Engagement ---
-    {"id": "consistent_operator", "name": "Consistent Operator", "description": "Run pipelines or jobs on 7 distinct days within 30 days", "points": 300, "category": "Engagement", "award_type": "repeatable", "icon": "calendar-check"},
-    {"id": "daily_driver", "name": "Daily Driver", "description": "Active on 20+ days in a 30-day window", "points": 400, "category": "Engagement", "award_type": "repeatable", "icon": "calendar"},
-    {"id": "cross_product_champion", "name": "Cross-Product Champion", "description": "Use 6+ distinct Databricks products in a month", "points": 500, "category": "Engagement", "award_type": "repeatable", "icon": "award"},
+    {"id": "consistent_operator", "name": "Consistent Operator", "description": "Run pipelines or jobs on 7 distinct days within 30 days", "points": 300, "category": "Engagement", "award_type": "repeatable", "icon": "calendar-check", "doc_url": f"{_DOCS}/admin/system-tables/"},
+    {"id": "daily_driver", "name": "Daily Driver", "description": "Active on 20+ days in a 30-day window", "points": 400, "category": "Engagement", "award_type": "repeatable", "icon": "calendar", "doc_url": f"{_DOCS}/admin/system-tables/"},
+    {"id": "cross_product_champion", "name": "Cross-Product Champion", "description": "Use 6+ distinct Databricks products in a month", "points": 500, "category": "Engagement", "award_type": "repeatable", "icon": "award", "doc_url": f"{_DOCS}/admin/system-tables/billing"},
     # --- Governance ---
-    {"id": "uc_publisher", "name": "Unity Catalog Publisher", "description": "Share a table across schemas", "points": 150, "category": "Governance", "award_type": "one_time", "icon": "share"},
+    {"id": "uc_publisher", "name": "Unity Catalog Publisher", "description": "Share a table across schemas", "points": 150, "category": "Governance", "award_type": "one_time", "icon": "share", "doc_url": f"{_DOCS}/data-governance/unity-catalog/"},
 ]
 
 # Consumption points: 1 point per 10 DBUs consumed, scored weekly

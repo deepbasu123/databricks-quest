@@ -216,7 +216,7 @@ export default function App() {
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="flex h-[64px] shrink-0 items-center justify-between border-b border-white/10 bg-[#0D1320]/80 px-7 backdrop-blur-xl">
+        <header className="relative z-30 flex h-[64px] shrink-0 items-center justify-between border-b border-white/10 bg-[#0D1320]/80 px-7 backdrop-blur-xl">
           <div>
             <h1 className="text-xl font-semibold tracking-tight text-white">{activeMeta.title}</h1>
             <p className="mt-1 text-sm text-slate-400">{activeMeta.subtitle}</p>
