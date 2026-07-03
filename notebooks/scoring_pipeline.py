@@ -189,6 +189,33 @@ from datetime import datetime
 
 NOW = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
+# Repeatable, period-scoped missions are recomputable aggregates: each run
+# re-derives who qualifies within a rolling window. They are scored with
+# `WHEN NOT MATCHED` (insert-if-missing), so a completion recorded under older/
+# looser logic would stick forever even after the qualifying rule tightens
+# (e.g. a user who only "qualified" for Consistent Operator via scheduled runs,
+# before the human-triggered filter). Clear them up front so the MERGEs below
+# rebuild them under the current filters. One-time achievement missions are NOT
+# cleared — those are genuine historical milestones and stay append-only.
+REPEATABLE_MISSIONS = (
+    "genie_power_user", "data_explorer", "power_analyst", "sql_analyst",
+    "ml_practitioner", "consistent_operator", "daily_driver", "cross_product_champion",
+)
+_rep_in = ", ".join(f"'{m}'" for m in REPEATABLE_MISSIONS)
+_rep_n = spark.sql(
+    f"SELECT COUNT(*) AS c FROM {tbl('mission_completions')} WHERE mission_id IN ({_rep_in})"
+).first()["c"]
+if _rep_n:
+    spark.sql(f"DELETE FROM {tbl('mission_completions')} WHERE mission_id IN ({_rep_in})")
+    # Step 3 mirrors mission_completions into user_points_fact with an
+    # insert-if-missing MERGE, so clear the matching fact rows too or the deleted
+    # completions' points would survive there and keep counting.
+    spark.sql(
+        f"DELETE FROM {tbl('user_points_fact')} "
+        f"WHERE event_type = 'mission_completion' AND mission_id IN ({_rep_in})"
+    )
+    print(f"Cleared {_rep_n} repeatable-mission rows (and their fact rows) for recompute under current filters.")
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -1337,35 +1364,44 @@ for m_id, m_name, m_pts, product_filter, dbu_threshold in PRODUCT_MISSIONS:
 
 # MAGIC %md
 # MAGIC ### Consumption Points: Weekly DBU-based points (1 pt per 10 DBUs)
+# MAGIC
+# MAGIC Recomputed from scratch every run (DELETE + INSERT), NOT insert-if-missing.
+# MAGIC These points are a pure rolling aggregate over the last 90 days of billing
+# MAGIC usage, so the current run's filtered logic must be authoritative. An
+# MAGIC insert-only MERGE would leave behind rows scored under older/looser logic
+# MAGIC (e.g. automated-DBU points banked before the INTERACTIVE_USAGE filter
+# MAGIC existed), which would keep inflating the leaderboard forever. Deleting the
+# MAGIC prior consumption rows first guarantees the change actually takes effect on
+# MAGIC re-score. Mission-completion points are append-only and handled separately.
 
 # COMMAND ----------
 
+# Clear prior consumption rows so they are rebuilt under the current filter.
 spark.sql(f"""
-MERGE INTO {tbl('user_points_fact')} AS target
-USING (
-  SELECT
-    identity_metadata.run_as AS user_id,
-    'consumption' AS event_type,
-    'weekly_dbu' AS mission_id,
-    CAST(FLOOR(SUM(usage_quantity) / 10) AS INT) AS points,
-    CONCAT('Weekly compute: ', ROUND(SUM(usage_quantity), 1), ' DBUs') AS reason,
-    CAST(MAX(usage_date) AS TIMESTAMP) AS event_timestamp,
-    CAST('{NOW}' AS TIMESTAMP) AS scored_at
-  FROM system.billing.usage
-  WHERE identity_metadata.run_as IS NOT NULL AND identity_metadata.run_as != ''
-    AND usage_quantity > 0
-    AND {INTERACTIVE_USAGE}
-    AND usage_date >= DATE_SUB(CURRENT_DATE(), 90)
-  GROUP BY identity_metadata.run_as, DATE_TRUNC('WEEK', usage_date)
-  HAVING SUM(usage_quantity) >= 10
-) AS source
-ON target.user_id = source.user_id
-  AND target.mission_id = source.mission_id
-  AND target.event_timestamp = source.event_timestamp
-WHEN NOT MATCHED THEN INSERT *
+DELETE FROM {tbl('user_points_fact')}
+WHERE event_type = 'consumption' AND mission_id = 'weekly_dbu'
 """)
 
-print("Consumption points scored (1 pt per 10 DBUs weekly)")
+spark.sql(f"""
+INSERT INTO {tbl('user_points_fact')}
+SELECT
+  identity_metadata.run_as AS user_id,
+  'consumption' AS event_type,
+  'weekly_dbu' AS mission_id,
+  CAST(FLOOR(SUM(usage_quantity) / 10) AS INT) AS points,
+  CONCAT('Weekly compute: ', ROUND(SUM(usage_quantity), 1), ' DBUs') AS reason,
+  CAST(MAX(usage_date) AS TIMESTAMP) AS event_timestamp,
+  CAST('{NOW}' AS TIMESTAMP) AS scored_at
+FROM system.billing.usage
+WHERE identity_metadata.run_as IS NOT NULL AND identity_metadata.run_as != ''
+  AND usage_quantity > 0
+  AND {INTERACTIVE_USAGE}
+  AND usage_date >= DATE_SUB(CURRENT_DATE(), 90)
+GROUP BY identity_metadata.run_as, DATE_TRUNC('WEEK', usage_date)
+HAVING SUM(usage_quantity) >= 10
+""")
+
+print("Consumption points recomputed (1 pt per 10 DBUs weekly, interactive only)")
 
 # COMMAND ----------
 
