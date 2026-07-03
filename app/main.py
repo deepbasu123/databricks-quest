@@ -181,10 +181,13 @@ MISSION_DEFINITIONS = [
     # --- Streaming ---
     {"id": "stream_starter", "name": "Stream Starter", "description": "Run a Structured Streaming job", "points": 250, "category": "Streaming", "award_type": "one_time", "icon": "radio", "doc_url": f"{_DOCS}/structured-streaming/"},
     # --- Product-specific consumption (repeatable, monthly) — filed under the product's own category ---
+    # Interactive human consumption only (see scoring_pipeline.py INTERACTIVE_USAGE).
+    # Job/DLT consumption missions were removed: that compute is automated by
+    # definition, so those missions rewarded every scheduled run rather than a
+    # person. Setting up a job/pipeline is credited once via Job Creator /
+    # Pipeline Builder instead.
     {"id": "sql_analyst", "name": "SQL Analyst", "description": "Consume 50+ SQL Warehouse DBUs in a month", "points": 100, "category": "Analytics", "track": "Business Users", "award_type": "repeatable", "icon": "database", "doc_url": f"{_DOCS}/compute/sql-warehouse/"},
-    {"id": "job_runner", "name": "Job Runner", "description": "Consume 50+ Jobs Compute DBUs in a month", "points": 100, "category": "Data Engineering", "award_type": "repeatable", "icon": "play", "doc_url": f"{_DOCS}/admin/system-tables/jobs"},
     {"id": "ml_practitioner", "name": "ML Practitioner", "description": "Consume any Model Serving DBUs in a month", "points": 150, "category": "AI / ML", "award_type": "repeatable", "icon": "brain", "doc_url": f"{_DOCS}/machine-learning/model-serving/"},
-    {"id": "dlt_operator", "name": "Pipeline Operator", "description": "Consume 50+ DLT DBUs in a month", "points": 100, "category": "Data Engineering", "award_type": "repeatable", "icon": "activity", "doc_url": f"{_DOCS}/ldp/observability"},
     # --- Engagement ---
     {"id": "consistent_operator", "name": "Consistent Operator", "description": "Run pipelines or jobs on 7 distinct days within 30 days", "points": 300, "category": "Engagement", "award_type": "repeatable", "icon": "calendar-check", "doc_url": f"{_DOCS}/admin/system-tables/"},
     {"id": "daily_driver", "name": "Daily Driver", "description": "Active on 20+ days in a 30-day window", "points": 400, "category": "Engagement", "award_type": "repeatable", "icon": "calendar", "doc_url": f"{_DOCS}/admin/system-tables/"},

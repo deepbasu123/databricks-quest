@@ -4,6 +4,36 @@
 # MAGIC
 # MAGIC Reads system tables, detects mission completions, computes user profiles,
 # MAGIC leaderboards, badges, and notifications. Idempotent via MERGE.
+# MAGIC
+# MAGIC ## Human activity only (no automation double-counting)
+# MAGIC Quest is a *human* adoption game. `system.billing.usage.identity_metadata.run_as`
+# MAGIC logs whoever a workload runs *as* — for a scheduled job or continuous pipeline
+# MAGIC that is the creator, not a person at the keyboard. So a cron job or DLT pipeline
+# MAGIC keeps banking points under its owner's name even while they're on leave, which
+# MAGIC inflates the leaderboard (verified on real data: ~79% of consumption DBUs come
+# MAGIC from job/pipeline rows).
+# MAGIC
+# MAGIC The rule this pipeline enforces:
+# MAGIC   * **Creating** an automated workload is rewarded **once** (Job Creator,
+# MAGIC     Pipeline Builder, Scheduler, Multi-Task Orchestrator, Auto Loader Pioneer —
+# MAGIC     each keyed on the first `creator`/`created_by` event, so it fires a single
+# MAGIC     time regardless of how often the workload later runs).
+# MAGIC   * **Ongoing consumption / activity** points count **interactive human work
+# MAGIC     only**. Billing rows carrying a `job_id` or `dlt_pipeline_id` are automated
+# MAGIC     and excluded (`INTERACTIVE_USAGE` filter below). Run-based missions count
+# MAGIC     only human-triggered runs (`trigger_type` = ONETIME for jobs / USER_ACTION
+# MAGIC     for pipelines). Query-count missions exclude job/pipeline-sourced queries.
+# MAGIC
+# MAGIC Column names verified against the official system-tables reference and live data.
+
+# COMMAND ----------
+
+# Reusable predicate: a system.billing.usage row is INTERACTIVE (human at the
+# keyboard) when it is not attributed to a scheduled job run or a pipeline update.
+# usage_metadata.job_id / dlt_pipeline_id are populated only for automated compute.
+INTERACTIVE_USAGE = (
+    "usage_metadata.job_id IS NULL AND usage_metadata.dlt_pipeline_id IS NULL"
+)
 
 # COMMAND ----------
 
@@ -185,6 +215,12 @@ USING (
     AND identity_metadata.run_as NOT LIKE '%service-principal%'
     AND identity_metadata.run_as NOT LIKE '%ServicePrincipal%'
     AND usage_quantity > 0
+    -- NOTE: deliberately NOT filtered to interactive-only. First Steps is a
+    -- one-time 25-pt "entry" award keyed on MIN(usage_date) (first-ever usage),
+    -- so it cannot inflate a leaderboard. Requiring interactive usage would make
+    -- it unearnable for engineers whose first activity is a job/pipeline they set
+    -- up — they'd get Job Creator but not the beginner mission. Any first usage
+    -- legitimately marks a human entering the platform (SP rows are swept later).
     AND usage_date >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
   GROUP BY identity_metadata.run_as
 ) AS source
@@ -285,6 +321,12 @@ USING (
   WHERE result_state = 'COMPLETED'
     AND run_as_user_name IS NOT NULL
     AND run_as_user_name != ''
+    -- One-time award (fires once, on the first successful update). Intentionally
+    -- not restricted to USER_ACTION: this rewards the milestone "your pipeline
+    -- ran successfully" a single time, which is the same first-time-setup credit
+    -- we want. It cannot inflate the leaderboard (one_time), and a USER_ACTION
+    -- filter would make it unearnable for a schedule-only owner. Recurring runs
+    -- are what we don't reward — that's handled by the consumption/streak filters.
     AND period_start_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
   GROUP BY run_as_user_name
 ) AS source
@@ -381,6 +423,10 @@ spark.sql(f"""
 MERGE INTO {tbl('mission_completions')} AS target
 USING (
   WITH daily_runs AS (
+    -- Human-triggered job runs only. trigger_type ONETIME = manual "Run now",
+    -- API submit, or notebook workflow (a person acted). CRON/PERIODIC/CONTINUOUS/
+    -- TABLE/FILE_ARRIVAL are automated schedules and must not sustain the streak.
+    -- job_run_timeline has no run_as column, so attribute to the job creator.
     SELECT
       j.creator_user_name AS user_id,
       CAST(r.period_start_time AS DATE) AS run_date
@@ -391,14 +437,17 @@ USING (
       FROM system.lakeflow.jobs
     ) j ON r.job_id = j.job_id AND r.workspace_id = j.workspace_id AND j.rn = 1
     WHERE r.result_state IS NOT NULL
+      AND r.trigger_type = 'ONETIME'
       AND j.creator_user_name IS NOT NULL AND j.creator_user_name != ''
       AND r.period_start_time >= DATE_SUB(CURRENT_DATE(), 30)
     UNION
+    -- Human-triggered pipeline updates only (USER_ACTION = started from the UI).
     SELECT
       run_as_user_name AS user_id,
       CAST(period_start_time AS DATE) AS run_date
     FROM system.lakeflow.pipeline_update_timeline
     WHERE result_state IS NOT NULL
+      AND trigger_type = 'USER_ACTION'
       AND run_as_user_name IS NOT NULL AND run_as_user_name != ''
       AND period_start_time >= DATE_SUB(CURRENT_DATE(), 30)
   )
@@ -447,6 +496,12 @@ USING (
   WHERE executed_by IS NOT NULL
     AND executed_by != ''
     AND statement_type IN ('SELECT', 'INSERT', 'MERGE', 'CREATE', 'ALTER')
+    -- Human ad-hoc queries only: exclude queries issued by a job or pipeline.
+    -- Check the inner id — the job_info/pipeline_info struct itself is usually
+    -- present (non-null) even for interactive queries; only the id is populated
+    -- when the query actually originated from a job run or pipeline update.
+    AND query_source.job_info.job_id IS NULL
+    AND query_source.pipeline_info.pipeline_id IS NULL
     AND start_time >= DATE_SUB(CURRENT_DATE(), 30)
   GROUP BY executed_by, DATE_TRUNC('WEEK', start_time)
   HAVING COUNT(*) >= 50
@@ -1067,6 +1122,12 @@ USING (
   FROM system.query.history
   WHERE executed_by IS NOT NULL AND executed_by != ''
     AND statement_type IN ('SELECT', 'INSERT', 'MERGE', 'CREATE', 'ALTER')
+    -- Human ad-hoc queries only: exclude queries issued by a job or pipeline.
+    -- Check the inner id — the job_info/pipeline_info struct itself is usually
+    -- present (non-null) even for interactive queries; only the id is populated
+    -- when the query actually originated from a job run or pipeline update.
+    AND query_source.job_info.job_id IS NULL
+    AND query_source.pipeline_info.pipeline_id IS NULL
     AND start_time >= DATE_SUB(CURRENT_DATE(), 30)
   GROUP BY executed_by, DATE_TRUNC('WEEK', start_time)
   HAVING COUNT(*) >= 200
@@ -1224,12 +1285,22 @@ except Exception as e:
 
 # COMMAND ----------
 
-# Product-specific consumption missions (repeatable monthly)
+# Product-specific consumption missions (repeatable monthly).
+# Only products where a HUMAN drives interactive consumption belong here:
+#   * SQL warehouse — a person running queries in the editor / dashboards.
+#   * Model Serving — a person exercising an endpoint they own.
+# The INTERACTIVE_USAGE filter drops scheduled job/pipeline compute so an
+# on-leave owner's cron can't keep earning.
+#
+# NOTE: the old "Job Runner" (JOBS DBUs) and "Pipeline Operator" (DLT DBUs)
+# consumption missions were removed. Jobs/DLT compute is automated by
+# definition (every row carries a job_id / dlt_pipeline_id), so those missions
+# rewarded "each time the workload runs" — exactly what we don't want. Setting
+# up those workloads is already a one-time award (Job Creator, Pipeline
+# Builder), which is where the "reward first-time setup" credit belongs.
 PRODUCT_MISSIONS = [
     ("sql_analyst", "SQL Analyst", 100, "SQL", 50),
-    ("job_runner", "Job Runner", 100, "JOBS", 50),
     ("ml_practitioner", "ML Practitioner", 150, "MODEL_SERVING", 1),
-    ("dlt_operator", "Pipeline Operator", 100, "DLT", 50),
 ]
 
 for m_id, m_name, m_pts, product_filter, dbu_threshold in PRODUCT_MISSIONS:
@@ -1249,6 +1320,7 @@ for m_id, m_name, m_pts, product_filter, dbu_threshold in PRODUCT_MISSIONS:
           FROM system.billing.usage
           WHERE identity_metadata.run_as IS NOT NULL AND identity_metadata.run_as != ''
             AND usage_quantity > 0
+            AND {INTERACTIVE_USAGE}
             AND billing_origin_product = '{product_filter}'
             AND usage_date >= DATE_TRUNC('MONTH', DATE_SUB(CURRENT_DATE(), 60))
           GROUP BY identity_metadata.run_as, DATE_TRUNC('MONTH', usage_date), LAST_DAY(usage_date)
@@ -1282,6 +1354,7 @@ USING (
   FROM system.billing.usage
   WHERE identity_metadata.run_as IS NOT NULL AND identity_metadata.run_as != ''
     AND usage_quantity > 0
+    AND {INTERACTIVE_USAGE}
     AND usage_date >= DATE_SUB(CURRENT_DATE(), 90)
   GROUP BY identity_metadata.run_as, DATE_TRUNC('WEEK', usage_date)
   HAVING SUM(usage_quantity) >= 10
@@ -1317,6 +1390,7 @@ USING (
   FROM system.billing.usage
   WHERE identity_metadata.run_as IS NOT NULL AND identity_metadata.run_as != ''
     AND usage_quantity > 0
+    AND {INTERACTIVE_USAGE}
     AND usage_date >= DATE_SUB(CURRENT_DATE(), 30)
   GROUP BY identity_metadata.run_as
   HAVING COUNT(DISTINCT usage_date) >= 20
@@ -1343,6 +1417,7 @@ USING (
   FROM system.billing.usage
   WHERE identity_metadata.run_as IS NOT NULL AND identity_metadata.run_as != ''
     AND usage_quantity > 0
+    AND {INTERACTIVE_USAGE}
     AND usage_date >= DATE_TRUNC('MONTH', DATE_SUB(CURRENT_DATE(), 60))
   GROUP BY identity_metadata.run_as, DATE_TRUNC('MONTH', usage_date), LAST_DAY(usage_date)
   HAVING COUNT(DISTINCT billing_origin_product) >= 6
@@ -1398,6 +1473,7 @@ WITH daily_activity AS (
   WHERE identity_metadata.run_as IS NOT NULL
     AND identity_metadata.run_as != ''
     AND usage_quantity > 0
+    AND {INTERACTIVE_USAGE}
     AND usage_date >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
   GROUP BY identity_metadata.run_as, usage_date
 ),
@@ -1452,6 +1528,29 @@ print("Service-principal sweep complete — profile/leaderboard/badges build fro
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Retire removed missions from the fact tables
+# MAGIC The job_runner / dlt_operator "consume DBUs" missions were removed (Jobs/DLT
+# MAGIC compute is automated by definition — those rewarded every scheduled run, not a
+# MAGIC person). MERGE never deletes, so completions written by earlier runs would keep
+# MAGIC contributing points. Sweep them BEFORE the profile/leaderboard are built so the
+# MAGIC retired points don't linger in totals.
+
+# COMMAND ----------
+
+RETIRED_MISSIONS = ("job_runner", "dlt_operator")
+_retired_in = ", ".join(f"'{m}'" for m in RETIRED_MISSIONS)
+for _t in ["mission_completions", "user_points_fact"]:
+    _n = spark.sql(
+        f"SELECT COUNT(*) AS c FROM {tbl(_t)} WHERE mission_id IN ({_retired_in})"
+    ).first()["c"]
+    if _n:
+        spark.sql(f"DELETE FROM {tbl(_t)} WHERE mission_id IN ({_retired_in})")
+        print(f"  {_t}: removed {_n} rows for retired missions ({', '.join(RETIRED_MISSIONS)})")
+print("Retired-mission sweep complete.")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Step 5: Compute Product Breadth
 
 # COMMAND ----------
@@ -1465,6 +1564,7 @@ FROM system.billing.usage
 WHERE identity_metadata.run_as IS NOT NULL
   AND identity_metadata.run_as != ''
   AND usage_quantity > 0
+  AND {INTERACTIVE_USAGE}
   AND usage_date >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
 GROUP BY identity_metadata.run_as
 """)
@@ -1506,6 +1606,8 @@ SELECT
 FROM system.billing.usage
 WHERE identity_metadata.run_as IS NOT NULL
   AND identity_metadata.run_as != ''
+  AND usage_quantity > 0
+  AND {INTERACTIVE_USAGE}
   AND usage_date >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
 GROUP BY identity_metadata.run_as
 """)
