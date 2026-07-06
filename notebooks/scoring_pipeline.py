@@ -218,6 +218,32 @@ if _rep_n:
 
 # COMMAND ----------
 
+# One-time missions whose DETECTION CRITERIA changed after they were first scored.
+# They are insert-if-missing, so rows awarded under the old (wrong) logic would
+# stick even though the rule changed — e.g. uc_publisher wrongly credited the
+# notebook runner for the pipeline's own self-grant, and auto_loader_pioneer
+# over-awarded via the old billing-join. Clear these once so they rebuild under
+# the corrected detection below. Safe & idempotent: legitimately-qualifying users
+# are simply re-inserted this run. Remove IDs from this list once all live
+# deployments have re-scored past the fix (optional cleanup — harmless to keep).
+RESCORE_ONETIME_MISSIONS = (
+    "uc_publisher", "liquid_clustering", "auto_loader_pioneer",
+    "mlflow_experimenter", "vector_search_pioneer", "stream_starter",
+)
+_ro_in = ", ".join(f"'{m}'" for m in RESCORE_ONETIME_MISSIONS)
+_ro_n = spark.sql(
+    f"SELECT COUNT(*) AS c FROM {tbl('mission_completions')} WHERE mission_id IN ({_ro_in})"
+).first()["c"]
+if _ro_n:
+    spark.sql(f"DELETE FROM {tbl('mission_completions')} WHERE mission_id IN ({_ro_in})")
+    spark.sql(
+        f"DELETE FROM {tbl('user_points_fact')} "
+        f"WHERE event_type = 'mission_completion' AND mission_id IN ({_ro_in})"
+    )
+    print(f"Cleared {_ro_n} changed-one-time-mission rows for recompute under corrected detection.")
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ### Mission: First Steps (25 pts)
 # MAGIC First billable Databricks usage per user.
@@ -405,7 +431,14 @@ print("Mission scored: Scheduler")
 
 # MAGIC %md
 # MAGIC ### Mission: Auto Loader Pioneer (250 pts)
-# MAGIC Use Auto Loader in a pipeline (inferred from pipeline type).
+# MAGIC Actually use Auto Loader — detected by the `cloudFiles` format or the
+# MAGIC `read_files` streaming source appearing in the user's executed SQL. The
+# MAGIC previous version only checked that *any* DLT pipeline ran (billing join on
+# MAGIC dlt_pipeline_id), which credited every pipeline author whether or not they
+# MAGIC used Auto Loader. This looks for the real Auto Loader signal instead.
+# MAGIC NOTE: Auto Loader used purely inside a Python pipeline notebook won't show
+# MAGIC in query.history; this detects the SQL-surfaced usage, which is precise
+# MAGIC (no false positives) at the cost of missing some pipeline-only usage.
 
 # COMMAND ----------
 
@@ -413,24 +446,19 @@ spark.sql(f"""
 MERGE INTO {tbl('mission_completions')} AS target
 USING (
   SELECT
-    p.created_by AS user_id,
+    executed_by AS user_id,
     'auto_loader_pioneer' AS mission_id,
     'Auto Loader Pioneer' AS mission_name,
     250 AS points_awarded,
-    MIN(p.change_time) AS completed_at,
-    CAST(MIN(p.change_time) AS DATE) AS period_start,
-    CAST(MIN(p.change_time) AS DATE) AS period_end,
+    CAST(MIN(start_time) AS TIMESTAMP) AS completed_at,
+    CAST(MIN(start_time) AS DATE) AS period_start,
+    CAST(MIN(start_time) AS DATE) AS period_end,
     CAST('{NOW}' AS TIMESTAMP) AS scored_at
-  FROM system.lakeflow.pipelines p
-  JOIN system.billing.usage u
-    ON u.usage_metadata.dlt_pipeline_id = p.pipeline_id
-  WHERE p.pipeline_type IN ('ETL_PIPELINE')
-    AND p.delete_time IS NULL
-    AND p.created_by IS NOT NULL
-    AND p.created_by != ''
-    AND u.billing_origin_product = 'DLT'
-    AND u.usage_date >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
-  GROUP BY p.created_by
+  FROM system.query.history
+  WHERE executed_by IS NOT NULL AND executed_by != ''
+    AND (LOWER(statement_text) LIKE '%cloudfiles%' OR LOWER(statement_text) LIKE '%read_files%')
+    AND start_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+  GROUP BY executed_by
 ) AS source
 ON target.user_id = source.user_id AND target.mission_id = source.mission_id
 WHEN NOT MATCHED THEN INSERT *
@@ -1260,6 +1288,7 @@ try:
       WHERE LOWER(statement_text) LIKE '%ai_query%'
         AND executed_by IS NOT NULL AND executed_by != ''
         AND execution_status = 'FINISHED'
+        AND start_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
       GROUP BY executed_by
     ) AS source
     ON target.user_id = source.user_id AND target.mission_id = source.mission_id
@@ -1291,7 +1320,12 @@ try:
         CAST(MAX(event_time) AS DATE) AS period_end,
         CAST('{NOW}' AS TIMESTAMP) AS scored_at
       FROM system.access.audit
-      WHERE action_name IN ('createRun', 'mlflowCreateRun')
+      -- MLflow experiment run logging is audited as
+      -- service_name='mlflowExperiment', action_name='createLoggedModel'.
+      -- (The old 'createRun'/'mlflowCreateRun' names are not emitted, so the
+      -- mission never fired — verified 0 rows in system.access.audit.)
+      WHERE service_name = 'mlflowExperiment'
+        AND action_name = 'createLoggedModel'
         AND response.status_code = 200
         AND user_identity.email IS NOT NULL AND user_identity.email != ''
         AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
@@ -1304,6 +1338,170 @@ try:
     print("Mission scored: MLflow Experimenter")
 except Exception as e:
     print(f"Mission skipped: MLflow Experimenter ({e})")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: Vector Search Pioneer (200 pts)
+# MAGIC Create a Vector Search (Databricks AI Search) index.
+# MAGIC Audited as service_name='vectorSearch', action_name='createVectorIndex'.
+
+# COMMAND ----------
+
+try:
+    spark.sql(f"""
+    MERGE INTO {tbl('mission_completions')} AS target
+    USING (
+      SELECT
+        user_identity.email AS user_id,
+        'vector_search_pioneer' AS mission_id,
+        'Vector Search Pioneer' AS mission_name,
+        200 AS points_awarded,
+        MIN(event_time) AS completed_at,
+        CAST(MIN(event_time) AS DATE) AS period_start,
+        CAST(MIN(event_time) AS DATE) AS period_end,
+        CAST('{NOW}' AS TIMESTAMP) AS scored_at
+      FROM system.access.audit
+      WHERE service_name = 'vectorSearch'
+        AND action_name = 'createVectorIndex'
+        AND response.status_code = 200
+        AND user_identity.email IS NOT NULL AND user_identity.email != ''
+        AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+      GROUP BY user_identity.email
+    ) AS source
+    ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+    WHEN NOT MATCHED THEN INSERT *
+    """)
+    print("Mission scored: Vector Search Pioneer")
+except Exception as e:
+    print(f"Mission skipped: Vector Search Pioneer ({e})")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: Liquid Clustering Adopter (200 pts)
+# MAGIC Enable Liquid Clustering on a table — detected by a CLUSTER BY clause in
+# MAGIC the user's executed CREATE/ALTER SQL (interactive, not job-issued).
+
+# COMMAND ----------
+
+try:
+    spark.sql(f"""
+    MERGE INTO {tbl('mission_completions')} AS target
+    USING (
+      SELECT
+        executed_by AS user_id,
+        'liquid_clustering' AS mission_id,
+        'Liquid Clustering Adopter' AS mission_name,
+        200 AS points_awarded,
+        CAST(MIN(start_time) AS TIMESTAMP) AS completed_at,
+        CAST(MIN(start_time) AS DATE) AS period_start,
+        CAST(MIN(start_time) AS DATE) AS period_end,
+        CAST('{NOW}' AS TIMESTAMP) AS scored_at
+      FROM system.query.history
+      WHERE executed_by IS NOT NULL AND executed_by != ''
+        AND LOWER(statement_text) LIKE '%cluster by%'
+        AND statement_type IN ('CREATE', 'ALTER')
+        AND query_source.job_info.job_id IS NULL
+        AND query_source.pipeline_info.pipeline_id IS NULL
+        AND start_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+      GROUP BY executed_by
+    ) AS source
+    ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+    WHEN NOT MATCHED THEN INSERT *
+    """)
+    print("Mission scored: Liquid Clustering Adopter")
+except Exception as e:
+    print(f"Mission skipped: Liquid Clustering Adopter ({e})")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: Unity Catalog Publisher (150 pts)
+# MAGIC Share a table across schemas — detected by a UC permission grant
+# MAGIC (service_name='unityCatalog', action_name='updatePermissions').
+
+# COMMAND ----------
+
+try:
+    spark.sql(f"""
+    MERGE INTO {tbl('mission_completions')} AS target
+    USING (
+      SELECT
+        user_identity.email AS user_id,
+        'uc_publisher' AS mission_id,
+        'Unity Catalog Publisher' AS mission_name,
+        150 AS points_awarded,
+        MIN(event_time) AS completed_at,
+        CAST(MIN(event_time) AS DATE) AS period_start,
+        CAST(MIN(event_time) AS DATE) AS period_end,
+        CAST('{NOW}' AS TIMESTAMP) AS scored_at
+      FROM system.access.audit
+      WHERE service_name = 'unityCatalog'
+        AND action_name = 'updatePermissions'
+        AND response.status_code = 200
+        AND user_identity.email IS NOT NULL AND user_identity.email != ''
+        -- Exclude the scoring pipeline's OWN auto-grant to the app service
+        -- principal (it grants on the Quest catalog/schema every run and would
+        -- otherwise award uc_publisher to whoever runs this notebook).
+        AND COALESCE(request_params['securable_full_name'], '') NOT LIKE '{CATALOG}.{SCHEMA}%'
+        AND COALESCE(request_params['securable_full_name'], '') <> '{CATALOG}'
+        AND event_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+      GROUP BY user_identity.email
+    ) AS source
+    ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+    WHEN NOT MATCHED THEN INSERT *
+    """)
+    print("Mission scored: Unity Catalog Publisher")
+except Exception as e:
+    print(f"Mission skipped: Unity Catalog Publisher ({e})")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Mission: Stream Starter (250 pts)
+# MAGIC Run a Structured Streaming job. Structured Streaming has no single system
+# MAGIC table signal, so detect either: (a) a user whose executed SQL uses the
+# MAGIC streaming APIs (readStream/writeStream), or (b) the creator of a job with a
+# MAGIC CONTINUOUS trigger. Union of both, one-time award.
+
+# COMMAND ----------
+
+try:
+    spark.sql(f"""
+    MERGE INTO {tbl('mission_completions')} AS target
+    USING (
+      SELECT
+        user_id,
+        'stream_starter' AS mission_id,
+        'Stream Starter' AS mission_name,
+        250 AS points_awarded,
+        MIN(completed_at) AS completed_at,
+        CAST(MIN(completed_at) AS DATE) AS period_start,
+        CAST(MIN(completed_at) AS DATE) AS period_end,
+        CAST('{NOW}' AS TIMESTAMP) AS scored_at
+      FROM (
+        SELECT executed_by AS user_id, start_time AS completed_at
+        FROM system.query.history
+        WHERE executed_by IS NOT NULL AND executed_by != ''
+          AND (LOWER(statement_text) LIKE '%readstream%' OR LOWER(statement_text) LIKE '%writestream%')
+          AND start_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+        UNION ALL
+        SELECT creator_user_name AS user_id, change_time AS completed_at
+        FROM system.lakeflow.jobs
+        WHERE creator_user_name IS NOT NULL AND creator_user_name != ''
+          AND trigger_type = 'CONTINUOUS'
+          AND delete_time IS NULL
+          AND change_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+      )
+      GROUP BY user_id
+    ) AS source
+    ON target.user_id = source.user_id AND target.mission_id = source.mission_id
+    WHEN NOT MATCHED THEN INSERT *
+    """)
+    print("Mission scored: Stream Starter")
+except Exception as e:
+    print(f"Mission skipped: Stream Starter ({e})")
 
 # COMMAND ----------
 
@@ -1330,6 +1528,14 @@ PRODUCT_MISSIONS = [
     ("ml_practitioner", "ML Practitioner", 150, "MODEL_SERVING", 1),
 ]
 
+# These missions exclude *scheduled job* compute (job_id) but NOT dlt_pipeline_id.
+# Reason: serverless SQL warehouse billing rows spuriously carry a dlt_pipeline_id
+# even for ordinary interactive editor/dashboard queries, so the full
+# INTERACTIVE_USAGE predicate (which also excludes dlt_pipeline_id) wrongly zeroed
+# out SQL Analyst. Excluding only job_id is the correct human-vs-automation split
+# for these product-consumption missions (verified: 0 -> 65 SQL Analyst qualifiers).
+PRODUCT_INTERACTIVE = "usage_metadata.job_id IS NULL"
+
 for m_id, m_name, m_pts, product_filter, dbu_threshold in PRODUCT_MISSIONS:
     try:
         spark.sql(f"""
@@ -1347,7 +1553,7 @@ for m_id, m_name, m_pts, product_filter, dbu_threshold in PRODUCT_MISSIONS:
           FROM system.billing.usage
           WHERE identity_metadata.run_as IS NOT NULL AND identity_metadata.run_as != ''
             AND usage_quantity > 0
-            AND {INTERACTIVE_USAGE}
+            AND {PRODUCT_INTERACTIVE}
             AND billing_origin_product = '{product_filter}'
             AND usage_date >= DATE_TRUNC('MONTH', DATE_SUB(CURRENT_DATE(), 60))
           GROUP BY identity_metadata.run_as, DATE_TRUNC('MONTH', usage_date), LAST_DAY(usage_date)
@@ -1567,13 +1773,14 @@ print("Service-principal sweep complete — profile/leaderboard/badges build fro
 # MAGIC ## Retire removed missions from the fact tables
 # MAGIC The job_runner / dlt_operator "consume DBUs" missions were removed (Jobs/DLT
 # MAGIC compute is automated by definition — those rewarded every scheduled run, not a
-# MAGIC person). MERGE never deletes, so completions written by earlier runs would keep
-# MAGIC contributing points. Sweep them BEFORE the profile/leaderboard are built so the
-# MAGIC retired points don't linger in totals.
+# MAGIC person). The dbu_100 / dbu_1k / dbu_10k / dbu_100k "DBU Club" missions were
+# MAGIC also removed in an earlier revision. MERGE never deletes, so completions
+# MAGIC written by earlier runs would keep contributing points. Sweep them all BEFORE
+# MAGIC the profile/leaderboard are built so the retired points don't linger in totals.
 
 # COMMAND ----------
 
-RETIRED_MISSIONS = ("job_runner", "dlt_operator")
+RETIRED_MISSIONS = ("job_runner", "dlt_operator", "dbu_100", "dbu_1k", "dbu_10k", "dbu_100k")
 _retired_in = ", ".join(f"'{m}'" for m in RETIRED_MISSIONS)
 for _t in ["mission_completions", "user_points_fact"]:
     _n = spark.sql(
