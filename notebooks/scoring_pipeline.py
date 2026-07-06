@@ -35,6 +35,28 @@ INTERACTIVE_USAGE = (
     "usage_metadata.job_id IS NULL AND usage_metadata.dlt_pipeline_id IS NULL"
 )
 
+# Products that represent a HUMAN actively driving compute, used for the weekly
+# DBU consumption points. This is an ALLOW-list (not an exclude-list) on purpose:
+# always-on / machine products must not leak into a human adoption leaderboard,
+# and an allow-list means a NEW machine product can't silently start counting.
+#   ALL_PURPOSE  - interactive clusters (notebooks/REPL)
+#   INTERACTIVE  - serverless interactive notebooks/SQL
+#   SQL          - SQL warehouse queries (editor/dashboards)
+#   AI_FUNCTIONS - a person invoking ai_query() etc.
+#   GENIE        - a person asking questions in Genie
+# Deliberately EXCLUDED (machine / always-on, even when job_id is null):
+#   MODEL_SERVING (inference endpoints answer requests 24/7 — this was letting an
+#   endpoint owner top the leaderboard on ~369k DBUs of automated inference),
+#   DATA_QUALITY_MONITORING, AGENT_EVALUATION, FEATURE_STORE, VECTOR_SEARCH,
+#   LAKEBASE, AI_GATEWAY, etc. Deploying a model / serving are still rewarded via
+#   the model_deployer and ml_practitioner missions, just not this raw DBU pool.
+INTERACTIVE_PRODUCTS = ('ALL_PURPOSE', 'INTERACTIVE', 'SQL', 'AI_FUNCTIONS', 'GENIE')
+
+# Safety cap: no single user can bank more than this many DBU-consumption points
+# in one week, so raw compute volume alone can never dominate the human-adoption
+# leaderboard even within the interactive products.
+WEEKLY_CONSUMPTION_POINT_CAP = 500
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -1574,13 +1596,19 @@ for m_id, m_name, m_pts, product_filter, dbu_threshold in PRODUCT_MISSIONS:
 # MAGIC Recomputed from scratch every run (DELETE + INSERT), NOT insert-if-missing.
 # MAGIC These points are a pure rolling aggregate over the last 90 days of billing
 # MAGIC usage, so the current run's filtered logic must be authoritative. An
-# MAGIC insert-only MERGE would leave behind rows scored under older/looser logic
-# MAGIC (e.g. automated-DBU points banked before the INTERACTIVE_USAGE filter
-# MAGIC existed), which would keep inflating the leaderboard forever. Deleting the
-# MAGIC prior consumption rows first guarantees the change actually takes effect on
+# MAGIC insert-only MERGE would leave behind rows scored under older/looser logic,
+# MAGIC which would keep inflating the leaderboard forever. Deleting the prior
+# MAGIC consumption rows first guarantees the change actually takes effect on
 # MAGIC re-score. Mission-completion points are append-only and handled separately.
+# MAGIC
+# MAGIC Only INTERACTIVE_PRODUCTS count (human-driven compute), and each user's
+# MAGIC weekly points are capped at WEEKLY_CONSUMPTION_POINT_CAP so raw compute
+# MAGIC volume — e.g. an always-on model-serving endpoint — can never dominate the
+# MAGIC human adoption leaderboard.
 
 # COMMAND ----------
+
+_prod_in = ", ".join(f"'{p}'" for p in INTERACTIVE_PRODUCTS)
 
 # Clear prior consumption rows so they are rebuilt under the current filter.
 spark.sql(f"""
@@ -1591,23 +1619,33 @@ WHERE event_type = 'consumption' AND mission_id = 'weekly_dbu'
 spark.sql(f"""
 INSERT INTO {tbl('user_points_fact')}
 SELECT
-  identity_metadata.run_as AS user_id,
+  user_id,
   'consumption' AS event_type,
   'weekly_dbu' AS mission_id,
-  CAST(FLOOR(SUM(usage_quantity) / 10) AS INT) AS points,
-  CONCAT('Weekly compute: ', ROUND(SUM(usage_quantity), 1), ' DBUs') AS reason,
-  CAST(MAX(usage_date) AS TIMESTAMP) AS event_timestamp,
+  LEAST(raw_points, {WEEKLY_CONSUMPTION_POINT_CAP}) AS points,
+  CASE WHEN raw_points > {WEEKLY_CONSUMPTION_POINT_CAP}
+       THEN CONCAT('Weekly compute: ', ROUND(dbus, 1), ' DBUs (capped at {WEEKLY_CONSUMPTION_POINT_CAP})')
+       ELSE CONCAT('Weekly compute: ', ROUND(dbus, 1), ' DBUs') END AS reason,
+  event_timestamp,
   CAST('{NOW}' AS TIMESTAMP) AS scored_at
-FROM system.billing.usage
-WHERE identity_metadata.run_as IS NOT NULL AND identity_metadata.run_as != ''
-  AND usage_quantity > 0
-  AND {INTERACTIVE_USAGE}
-  AND usage_date >= DATE_SUB(CURRENT_DATE(), 90)
-GROUP BY identity_metadata.run_as, DATE_TRUNC('WEEK', usage_date)
-HAVING SUM(usage_quantity) >= 10
+FROM (
+  SELECT
+    identity_metadata.run_as AS user_id,
+    SUM(usage_quantity) AS dbus,
+    CAST(FLOOR(SUM(usage_quantity) / 10) AS INT) AS raw_points,
+    CAST(MAX(usage_date) AS TIMESTAMP) AS event_timestamp
+  FROM system.billing.usage
+  WHERE identity_metadata.run_as IS NOT NULL AND identity_metadata.run_as != ''
+    AND usage_quantity > 0
+    AND {INTERACTIVE_USAGE}
+    AND billing_origin_product IN ({_prod_in})
+    AND usage_date >= DATE_SUB(CURRENT_DATE(), 90)
+  GROUP BY identity_metadata.run_as, DATE_TRUNC('WEEK', usage_date)
+  HAVING SUM(usage_quantity) >= 10
+)
 """)
 
-print("Consumption points recomputed (1 pt per 10 DBUs weekly, interactive only)")
+print("Consumption points recomputed (interactive products only, per-week capped)")
 
 # COMMAND ----------
 
