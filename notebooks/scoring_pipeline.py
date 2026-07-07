@@ -72,8 +72,13 @@ CATALOG = dbutils.widgets.get("quest_catalog")
 SCHEMA = dbutils.widgets.get("quest_schema")
 APP_NAME = dbutils.widgets.get("app_name")
 
-# Only look at the past 30 days of system table data for performance
-LOOKBACK_DAYS = 30
+# Lookback window over system-table data. 45 days (up from 30) so that one-time
+# "creation" missions (job_creator, first_steps, etc.) aren't permanently missed
+# when the creating event is a few weeks old at first score — while staying well
+# short of a window that materially lengthens the scans over the 100M+ row
+# query.history / audit tables. One-time missions are idempotent (WHEN NOT
+# MATCHED), so once earned they persist regardless of the window.
+LOOKBACK_DAYS = 45
 
 def tbl(name):
     return f"`{CATALOG}`.`{SCHEMA}`.`{name}`"
@@ -579,9 +584,12 @@ USING (
     -- when the query actually originated from a job run or pipeline update.
     AND query_source.job_info.job_id IS NULL
     AND query_source.pipeline_info.pipeline_id IS NULL
+    AND execution_status = 'FINISHED'
     AND start_time >= DATE_SUB(CURRENT_DATE(), 30)
   GROUP BY executed_by, DATE_TRUNC('WEEK', start_time)
-  HAVING COUNT(*) >= 50
+  -- Tiered with Power Analyst: 50-199 queries = Data Explorer (150 pts);
+  -- 200+ = Power Analyst (200 pts) only. A week never pays both.
+  HAVING COUNT(*) >= 50 AND COUNT(*) < 200
 ) AS source
 ON target.user_id = source.user_id
   AND target.mission_id = source.mission_id
@@ -1149,26 +1157,39 @@ print("Mission scored: Lakebase Connector")
 spark.sql(f"""
 MERGE INTO {tbl('mission_completions')} AS target
 USING (
+  -- Qualify a user if ANY SINGLE job they created has 3+ distinct tasks.
+  -- Count tasks PER JOB first (inner GROUP BY workspace_id, job_id), then keep
+  -- jobs with >=3 tasks, then reduce to one row per creator. The previous
+  -- version grouped by creator only and counted task_keys across ALL their
+  -- jobs, so three separate 1-task jobs wrongly qualified (~28% over-award).
   SELECT
-    j.creator_user_name AS user_id,
+    creator_user_name AS user_id,
     'multi_task_orchestrator' AS mission_id,
     'Multi-Task Orchestrator' AS mission_name,
     200 AS points_awarded,
-    MIN(j.change_time) AS completed_at,
-    CAST(MIN(j.change_time) AS DATE) AS period_start,
-    CAST(MIN(j.change_time) AS DATE) AS period_end,
+    MIN(first_task_time) AS completed_at,
+    CAST(MIN(first_task_time) AS DATE) AS period_start,
+    CAST(MIN(first_task_time) AS DATE) AS period_end,
     CAST('{NOW}' AS TIMESTAMP) AS scored_at
   FROM (
-    SELECT *, ROW_NUMBER() OVER (PARTITION BY workspace_id, job_id ORDER BY change_time DESC) AS rn
-    FROM system.lakeflow.jobs
-    WHERE change_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
-  ) j
-  JOIN system.lakeflow.job_tasks t ON j.job_id = t.job_id AND j.workspace_id = t.workspace_id
-  WHERE j.rn = 1
-    AND j.delete_time IS NULL
-    AND j.creator_user_name IS NOT NULL AND j.creator_user_name != ''
-  GROUP BY j.creator_user_name
-  HAVING COUNT(DISTINCT t.task_key) >= 3
+    SELECT
+      j.creator_user_name,
+      j.job_id,
+      MIN(j.change_time) AS first_task_time,
+      COUNT(DISTINCT t.task_key) AS task_count
+    FROM (
+      SELECT *, ROW_NUMBER() OVER (PARTITION BY workspace_id, job_id ORDER BY change_time DESC) AS rn
+      FROM system.lakeflow.jobs
+      WHERE change_time >= DATE_SUB(CURRENT_DATE(), {LOOKBACK_DAYS})
+    ) j
+    JOIN system.lakeflow.job_tasks t ON j.job_id = t.job_id AND j.workspace_id = t.workspace_id
+    WHERE j.rn = 1
+      AND j.delete_time IS NULL
+      AND j.creator_user_name IS NOT NULL AND j.creator_user_name != ''
+    GROUP BY j.creator_user_name, j.job_id
+    HAVING COUNT(DISTINCT t.task_key) >= 3
+  )
+  GROUP BY creator_user_name
 ) AS source
 ON target.user_id = source.user_id AND target.mission_id = source.mission_id
 WHEN NOT MATCHED THEN INSERT *
@@ -1205,6 +1226,7 @@ USING (
     -- when the query actually originated from a job run or pipeline update.
     AND query_source.job_info.job_id IS NULL
     AND query_source.pipeline_info.pipeline_id IS NULL
+    AND execution_status = 'FINISHED'
     AND start_time >= DATE_SUB(CURRENT_DATE(), 30)
   GROUP BY executed_by, DATE_TRUNC('WEEK', start_time)
   HAVING COUNT(*) >= 200
@@ -1545,9 +1567,15 @@ except Exception as e:
 # rewarded "each time the workload runs" — exactly what we don't want. Setting
 # up those workloads is already a one-time award (Job Creator, Pipeline
 # Builder), which is where the "reward first-time setup" credit belongs.
+# tuple: (id, name, points, product, dbu_threshold, require_interactive_month)
+# require_interactive_month=True means the user must ALSO have genuine interactive
+# activity (INTERACTIVE_PRODUCTS) in the SAME month — this stops an always-on
+# Model Serving endpoint from earning ml_practitioner every month while its owner
+# does nothing. SQL Analyst is already interactive SQL usage, so it doesn't need
+# the extra gate.
 PRODUCT_MISSIONS = [
-    ("sql_analyst", "SQL Analyst", 100, "SQL", 50),
-    ("ml_practitioner", "ML Practitioner", 150, "MODEL_SERVING", 1),
+    ("sql_analyst", "SQL Analyst", 100, "SQL", 50, False),
+    ("ml_practitioner", "ML Practitioner", 150, "MODEL_SERVING", 1, True),
 ]
 
 # These missions exclude *scheduled job* compute (job_id) but NOT dlt_pipeline_id.
@@ -1557,9 +1585,21 @@ PRODUCT_MISSIONS = [
 # out SQL Analyst. Excluding only job_id is the correct human-vs-automation split
 # for these product-consumption missions (verified: 0 -> 65 SQL Analyst qualifiers).
 PRODUCT_INTERACTIVE = "usage_metadata.job_id IS NULL"
+_prod_allow = ", ".join(f"'{p}'" for p in INTERACTIVE_PRODUCTS)
 
-for m_id, m_name, m_pts, product_filter, dbu_threshold in PRODUCT_MISSIONS:
+for m_id, m_name, m_pts, product_filter, dbu_threshold, require_interactive in PRODUCT_MISSIONS:
     try:
+        interactive_gate = ""
+        if require_interactive:
+            interactive_gate = f"""
+            AND EXISTS (
+              SELECT 1 FROM system.billing.usage i
+              WHERE i.identity_metadata.run_as = u.identity_metadata.run_as
+                AND i.usage_quantity > 0
+                AND i.usage_metadata.job_id IS NULL AND i.usage_metadata.dlt_pipeline_id IS NULL
+                AND i.billing_origin_product IN ({_prod_allow})
+                AND DATE_TRUNC('MONTH', i.usage_date) = DATE_TRUNC('MONTH', u.usage_date)
+            )"""
         spark.sql(f"""
         MERGE INTO {tbl('mission_completions')} AS target
         USING (
@@ -1572,12 +1612,13 @@ for m_id, m_name, m_pts, product_filter, dbu_threshold in PRODUCT_MISSIONS:
             DATE_TRUNC('MONTH', usage_date) AS period_start,
             LAST_DAY(usage_date) AS period_end,
             CAST('{NOW}' AS TIMESTAMP) AS scored_at
-          FROM system.billing.usage
+          FROM system.billing.usage u
           WHERE identity_metadata.run_as IS NOT NULL AND identity_metadata.run_as != ''
             AND usage_quantity > 0
             AND {PRODUCT_INTERACTIVE}
             AND billing_origin_product = '{product_filter}'
             AND usage_date >= DATE_TRUNC('MONTH', DATE_SUB(CURRENT_DATE(), 60))
+            {interactive_gate}
           GROUP BY identity_metadata.run_as, DATE_TRUNC('MONTH', usage_date), LAST_DAY(usage_date)
           HAVING SUM(usage_quantity) >= {dbu_threshold}
         ) AS source
@@ -1772,13 +1813,27 @@ streak_lengths AS (
     MAX(activity_date) AS streak_end
   FROM streak_groups
   GROUP BY user_id, streak_group
+),
+-- One row per user: the all-time longest streak (max_streak) and the length of
+-- the MOST RECENT streak. current_streak only counts if that most-recent streak
+-- is still live (ended yesterday or today) — otherwise the streak has lapsed and
+-- resets to 0. The previous version returned the most-recent streak length
+-- regardless of recency, so lapsed streaks never reset (~1,500 stale rows).
+ranked AS (
+  SELECT
+    user_id,
+    streak_days,
+    streak_end,
+    MAX(streak_days) OVER (PARTITION BY user_id) AS max_streak,
+    ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY streak_end DESC) AS rn
+  FROM streak_lengths
 )
 SELECT
   user_id,
-  MAX(streak_days) AS max_streak,
-  FIRST_VALUE(streak_days) OVER (PARTITION BY user_id ORDER BY streak_end DESC) AS current_streak
-FROM streak_lengths
-GROUP BY user_id, streak_days, streak_end
+  max_streak,
+  CASE WHEN streak_end >= DATE_SUB(CURRENT_DATE(), 1) THEN streak_days ELSE 0 END AS current_streak
+FROM ranked
+WHERE rn = 1
 """)
 
 streaks_df.createOrReplaceTempView("user_streaks")
@@ -1828,6 +1883,55 @@ for _t in ["mission_completions", "user_points_fact"]:
         spark.sql(f"DELETE FROM {tbl(_t)} WHERE mission_id IN ({_retired_in})")
         print(f"  {_t}: removed {_n} rows for retired missions ({', '.join(RETIRED_MISSIONS)})")
 print("Retired-mission sweep complete.")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Enforce Data Explorer / Power Analyst tiering
+# MAGIC data_explorer (50-199 queries) and power_analyst (200+) are scored by
+# MAGIC separate MERGEs that each read system.query.history at slightly different
+# MAGIC times. A user hovering near 200 can be under the threshold when
+# MAGIC data_explorer runs and over it when power_analyst runs, so both fire for the
+# MAGIC same week. Power Analyst is the higher tier and supersedes Data Explorer:
+# MAGIC delete any data_explorer completion that shares a user+period with a
+# MAGIC power_analyst completion, so a week never pays both.
+
+# COMMAND ----------
+
+_de_dupe = spark.sql(f"""
+  SELECT COUNT(*) AS c FROM {tbl('mission_completions')} de
+  WHERE de.mission_id = 'data_explorer'
+    AND EXISTS (
+      SELECT 1 FROM {tbl('mission_completions')} pa
+      WHERE pa.mission_id = 'power_analyst'
+        AND pa.user_id = de.user_id AND pa.period_start = de.period_start
+    )
+""").first()["c"]
+if _de_dupe:
+    spark.sql(f"""
+      DELETE FROM {tbl('mission_completions')}
+      WHERE mission_id = 'data_explorer'
+        AND EXISTS (
+          SELECT 1 FROM {tbl('mission_completions')} pa
+          WHERE pa.mission_id = 'power_analyst'
+            AND pa.user_id = {tbl('mission_completions')}.user_id
+            AND pa.period_start = {tbl('mission_completions')}.period_start
+        )
+    """)
+    spark.sql(f"""
+      DELETE FROM {tbl('user_points_fact')}
+      WHERE mission_id = 'data_explorer'
+        AND event_type = 'mission_completion'
+        AND EXISTS (
+          SELECT 1 FROM {tbl('mission_completions')} pa
+          WHERE pa.mission_id = 'power_analyst'
+            AND pa.user_id = {tbl('user_points_fact')}.user_id
+            AND pa.period_start = DATE_TRUNC('WEEK', {tbl('user_points_fact')}.event_timestamp)
+        )
+    """)
+    print(f"Tiering sweep: removed {_de_dupe} data_explorer rows superseded by power_analyst.")
+else:
+    print("Tiering sweep: no data_explorer/power_analyst overlaps.")
 
 # COMMAND ----------
 
@@ -2067,6 +2171,65 @@ ON target.user_id = source.user_id AND target.badge_id = source.badge_id
 WHEN NOT MATCHED THEN INSERT *
 """)
 
+# Badge: AI Pioneer - completed 3+ of the AI/ML missions
+# (matches BADGE_DEFINITIONS.ai_pioneer in app/main.py: required_missions=3,
+# mission_filter = model_deployer / ai_function_builder / vector_search_pioneer /
+# mlflow_experimenter). Previously defined in the UI but never awarded.
+spark.sql(f"""
+MERGE INTO {tbl('badges')} AS target
+USING (
+  SELECT
+    user_id,
+    'ai_pioneer' AS badge_id,
+    'AI Pioneer' AS badge_name,
+    'brain' AS badge_icon,
+    CAST('{NOW}' AS TIMESTAMP) AS earned_at
+  FROM {tbl('mission_completions')}
+  WHERE mission_id IN ('model_deployer', 'ai_function_builder', 'vector_search_pioneer', 'mlflow_experimenter')
+  GROUP BY user_id
+  HAVING COUNT(DISTINCT mission_id) >= 3
+) AS source
+ON target.user_id = source.user_id AND target.badge_id = source.badge_id
+WHEN NOT MATCHED THEN INSERT *
+""")
+
+# Badge: Full Stack - completed missions spanning 5+ distinct categories
+# (matches BADGE_DEFINITIONS.full_stack: required_categories=5). Category is
+# derived from mission_id here since mission_completions has no category column;
+# the mapping mirrors MISSION_DEFINITIONS in app/main.py. Previously defined in
+# the UI but never awarded.
+spark.sql(f"""
+MERGE INTO {tbl('badges')} AS target
+USING (
+  SELECT
+    user_id,
+    'full_stack' AS badge_id,
+    'Full Stack' AS badge_name,
+    'layers' AS badge_icon,
+    CAST('{NOW}' AS TIMESTAMP) AS earned_at
+  FROM (
+    SELECT
+      user_id,
+      CASE
+        WHEN mission_id = 'first_steps' THEN 'Getting Started'
+        WHEN mission_id IN ('job_creator','pipeline_builder','pipeline_runner','scheduler','auto_loader_pioneer','multi_task_orchestrator','liquid_clustering') THEN 'Data Engineering'
+        WHEN mission_id IN ('genie_creator','genie_explorer','genie_curator','genie_power_user','dashboard_designer','dashboard_viewer','dashboard_publisher','dashboard_operator','data_explorer','power_analyst','query_author','alert_creator','app_builder','notebook_author','sql_analyst') THEN 'Analytics'
+        WHEN mission_id IN ('genie_code_user','model_deployer','ai_function_builder','vector_search_pioneer','mlflow_experimenter','ml_practitioner') THEN 'AI / ML'
+        WHEN mission_id IN ('lakebase_builder','lakebase_sync','lakebase_database','lakebase_connector') THEN 'Lakebase'
+        WHEN mission_id = 'stream_starter' THEN 'Streaming'
+        WHEN mission_id IN ('consistent_operator','daily_driver','cross_product_champion') THEN 'Engagement'
+        WHEN mission_id = 'uc_publisher' THEN 'Governance'
+        ELSE 'Other'
+      END AS category
+    FROM {tbl('mission_completions')}
+  )
+  GROUP BY user_id
+  HAVING COUNT(DISTINCT category) >= 5
+) AS source
+ON target.user_id = source.user_id AND target.badge_id = source.badge_id
+WHEN NOT MATCHED THEN INSERT *
+""")
+
 print("Badges awarded.")
 
 # COMMAND ----------
@@ -2075,6 +2238,15 @@ print("Badges awarded.")
 # MAGIC ## Step 9: Generate Notifications for New Awards
 
 # COMMAND ----------
+
+# One notification per (user, mission, period) — NOT per run. Repeatable missions
+# are deleted + re-inserted every run with a fresh scored_at, so the previous
+# logic (created_at=NOW in the dedup key) produced a brand-new notification every
+# 4 hours. Two changes fix it: (1) rebuild the table each run so already-
+# accumulated duplicates are cleared, and (2) key each notification on the stable
+# period identity (created_at = the completion's period_start, a DATE) so a
+# mission already announced for a given week/month is never re-announced.
+spark.sql(f"DELETE FROM {tbl('notifications')}")
 
 spark.sql(f"""
 MERGE INTO {tbl('notifications')} AS target
@@ -2086,9 +2258,8 @@ USING (
     CONCAT('You earned ', points_awarded, ' points for completing ', mission_name, '!') AS message,
     mission_id,
     points_awarded AS points,
-    scored_at AS created_at
+    CAST(period_start AS TIMESTAMP) AS created_at
   FROM {tbl('mission_completions')}
-  WHERE scored_at = CAST('{NOW}' AS TIMESTAMP)
 ) AS source
 ON target.user_id = source.user_id
   AND target.mission_id = source.mission_id
@@ -2110,7 +2281,6 @@ USING (
     0 AS points,
     earned_at AS created_at
   FROM {tbl('badges')}
-  WHERE earned_at = CAST('{NOW}' AS TIMESTAMP)
 ) AS source
 ON target.user_id = source.user_id
   AND target.mission_id = source.mission_id

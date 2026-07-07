@@ -1082,6 +1082,11 @@ print('OK')
   fi
 
   info "Deploying bundle (app + scoring job + notebook)..."
+  # The DAB Terraform provider authenticates from the environment, NOT from the
+  # CLI's --profile flag. With multiple ~/.databrickscfg profiles it otherwise
+  # reads the DEFAULT profile and fails with "workspace_id mismatch". Pin the
+  # provider to the same profile the rest of deploy.sh uses.
+  if [ -n "$PROFILE_NAME" ]; then export DATABRICKS_CONFIG_PROFILE="$PROFILE_NAME"; fi
   set +e
   $CLI bundle deploy --target "$TARGET" $PROFILE_FLAG \
     --var "warehouse_id=$WAREHOUSE_ID" \

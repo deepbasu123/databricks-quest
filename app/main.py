@@ -177,7 +177,7 @@ MISSION_DEFINITIONS = [
     {"id": "model_deployer", "name": "Model Deployer", "description": "Deploy a model to a serving endpoint", "points": 300, "category": "AI / ML", "award_type": "one_time", "icon": "cpu", "doc_url": f"{_DOCS}/machine-learning/model-serving/"},
     {"id": "ai_function_builder", "name": "AI Function Builder", "description": "Use ai_query() in a SQL statement", "points": 250, "category": "AI / ML", "award_type": "one_time", "icon": "sparkles", "doc_url": f"{_DOCS}/large-language-models/ai-query/"},
     {"id": "vector_search_pioneer", "name": "Vector Search Pioneer", "description": "Create a Vector Search index", "points": 200, "category": "AI / ML", "award_type": "one_time", "icon": "search", "doc_url": f"{_DOCS}/generative-ai/vector-search/"},
-    {"id": "mlflow_experimenter", "name": "MLflow Experimenter", "description": "Log 10+ MLflow experiment runs", "points": 150, "category": "AI / ML", "award_type": "one_time", "icon": "flask-conical", "doc_url": f"{_DOCS}/mlflow/tracking/"},
+    {"id": "mlflow_experimenter", "name": "MLflow Experimenter", "description": "Log 10+ MLflow models/runs to an experiment", "points": 150, "category": "AI / ML", "award_type": "one_time", "icon": "flask-conical", "doc_url": f"{_DOCS}/mlflow/tracking/"},
     # --- Streaming ---
     {"id": "stream_starter", "name": "Stream Starter", "description": "Run a Structured Streaming job", "points": 250, "category": "Streaming", "award_type": "one_time", "icon": "radio", "doc_url": f"{_DOCS}/structured-streaming/"},
     # --- Product-specific consumption (repeatable, monthly) — filed under the product's own category ---
@@ -315,12 +315,19 @@ def admin_emails() -> set:
 def is_admin_user(user: str) -> bool:
     """True if the user may see the Admin page.
 
-    Open only when no admin is configured anywhere (no env allowlist and an
-    empty/unreachable DB table) — preserving local-dev/legacy parity.
+    When admins are configured (env allowlist ∪ DB table), only they qualify.
+    When NOTHING is configured we fail CLOSED in a deployed app (a running
+    Databricks App sets DATABRICKS_CLIENT_ID) so an empty/unreachable admin table
+    can't silently open the Admin page to everyone. Locally (no SP env) we stay
+    open for dev/legacy parity.
     """
     effective = admin_emails()
     if not effective:
-        return True
+        running_as_app = bool(os.getenv("DATABRICKS_CLIENT_ID", "").strip())
+        if running_as_app:
+            logger.warning("No admin configured in a deployed app; denying Admin access (fail-closed).")
+            return False
+        return True  # local dev / no service principal
     return (user or "").lower() in effective
 
 
@@ -610,28 +617,46 @@ async def get_missions(request: Request):
 
 
 @app.get("/api/leaderboard")
-async def get_leaderboard(period: str = "all"):
+async def get_leaderboard(request: Request, period: str = "all", limit: int = 50):
+    # Return the top `limit` rows PLUS the caller's own row (as `me`) even when
+    # they rank outside the top N — otherwise ~99% of users never see their rank.
+    valid_periods = {"weekly": "weekly_rank", "monthly": "monthly_rank", "all": "all_time_rank"}
+    order_col = valid_periods.get(period, "all_time_rank")
     try:
-        if period == "weekly":
-            order_col = "weekly_rank"
-        elif period == "monthly":
-            order_col = "monthly_rank"
-        else:
-            order_col = "all_time_rank"
-
+        limit = max(1, min(int(limit), 500))
+    except (TypeError, ValueError):
+        limit = 50
+    try:
         rows = execute_query(
             f"""
             SELECT user_id, display_name, total_points, weekly_points, monthly_points,
                    level, all_time_rank, weekly_rank, monthly_rank
             FROM leaderboard
             ORDER BY {order_col} ASC
-            LIMIT 10
+            LIMIT {limit}
             """
         )
-        return {"leaderboard": rows, "period": period}
+        me = None
+        try:
+            user = get_user_email(request)
+            if user:
+                in_top = any((r.get("user_id") or "").lower() == user.lower() for r in rows)
+                if not in_top:
+                    my_rows = execute_query(
+                        """
+                        SELECT user_id, display_name, total_points, weekly_points, monthly_points,
+                               level, all_time_rank, weekly_rank, monthly_rank
+                        FROM leaderboard WHERE lower(user_id) = lower(%s) LIMIT 1
+                        """,
+                        (user,),
+                    )
+                    me = my_rows[0] if my_rows else None
+        except Exception as me_err:
+            logger.warning(f"Leaderboard self-row lookup failed: {me_err}")
+        return {"leaderboard": rows, "period": period, "me": me}
     except Exception as e:
         logger.warning(f"Leaderboard error: {e}")
-        return {"leaderboard": [], "period": period}
+        return {"leaderboard": [], "period": period, "me": None}
 
 
 @app.get("/api/notifications")

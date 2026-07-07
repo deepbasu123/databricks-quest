@@ -47,6 +47,11 @@ resources:
     quest_scoring_pipeline:
       name: "[Quest] Scoring Pipeline (${bundle.name})"
       description: "Reads system tables, computes missions, points, badges, and leaderboards."
+      # The scoring notebook does whole-table DELETE + re-INSERT recomputes. Two
+      # runs at once (e.g. a manual/deploy run overlapping the 4-hour cron) hit a
+      # Delta ConcurrentDeleteReadException. Pin to 1 so overlapping runs queue
+      # instead of colliding. Without this, DAB dev mode defaults to >1.
+      max_concurrent_runs: 1
       schedule:
         quartz_cron_expression: "0 0 */4 * * ?"
         timezone_id: UTC
