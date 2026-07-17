@@ -81,6 +81,49 @@ conn = psycopg2.connect(
 )
 conn.autocommit = False
 
+# --- Round-trip: pull self-attested course ticks Lakebase -> Delta BEFORE the push.
+# The app writes tick-box completions to the Lakebase `training_attestations` table
+# (durable; never truncated). Here we MERGE any new ticks into the Delta
+# `training_completions` feed as `self_attested` rows so the NEXT scoring run
+# reconciles them into points. Idempotent on (user_id, course_id). Best-effort: a
+# failure here must not abort the Delta->Lakebase push below.
+try:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT user_id, course_id, course_mission_id, attested_at "
+            "FROM training_attestations WHERE user_id IS NOT NULL AND course_id IS NOT NULL"
+        )
+        attest_rows = cur.fetchall()
+    conn.rollback()  # read-only; release the txn snapshot
+    if attest_rows:
+        feed_tbl = f"`{CATALOG}`.`{SCHEMA}`.`training_completions`"
+        spark.sql(f"""
+        CREATE TABLE IF NOT EXISTS {feed_tbl} (
+          user_id STRING, course_id STRING, course_name STRING,
+          course_type STRING, completed_at TIMESTAMP
+        ) USING DELTA
+        """)
+        from pyspark.sql import Row
+        src = spark.createDataFrame([
+            Row(user_id=r[0], course_id=str(r[1]), course_name=r[2],
+                course_type="self_attested", completed_at=r[3])
+            for r in attest_rows
+        ])
+        src.createOrReplaceTempView("_attest_src")
+        spark.sql(f"""
+        MERGE INTO {feed_tbl} AS t
+        USING _attest_src AS s
+        ON t.user_id = s.user_id AND t.course_id = s.course_id AND t.course_type = 'self_attested'
+        WHEN NOT MATCHED THEN INSERT (user_id, course_id, course_name, course_type, completed_at)
+          VALUES (s.user_id, s.course_id, s.course_name, s.course_type, s.completed_at)
+        """)
+        print(f"Attestation round-trip: merged {len(attest_rows)} tick(s) into Delta training_completions.")
+    else:
+        print("Attestation round-trip: no ticks to sync.")
+except Exception as _exc:  # never block the main sync on the round-trip
+    conn.rollback()
+    print(f"Attestation round-trip skipped: {str(_exc)[:120]}")
+
 synced, skipped = 0, []
 try:
     for table, cols in TABLES:
