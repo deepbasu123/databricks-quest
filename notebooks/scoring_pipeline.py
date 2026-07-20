@@ -1917,8 +1917,14 @@ USING (
     SELECT
       user_id,
       COUNT(*) AS distinct_courses,
-      -- the completion date of the Nth (threshold-th) distinct course
-      SORT_ARRAY(COLLECT_LIST(first_completed_at))[{LEARNER_THRESHOLD - 1}] AS nth_completion
+      -- the completion date of the Nth (threshold-th) distinct course. Use
+      -- try_element_at (1-indexed) NOT the [] subscript: Spark evaluates this
+      -- projection for EVERY group before HAVING prunes, so a user with a single
+      -- Get Started course yields a 1-element array and a fixed [LEARNER_THRESHOLD-1]
+      -- subscript throws INVALID_ARRAY_INDEX, failing the whole scoring run.
+      -- try_element_at returns NULL out-of-range; the HAVING below then drops those
+      -- sub-threshold users, so qualifying rows always have a non-NULL nth_completion.
+      try_element_at(SORT_ARRAY(COLLECT_LIST(first_completed_at)), {LEARNER_THRESHOLD}) AS nth_completion
     FROM (
       SELECT
         user_id,

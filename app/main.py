@@ -686,6 +686,19 @@ async def attest_training(payload: AttestPayload, request: Request):
     course_id = _course_id_for(mission)
     display_name = user.split("@")[0] if "@" in user else user
 
+    # The Databricks Learner bonus is DERIVED (awarded automatically at >= 2 completed
+    # courses), not a course a user can tick. It has no Academy course id, so a direct
+    # attest would write it into training_attestations with course_id='' — which never
+    # matches any course in scoring, so its points would be wiped on the next sync and
+    # never re-derived. Reject direct attest of the bonus (or any training mission
+    # missing a course id) so it can only ever be earned through the derived path.
+    if mission_id == "databricks_learner" or not course_id:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "NOT_ATTESTABLE",
+                              "message": "This reward is earned automatically, not self-reported."}},
+        )
+
     try:
         already = execute_query(
             "SELECT 1 AS ok FROM mission_completions WHERE user_id = %s AND mission_id = %s",
@@ -695,18 +708,25 @@ async def attest_training(payload: AttestPayload, request: Request):
 
         with db.transaction() as cur:
             # 1) durable record → training_attestations (Lakebase). This table is
-            #    NEVER truncated by the scoring rebuild; lakebase_sync.py rolls it
-            #    into Delta training_completions each cycle so scoring reconciles it.
-            #    Idempotent on (user_id, course_mission_id).
+            #    NEVER truncated by the scoring rebuild; the roundtrip_attestations
+            #    job task rolls it into Delta training_completions each cycle so
+            #    scoring reconciles it. Idempotent on (user_id, course_mission_id).
             cur.execute(
                 "INSERT INTO training_attestations (user_id, course_mission_id, course_id, attested_at) "
                 "VALUES (%s, %s, %s, now()) "
                 "ON CONFLICT (user_id, course_mission_id) DO NOTHING",
                 (user, mission_id, course_id),
             )
+            # rowcount == 0 means this course was already attested by this user on a
+            # prior call. training_attestations is never truncated, so this is the
+            # DURABLE idempotency signal: gate the instant award on it so a re-tick
+            # can't double-credit points even if the scoring rebuild has transiently
+            # cleared the (unconstrained) mission_completions serving row.
+            newly_attested = cur.rowcount == 1
 
-            # 2) instant serving award — only if not already completed (one-time)
-            if not already:
+            # 2) instant serving award — only for a genuinely new tick that isn't
+            #    already completed (one-time).
+            if newly_attested and not already:
                 _award_mission_tx(cur, user, mission_id, mission_name, points)
                 newly_awarded.append((mission_id, mission_name, points))
 

@@ -250,6 +250,72 @@ def test_scoring_filter_accepts_both_types():
     assert "course_type IN ('classroom', 'self_attested')" in src, "scoring filter must accept self_attested"
 
 
+# --- regression guards for the "points don't persist" bug fixes ------------- #
+# These are SOURCE-LEVEL assertions on purpose. The pure-Python `score()` model
+# above mirrors the INTENDED logic and can't reproduce Spark's evaluation order
+# (Spark evaluates the SELECT projection for every group BEFORE HAVING prunes it),
+# which is exactly why the crash slipped past the behavioural tests. So we assert
+# the fixed source shape directly.
+
+def test_learner_bonus_uses_try_element_at_not_bare_subscript():
+    """Bug 1: the Learner-bonus nth-completion pick must use try_element_at (returns
+    NULL out-of-range), NOT a bare `[...]` array subscript. Spark evaluates this
+    projection for EVERY group before HAVING drops sub-threshold users, so a user
+    with a single course yields a 1-element array and a bare `[threshold-1]` subscript
+    throws INVALID_ARRAY_INDEX and fails the whole scoring run."""
+    src = open(SCORING_PY).read()
+    assert "try_element_at(SORT_ARRAY(COLLECT_LIST(first_completed_at))" in src, \
+        "Learner bonus must use try_element_at for the nth-completion pick"
+    assert "SORT_ARRAY(COLLECT_LIST(first_completed_at))[" not in src, \
+        "bare [] subscript on SORT_ARRAY(COLLECT_LIST(...)) crashes on <threshold groups"
+
+
+def test_attest_rejects_derived_learner_bonus():
+    """Bug 3: the attest endpoint must reject a direct attest of databricks_learner
+    (and any training mission with no course id). Attesting it would write course_id=''
+    which never reconciles in scoring, so its points would be wiped and never re-derived."""
+    src = open(MAIN_PY).read()
+    assert 'mission_id == "databricks_learner" or not course_id' in src, \
+        "attest must reject the derived Learner bonus / course-less training missions"
+    assert "NOT_ATTESTABLE" in src, "expected a NOT_ATTESTABLE guard in the attest endpoint"
+
+
+def test_attest_gates_award_on_durable_attestation_rowcount():
+    """Bug 4: the instant award must be gated on the durable training_attestations
+    insert actually inserting a row (rowcount == 1), so a re-tick can't double-credit
+    points even if the scoring rebuild transiently cleared the unconstrained
+    mission_completions serving row."""
+    src = open(MAIN_PY).read()
+    assert "newly_attested = cur.rowcount == 1" in src, \
+        "attest must derive a durable 'newly attested' signal from the INSERT rowcount"
+    assert "if newly_attested and not already:" in src, \
+        "the instant award must be gated on newly_attested (durable idempotency)"
+
+
+def test_roundtrip_runs_before_scoring_not_after():
+    """Bug 2: the Lakebase->Delta attestation round-trip must run as its own task
+    BEFORE run_scoring (so a tick reconciles the same cycle), and must NOT still live
+    inside lakebase_sync.py (which runs AFTER scoring and would wipe the instant rows)."""
+    roundtrip_nb = os.path.join(REPO, "notebooks", "roundtrip_attestations.py")
+    assert os.path.exists(roundtrip_nb), "roundtrip_attestations.py notebook must exist"
+    rt = open(roundtrip_nb).read()
+    assert "MERGE INTO" in rt and "training_completions" in rt, \
+        "round-trip notebook must MERGE ticks into the Delta training_completions feed"
+
+    sync = open(os.path.join(REPO, "notebooks", "lakebase_sync.py")).read()
+    assert "FROM training_attestations" not in sync, \
+        "the round-trip must be removed from lakebase_sync.py (it runs after scoring there)"
+
+    dab = open(os.path.join(REPO, "databricks.yml")).read()
+    assert "roundtrip_attestations" in dab, "databricks.yml must define the roundtrip_attestations task"
+    # run_scoring must depend on the round-trip task.
+    run_scoring_idx = dab.find("task_key: run_scoring")
+    assert run_scoring_idx != -1
+    # the depends_on block immediately after run_scoring must reference the round-trip
+    window = dab[run_scoring_idx:run_scoring_idx + 200]
+    assert "roundtrip_attestations" in window, "run_scoring must depend_on roundtrip_attestations"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     passed = 0
