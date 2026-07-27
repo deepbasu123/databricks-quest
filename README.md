@@ -52,6 +52,9 @@ Full instructions: **[SETUP.md](SETUP.md)** -- covers three deployment methods:
 | **Scripted** (`./deploy.sh`) | Most users | ~15 min |
 | **Manual** (step-by-step) | Full control, restricted environments | ~30 min |
 | **Quick** (`./deploy.sh --quick`) | Fast testing without DAB | ~10 min |
+| **Docker** (`docker run`) | No local tools needed | ~15 min |
+
+Docker deploy: no CLI, Node, or psql to install locally. See **[docs/DOCKER_DEPLOY.md](docs/DOCKER_DEPLOY.md)** for the full guide.
 
 Quick start:
 
